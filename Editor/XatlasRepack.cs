@@ -237,6 +237,170 @@ namespace LightmapUvTool
         }
 
         // ─────────────────────────────────────────────────────────────────
+        // Repack multiple meshes into a single shared atlas.
+        // All meshes are added to one xatlas session so their UV2 islands
+        // are packed together without overlapping.
+        // ─────────────────────────────────────────────────────────────────
+        public static RepackResult[] RepackMulti(Mesh[] meshes, RepackOptions opts)
+        {
+            int meshCount = meshes.Length;
+            var results = new RepackResult[meshCount];
+
+            // ── Per-mesh pre-processing data ──
+            var allUv0        = new Vector2[meshCount][];
+            var allTris       = new int[meshCount][];
+            var allShells     = new List<UvShell>[meshCount];
+            var allOverlap    = new List<List<int>>[meshCount];
+            var allFaceShells = new uint[meshCount][];
+
+            // Validate all meshes up-front
+            for (int m = 0; m < meshCount; m++)
+            {
+                var mesh = meshes[m];
+                allUv0[m] = mesh.uv;
+                if (allUv0[m] == null || allUv0[m].Length == 0)
+                {
+                    results[m].error = "Mesh has no UV0";
+                    return results;
+                }
+                allTris[m] = mesh.triangles;
+                List<UvShell> shells;
+                List<List<int>> overlapGroups;
+                allFaceShells[m] = UvShellExtractor.BuildPerFaceShellIds(
+                    allUv0[m], allTris[m], out shells, out overlapGroups);
+                allShells[m]  = shells;
+                allOverlap[m] = overlapGroups;
+
+                results[m].shellCount        = shells.Count;
+                results[m].overlapGroupCount  = overlapGroups.Count;
+
+                int vertCount = mesh.vertexCount;
+                int faceCount = allTris[m].Length / 3;
+                Debug.Log($"[xatlas] Input[{m}]: '{mesh.name}', verts={vertCount}, faces={faceCount}, " +
+                          $"shells={shells.Count}, overlap_groups={overlapGroups.Count}");
+            }
+
+            // ── Single xatlas session for all meshes ──
+            XatlasNative.xatlasCreate();
+            try
+            {
+                // Add all meshes
+                for (int m = 0; m < meshCount; m++)
+                {
+                    var mesh = meshes[m];
+                    int vertCount = mesh.vertexCount;
+                    int faceCount = allTris[m].Length / 3;
+
+                    float[] uvFlat = new float[vertCount * 2];
+                    for (int i = 0; i < vertCount; i++)
+                    {
+                        uvFlat[i * 2]     = allUv0[m][i].x;
+                        uvFlat[i * 2 + 1] = allUv0[m][i].y;
+                    }
+
+                    uint[] indices = new uint[allTris[m].Length];
+                    for (int i = 0; i < allTris[m].Length; i++)
+                        indices[i] = (uint)allTris[m][i];
+
+                    int addErr = XatlasNative.xatlasAddUvMesh(
+                        uvFlat, (uint)vertCount,
+                        indices, (uint)indices.Length,
+                        allFaceShells[m], (uint)faceCount);
+
+                    if (addErr != 0)
+                    {
+                        results[m].error = $"xatlasAddUvMesh error {addErr}";
+                        return results;
+                    }
+                }
+
+                // Pack all charts together into one atlas
+                XatlasNative.xatlasComputeCharts();
+                XatlasNative.xatlasPackCharts(
+                    0, opts.padding, opts.texelsPerUnit, opts.resolution,
+                    opts.bilinear  ? 1 : 0,
+                    opts.blockAlign ? 1 : 0,
+                    opts.bruteForce ? 1 : 0);
+
+                int outMeshCount = XatlasNative.xatlasGetMeshCount();
+                if (outMeshCount == 0)
+                {
+                    for (int m = 0; m < meshCount; m++)
+                        results[m].error = "xatlas returned 0 meshes";
+                    return results;
+                }
+
+                uint atlasW = XatlasNative.xatlasGetAtlasWidth();
+                uint atlasH = XatlasNative.xatlasGetAtlasHeight();
+                uint totalCharts = XatlasNative.xatlasGetChartCount();
+
+                Debug.Log($"[xatlas] Joint atlas: {atlasW}x{atlasH}, total_charts={totalCharts}, meshes={outMeshCount}");
+
+                // ── Per-mesh output extraction ──
+                for (int m = 0; m < meshCount; m++)
+                {
+                    var mesh = meshes[m];
+                    int vertCount = mesh.vertexCount;
+                    int faceCount = allTris[m].Length / 3;
+
+                    results[m].atlasWidth  = atlasW;
+                    results[m].atlasHeight = atlasH;
+
+                    int outVertCount  = XatlasNative.xatlasGetOutputVertexCount(m);
+                    int outIndexCount = XatlasNative.xatlasGetOutputIndexCount(m);
+
+                    if (outVertCount == 0 || outIndexCount == 0)
+                    {
+                        results[m].error = $"xatlas output empty for mesh {m}: verts={outVertCount}, idx={outIndexCount}";
+                        continue;
+                    }
+
+                    uint[]  outXref  = new uint[outVertCount];
+                    float[] outUV    = new float[outVertCount * 2];
+                    uint[]  outChart = new uint[outVertCount];
+                    uint[]  outIdx   = new uint[outIndexCount];
+
+                    XatlasNative.xatlasGetOutputVertexData(m, outXref, outUV, outChart, outVertCount);
+                    XatlasNative.xatlasGetOutputIndices(m, outIdx, outIndexCount);
+
+                    results[m].chartCount = (uint)outVertCount; // per-mesh chart count approximation
+
+                    Debug.Log($"[xatlas] Output[{m}]: '{mesh.name}', verts={outVertCount}, idx={outIndexCount}");
+
+                    // Assign UV2
+                    Vector2[] uv2;
+                    uint[] vertChartId;
+                    int conflicts;
+                    AssignUv2(vertCount, faceCount, allTris[m],
+                              outVertCount, outXref, outUV, outChart,
+                              outIndexCount, outIdx,
+                              out uv2, out vertChartId, out conflicts);
+                    results[m].conflictVertices = conflicts;
+
+                    // Fix orphan vertices
+                    int orphanVerts, orphanTris, snapped;
+                    FixOrphanVertices(uv2, allTris[m], vertChartId, out orphanVerts, out orphanTris, out snapped);
+                    results[m].orphanVertices  = orphanVerts;
+                    results[m].orphanTriangles = orphanTris;
+                    results[m].snappedVertices = snapped;
+
+                    // Apply UV2
+                    mesh.SetUVs(2, uv2);
+                    results[m].ok = true;
+
+                    Debug.Log($"[xatlas] OK[{m}]: '{mesh.name}', conflicts={conflicts}, " +
+                              $"orphans={orphanVerts}, snapped={snapped}");
+                }
+            }
+            finally
+            {
+                XatlasNative.xatlasDestroy();
+            }
+
+            return results;
+        }
+
+        // ─────────────────────────────────────────────────────────────────
         // Fix orphan vertices: xatlas assigned chartIndex=0xFFFFFFFF to
         // vertices it couldn't place in any chart. These vertices get
         // near-zero UV2, creating diagonal stretches across the atlas.

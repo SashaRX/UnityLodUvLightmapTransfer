@@ -688,24 +688,46 @@ namespace LightmapUvTool
         {
             try
             {
-                for (int i=0; i<entries.Count; i++)
+                // Filter valid entries and create mesh copies
+                var validEntries = new List<MeshEntry>();
+                var meshCopies = new List<Mesh>();
+                for (int i = 0; i < entries.Count; i++)
                 {
-                    var e = entries[i]; var mesh = e.originalMesh; if (mesh==null) continue;
-                    EditorUtility.DisplayProgressBar("Repack", e.renderer.name, (float)i/entries.Count);
+                    var e = entries[i]; var mesh = e.originalMesh; if (mesh == null) continue;
                     var uv0 = mesh.uv;
-                    if (uv0==null||uv0.Length==0) { Debug.LogWarning("[Repack] "+e.renderer.name+": no UV0"); continue; }
-                    var cp = Instantiate(mesh); cp.name = mesh.name+"_repack";
-                    var opts = RepackOptions.Default;
-                    opts.resolution = (uint)atlasResolution;
-                    opts.padding = (uint)paddingPixels;
-                    var res = XatlasRepack.RepackSingle(cp, opts);
-                    if (!res.ok) { Debug.LogError("[Repack] "+e.renderer.name+": "+res.error); DestroyImmediate(cp); continue; }
-                    e.repackedMesh = cp;
-                    Debug.Log("[Repack] "+e.renderer.name+": "+res.shellCount+" shells, "+res.overlapGroupCount+" overlap, atlas="+res.atlasWidth+"x"+res.atlasHeight);
+                    if (uv0 == null || uv0.Length == 0) { Debug.LogWarning("[Repack] " + e.renderer.name + ": no UV0"); continue; }
+                    var cp = Instantiate(mesh); cp.name = mesh.name + "_repack";
+                    validEntries.Add(e);
+                    meshCopies.Add(cp);
                 }
-                hasRepack = ForLod(sourceLodIndex).Any(e => e.repackedMesh!=null);
+
+                if (meshCopies.Count == 0) return;
+
+                EditorUtility.DisplayProgressBar("Repack", "Packing " + meshCopies.Count + " meshes into shared atlas...", 0.5f);
+
+                var opts = RepackOptions.Default;
+                opts.resolution = (uint)atlasResolution;
+                opts.padding = (uint)paddingPixels;
+
+                // Pack all meshes into a single shared atlas
+                var results = XatlasRepack.RepackMulti(meshCopies.ToArray(), opts);
+
+                for (int i = 0; i < validEntries.Count; i++)
+                {
+                    var e = validEntries[i];
+                    if (!results[i].ok)
+                    {
+                        Debug.LogError("[Repack] " + e.renderer.name + ": " + results[i].error);
+                        DestroyImmediate(meshCopies[i]);
+                        continue;
+                    }
+                    e.repackedMesh = meshCopies[i];
+                    Debug.Log("[Repack] " + e.renderer.name + ": " + results[i].shellCount + " shells, " +
+                              results[i].overlapGroupCount + " overlap, atlas=" + results[i].atlasWidth + "x" + results[i].atlasHeight);
+                }
+                hasRepack = ForLod(sourceLodIndex).Any(e => e.repackedMesh != null);
             }
-            catch (Exception ex) { Debug.LogError("[Repack] "+ex); }
+            catch (Exception ex) { Debug.LogError("[Repack] " + ex); }
             finally { EditorUtility.ClearProgressBar(); }
             Repaint();
         }
