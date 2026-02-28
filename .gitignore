@@ -37,9 +37,8 @@ Assets/Plugins/**/*.dylib
 *.lib
 *.exp
 
-# xatlas source (get from github.com/jpcy/xatlas)
-Native/xatlas.h
-Native/xatlas.cpp
+# CMake build output (xatlas fetched automatically)
+Native/_deps/
 
 # Test file
 test.txt
