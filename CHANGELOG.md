@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.3] - 2026-03-01
+
+### Fixed — Mirrored shell transfer + degenerate shell fallback
+- **Mirrored shells use source transform directly**: nearest-vertex matching
+  gives wrong correspondences when target UV0 is reflected vs source. Now
+  mirrored shells use precomputed `mirrorTransform` from source analysis.
+- **Residual-based fallback**: if per-target-shell similarity transform has
+  residual > 0.001 (degenerate small fragments), falls back to source's
+  precomputed transform. Prevents tiny shells from producing wildly off UV2.
+- **UV2 bounds diagnostic**: transfer now logs warning with exact bounds when
+  any vertex UV2 falls outside 0-1 range.
+
 ## [0.7.2] - 2026-02-28
 
 ### Fixed — UV2 out-of-bounds on LODs + checker on all tabs

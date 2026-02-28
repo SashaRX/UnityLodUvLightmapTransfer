@@ -244,42 +244,65 @@ namespace LightmapUvTool
                     if (isMirrored) result.shellsMirrored++;
 
                     // ── Per-target-shell transform via nearest-vertex matching ──
-                    // Instead of reusing source's precomputed UV0→UV2 transform
-                    // (which assumes target UV0 ≈ source UV0), we build point pairs
-                    // (target_UV0, nearest_source_UV2) and compute a fresh transform.
-                    // This handles LODs with different UV0 layout/scale correctly.
-
-                    var ptFrom = new List<Vector2>();
-                    var ptTo   = new List<Vector2>();
-
-                    foreach (int vi in tShell.vertexIndices)
-                    {
-                        if (vi >= tUv0.Length) continue;
-                        Vector2 tPt = tUv0[vi];
-
-                        // Find nearest source vertex in UV0 space
-                        float bestDist = float.MaxValue;
-                        int bestSi = 0;
-                        for (int si = 0; si < src.shellUv0.Length; si++)
-                        {
-                            float d = (tPt - src.shellUv0[si]).sqrMagnitude;
-                            if (d < bestDist) { bestDist = d; bestSi = si; }
-                        }
-
-                        ptFrom.Add(tPt);
-                        ptTo.Add(src.shellUv2[bestSi]);
-                    }
+                    // Build point pairs (target_UV0, nearest_source_UV2) and compute
+                    // a fresh similarity transform. For mirrored shells, use the
+                    // precomputed source mirror transform directly — nearest-vertex
+                    // gives wrong correspondences when UV0 is reflected.
 
                     ShellTransform xform;
-                    if (ptFrom.Count >= 2)
+
+                    if (isMirrored)
                     {
-                        xform = ComputeSimilarityTransform(ptFrom, ptTo, isMirrored);
-                        xform.mirrored = isMirrored;
+                        // Mirrored: use precomputed source mirror transform
+                        // (nearest-vertex can't find correct pairs across reflection)
+                        xform = src.mirrorTransform;
                     }
                     else
                     {
-                        // Fallback for tiny shells: use precomputed source transform
-                        xform = isMirrored ? src.mirrorTransform : src.transform;
+                        var ptFrom = new List<Vector2>();
+                        var ptTo   = new List<Vector2>();
+
+                        foreach (int vi in tShell.vertexIndices)
+                        {
+                            if (vi >= tUv0.Length) continue;
+                            Vector2 tPt = tUv0[vi];
+
+                            // Find nearest source vertex in UV0 space
+                            float bestDist = float.MaxValue;
+                            int bestSi = 0;
+                            for (int si = 0; si < src.shellUv0.Length; si++)
+                            {
+                                float d = (tPt - src.shellUv0[si]).sqrMagnitude;
+                                if (d < bestDist) { bestDist = d; bestSi = si; }
+                            }
+
+                            ptFrom.Add(tPt);
+                            ptTo.Add(src.shellUv2[bestSi]);
+                        }
+
+                        if (ptFrom.Count >= 2)
+                        {
+                            xform = ComputeSimilarityTransform(ptFrom, ptTo, false);
+
+                            // Residual check: if transform is poor (degenerate small
+                            // shell or bad nearest-vertex), fall back to source transform
+                            if (xform.residual > 0.001f)
+                            {
+                                var fallback = src.transform;
+                                if (fallback.residual < xform.residual)
+                                {
+                                    Debug.LogWarning($"[GroupedTransfer] Shell residual " +
+                                        $"{xform.residual:F6} > threshold, falling back to " +
+                                        $"source transform (residual={fallback.residual:F6})");
+                                    xform = fallback;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Fallback for tiny shells (<2 verts)
+                            xform = src.transform;
+                        }
                     }
 
                     int idx = 0;
@@ -307,6 +330,25 @@ namespace LightmapUvTool
             Debug.Log($"[GroupedTransfer] '{targetMesh.name}': " +
                       $"{result.shellsMatched} matched, {result.shellsUnmatched} unmatched, " +
                       $"{result.verticesTransferred}/{result.verticesTotal} verts");
+
+            // UV2 bounds check — warn if any vertex outside 0-1
+            int outOfBounds = 0;
+            Vector2 uvMin = new Vector2(float.MaxValue, float.MaxValue);
+            Vector2 uvMax = new Vector2(float.MinValue, float.MinValue);
+            for (int i = 0; i < result.uv2.Length; i++)
+            {
+                if (!vertexDone[i]) continue;
+                var uv = result.uv2[i];
+                if (uv.x < uvMin.x) uvMin.x = uv.x;
+                if (uv.y < uvMin.y) uvMin.y = uv.y;
+                if (uv.x > uvMax.x) uvMax.x = uv.x;
+                if (uv.y > uvMax.y) uvMax.y = uv.y;
+                if (uv.x < -0.01f || uv.x > 1.01f || uv.y < -0.01f || uv.y > 1.01f)
+                    outOfBounds++;
+            }
+            if (outOfBounds > 0)
+                Debug.LogWarning($"[GroupedTransfer] '{targetMesh.name}': {outOfBounds} verts " +
+                    $"outside 0-1! UV2 bounds=[{uvMin.x:F3},{uvMin.y:F3}]-[{uvMax.x:F3},{uvMax.y:F3}]");
 
             return result;
         }
