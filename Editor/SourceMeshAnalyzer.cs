@@ -170,6 +170,11 @@ namespace LightmapUvTool
             // Submesh IDs
             state.submeshIds = BuildSubmeshIds(mesh, state.faceCount);
 
+            // Read target UV0 for shell priority matching
+            var uv0List = new List<Vector2>();
+            mesh.GetUVs(0, uv0List);
+            state.targetUv0 = uv0List.Count == state.vertCount ? uv0List.ToArray() : null;
+
             // Allocate arrays
             state.targetUv = new Vector2[state.vertCount];
             state.triangleShellAssignments = new int[state.faceCount];

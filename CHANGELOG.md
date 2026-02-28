@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0] - 2026-02-28
+
+### Fixed
+- Critical: vertex UV averaging across different shells producing stretched triangles spanning entire atlas
+- Per-shell vertex accumulator now isolates UV contributions by shell ID — no cross-shell blending
+- UV0 proximity used as priority signal for shell conflict resolution at shared vertices
+- Post-validation pass detects and re-projects anomalous triangles exceeding shell UV bounds
+
+### Added
+- Target UV0 loaded in PrepareTarget for shell priority matching
+- Source UV0 interpolation in InterpolateVertexUv and FallbackVertexProject
+- Debug logging for vertex conflict resolution statistics
+
 ## [0.3.4] - 2026-02-28
 
 ### Fixed

@@ -174,6 +174,9 @@ namespace LightmapUvTool
         public int[] triangles;
         public int[] submeshIds;
 
+        // Target UV0 (for shell priority matching)
+        public Vector2[] targetUv0;
+
         // Provisional UV being built
         public Vector2[] targetUv;
 
