@@ -28,15 +28,18 @@ namespace LightmapUvTool
             // Border repair stats
             public BorderRepairSolver.RepairReport borderReport;
 
+            static string Pct(int v, int total) => total > 0
+                ? (v * 100f / total).ToString("F1") : "0";
+
             public override string ToString()
             {
                 return $"Transfer Report:\n" +
                        $"  Triangles: {totalTriangles}\n" +
-                       $"  Accepted: {accepted} ({Pct(accepted)}%)\n" +
-                       $"  Ambiguous: {ambiguous} ({Pct(ambiguous)}%)\n" +
-                       $"  BorderRisk: {borderRisk} ({Pct(borderRisk)}%)\n" +
-                       $"  UnavoidableMismatch: {unavoidableMismatch} ({Pct(unavoidableMismatch)}%)\n" +
-                       $"  Rejected: {rejected} ({Pct(rejected)}%)\n" +
+                       $"  Accepted: {accepted} ({Pct(accepted, totalTriangles)}%)\n" +
+                       $"  Ambiguous: {ambiguous} ({Pct(ambiguous, totalTriangles)}%)\n" +
+                       $"  BorderRisk: {borderRisk} ({Pct(borderRisk, totalTriangles)}%)\n" +
+                       $"  UnavoidableMismatch: {unavoidableMismatch} ({Pct(unavoidableMismatch, totalTriangles)}%)\n" +
+                       $"  Rejected: {rejected} ({Pct(rejected, totalTriangles)}%)\n" +
                        $"  Mean Error: {meanError:F6}\n" +
                        $"  Max Error: {maxError:F6}\n" +
                        $"  Mean Confidence: {meanConfidence:F3}\n" +
@@ -45,9 +48,6 @@ namespace LightmapUvTool
                        $"  Border Repaired: {borderReport.repairedCount}\n" +
                        $"  Border Skipped (OK): {borderReport.skippedAlreadyMatching}\n" +
                        $"  Border Risk: {borderReport.markedBorderRisk}";
-
-                string Pct(int v) => totalTriangles > 0
-                    ? (v * 100f / totalTriangles).ToString("F1") : "0";
             }
         }
 

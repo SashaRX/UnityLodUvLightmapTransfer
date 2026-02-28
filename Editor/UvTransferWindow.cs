@@ -694,13 +694,14 @@ namespace LightmapUvTool
                     EditorUtility.DisplayProgressBar("Repack", e.renderer.name, (float)i/entries.Count);
                     var uv0 = mesh.uv;
                     if (uv0==null||uv0.Length==0) { Debug.LogWarning("[Repack] "+e.renderer.name+": no UV0"); continue; }
-                    List<UvShell> shells; List<List<int>> olg;
-                    uint[] fid = UvShellExtractor.BuildPerFaceShellIds(uv0, mesh.triangles, out shells, out olg);
-                    var uv2 = XatlasRepack.RepackUv(mesh, uv0, fid, atlasResolution, paddingPixels, rotateCharts);
-                    if (uv2==null||uv2.Length==0) { Debug.LogError("[Repack] "+e.renderer.name+": fail"); continue; }
                     var cp = Instantiate(mesh); cp.name = mesh.name+"_repack";
-                    cp.SetUVs(2, new List<Vector2>(uv2)); e.repackedMesh = cp;
-                    Debug.Log("[Repack] "+e.renderer.name+": "+shells.Count+" shells, "+olg.Count+" overlap");
+                    var opts = RepackOptions.Default;
+                    opts.resolution = (uint)atlasResolution;
+                    opts.padding = (uint)paddingPixels;
+                    var res = XatlasRepack.RepackSingle(cp, opts);
+                    if (!res.ok) { Debug.LogError("[Repack] "+e.renderer.name+": "+res.error); DestroyImmediate(cp); continue; }
+                    e.repackedMesh = cp;
+                    Debug.Log("[Repack] "+e.renderer.name+": "+res.shellCount+" shells, "+res.overlapGroupCount+" overlap, atlas="+res.atlasWidth+"x"+res.atlasHeight);
                 }
                 hasRepack = ForLod(sourceLodIndex).Any(e => e.repackedMesh!=null);
             }

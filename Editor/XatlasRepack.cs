@@ -45,6 +45,36 @@ namespace LightmapUvTool
     {
         const uint ORPHAN_CHART = uint.MaxValue;
 
+        /// <summary>
+        /// Convenience wrapper: repack UV0 shells into UV2, return packed UV2 array.
+        /// Does NOT modify the original mesh.
+        /// </summary>
+        public static Vector2[] RepackUv(Mesh mesh, Vector2[] uv0, uint[] faceShellIds,
+            int resolution, int padding, bool rotate)
+        {
+            var opts = new RepackOptions
+            {
+                resolution = (uint)resolution,
+                padding = (uint)padding,
+                texelsPerUnit = 0f,
+                bilinear = true,
+                blockAlign = false,
+                bruteForce = false,
+            };
+            // Work on a temporary copy so original mesh is untouched
+            var tmp = Object.Instantiate(mesh);
+            tmp.name = mesh.name + "_repack_tmp";
+            var result = RepackSingle(tmp, opts);
+            if (!result.ok)
+            {
+                Object.DestroyImmediate(tmp);
+                return null;
+            }
+            var uv2 = tmp.uv2;
+            Object.DestroyImmediate(tmp);
+            return uv2;
+        }
+
         public static RepackResult RepackSingle(Mesh mesh, RepackOptions opts)
         {
             var result = new RepackResult();
