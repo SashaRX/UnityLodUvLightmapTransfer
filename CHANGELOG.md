@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.4] - 2026-02-28
+
+### Fixed
+- Repack now packs all selected meshes into a single shared UV atlas instead of repacking each mesh independently, preventing UV2 overlap when meshes share the same lightmap
+
 ## [0.1.0] - 2026-02-28
 
 ### Added
