@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1] - 2026-02-28
+
+### Changed
+- BVH vertex projection is now primary UV transfer method (was fallback)
+- Face-level bindings demoted to fallback when BVH finds no shell match
+- Raised BVH projection weights (0.9 direct hit, 0.6 shell scan) to reflect higher reliability
+
 ## [0.4.0] - 2026-02-28
 
 ### Fixed

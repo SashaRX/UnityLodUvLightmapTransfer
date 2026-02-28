@@ -70,23 +70,21 @@ namespace LightmapUvTool
                     Vector2 sourceUv0Sample = Vector2.zero;
                     bool gotUv0 = false;
 
-                    if (InterpolateVertexUv(vPos, assignedShell, source, bindings,
+                    // Primary: BVH projection from actual vertex position (accurate for large target triangles)
+                    if (FallbackVertexProject(vPos, assignedShell, source,
+                                               out uvResult, out weight, out sourceUv0Sample))
+                    {
+                        gotUv0 = hasUv0;
+                    }
+                    else if (InterpolateVertexUv(vPos, assignedShell, source, bindings,
                                             out uvResult, out weight, out sourceUv0Sample))
                     {
+                        // Fallback: use face-level bindings when BVH can't find shell match
                         gotUv0 = hasUv0;
                     }
                     else
                     {
-                        // Fallback: direct BVH query for this vertex, restricted to shell
-                        if (FallbackVertexProject(vPos, assignedShell, source,
-                                                   out uvResult, out weight, out sourceUv0Sample))
-                        {
-                            gotUv0 = hasUv0;
-                        }
-                        else
-                        {
-                            continue;
-                        }
+                        continue;
                     }
 
                     // Compute UV0 proximity if available
@@ -329,7 +327,7 @@ namespace LightmapUvTool
                 uv = source.uvSource[si0] * hit.barycentric.x +
                      source.uvSource[si1] * hit.barycentric.y +
                      source.uvSource[si2] * hit.barycentric.z;
-                weight = 0.3f;
+                weight = 0.9f; // direct BVH hit in correct shell
 
                 if (source.uv0 != null)
                 {
@@ -375,7 +373,7 @@ namespace LightmapUvTool
             uv = source.uvSource[bi0] * bestBary.x +
                  source.uvSource[bi1] * bestBary.y +
                  source.uvSource[bi2] * bestBary.z;
-            weight = 0.2f;
+            weight = 0.6f; // brute-force shell scan, still reliable
 
             if (source.uv0 != null)
             {
