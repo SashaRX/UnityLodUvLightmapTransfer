@@ -586,6 +586,248 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
+        //  UV Edge Weld — merge UV seam vertices by edge adjacency
+        //  For each mesh edge shared by 2 triangles, if UV0 values
+        //  on both endpoints are within threshold → merge vertices.
+        //  No source mesh needed. Works purely in UV space.
+        // ═══════════════════════════════════════════════════════════
+
+        public static Mesh UvEdgeWeld(Mesh mesh, float uvThreshold = 0.002f)
+        {
+            if (mesh == null) return null;
+
+            var verts   = mesh.vertices;
+            var uv0List = new List<Vector2>();
+            mesh.GetUVs(0, uv0List);
+            if (uv0List.Count != verts.Length) return mesh;
+            var uv0 = uv0List.ToArray();
+
+            int vertCount = verts.Length;
+
+            // Flatten all submesh triangles into one array
+            int[] tris;
+            {
+                var allTris = new List<int>();
+                for (int s = 0; s < mesh.subMeshCount; s++)
+                    allTris.AddRange(mesh.GetTriangles(s));
+                tris = allTris.ToArray();
+            }
+            int triCount = tris.Length / 3;
+            if (triCount == 0) return mesh;
+
+            // ── 1. Build position groups ──
+            // Vertices at same 3D position → same group ID
+            const float posEps = 1e-5f;
+            var posToGroup = new Dictionary<long, List<int>>();
+            int[] posGroup = new int[vertCount];
+
+            for (int i = 0; i < vertCount; i++)
+            {
+                long h = PosHash(verts[i], posEps);
+                if (!posToGroup.ContainsKey(h))
+                    posToGroup[h] = new List<int>();
+                posToGroup[h].Add(i);
+            }
+
+            // Assign group IDs: first vertex in each bucket is the representative
+            int nextGroup = 0;
+            var groupIdMap = new Dictionary<long, int>();
+            for (int i = 0; i < vertCount; i++)
+            {
+                long h = PosHash(verts[i], posEps);
+                if (!groupIdMap.ContainsKey(h))
+                    groupIdMap[h] = nextGroup++;
+                posGroup[i] = groupIdMap[h];
+            }
+
+            // ── 2. Build edge adjacency ──
+            // EdgeKey = sorted pair of position group IDs
+            // Value = list of (vertA, vertB) where vertA is the vertex with lower group
+            var edgeMap = new Dictionary<long, List<(int vA, int vB)>>();
+
+            for (int t = 0; t < triCount; t++)
+            {
+                int i0 = tris[t * 3 + 0];
+                int i1 = tris[t * 3 + 1];
+                int i2 = tris[t * 3 + 2];
+
+                AddEdge(edgeMap, posGroup, i0, i1);
+                AddEdge(edgeMap, posGroup, i1, i2);
+                AddEdge(edgeMap, posGroup, i2, i0);
+            }
+
+            // ── 3. Union-Find for vertex merging ──
+            int[] parent = new int[vertCount];
+            int[] rank   = new int[vertCount];
+            for (int i = 0; i < vertCount; i++) parent[i] = i;
+
+            int weldCount = 0;
+
+            foreach (var kv in edgeMap)
+            {
+                var edges = kv.Value;
+                if (edges.Count < 2) continue;
+
+                // Compare all pairs of triangle-edges sharing this geometric edge
+                for (int a = 0; a < edges.Count; a++)
+                {
+                    for (int b = a + 1; b < edges.Count; b++)
+                    {
+                        var eA = edges[a];
+                        var eB = edges[b];
+
+                        // Already same vertices? Skip
+                        if (Find(parent, eA.vA) == Find(parent, eB.vA) &&
+                            Find(parent, eA.vB) == Find(parent, eB.vB))
+                            continue;
+
+                        // Check UV distance at both endpoints
+                        float dA = Vector2.Distance(uv0[eA.vA], uv0[eB.vA]);
+                        float dB = Vector2.Distance(uv0[eA.vB], uv0[eB.vB]);
+
+                        if (dA <= uvThreshold && dB <= uvThreshold)
+                        {
+                            if (Find(parent, eA.vA) != Find(parent, eB.vA))
+                            {
+                                Union(parent, rank, eA.vA, eB.vA);
+                                weldCount++;
+                            }
+                            if (Find(parent, eA.vB) != Find(parent, eB.vB))
+                            {
+                                Union(parent, rank, eA.vB, eB.vB);
+                                weldCount++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (weldCount == 0) return mesh;
+
+            // ── 4. Rebuild mesh with merged vertices ──
+            // Remap indices
+            int[] newTris = new int[tris.Length];
+            for (int i = 0; i < tris.Length; i++)
+                newTris[i] = Find(parent, tris[i]);
+
+            // Compact
+            var used = new HashSet<int>();
+            for (int i = 0; i < newTris.Length; i++) used.Add(newTris[i]);
+
+            int[] compactMap = new int[vertCount];
+            for (int i = 0; i < vertCount; i++) compactMap[i] = -1;
+            int newVertCount = 0;
+            for (int i = 0; i < vertCount; i++)
+                if (used.Contains(i)) compactMap[i] = newVertCount++;
+
+            for (int i = 0; i < newTris.Length; i++)
+                newTris[i] = compactMap[newTris[i]];
+
+            // Copy attributes
+            var normals = mesh.normals;
+            bool hasNormals = normals != null && normals.Length == vertCount;
+            var tangents = mesh.tangents;
+            bool hasTangents = tangents != null && tangents.Length == vertCount;
+            var uv1List = new List<Vector2>();
+            mesh.GetUVs(1, uv1List);
+            bool hasUv1 = uv1List.Count == vertCount;
+            Vector2[] uv1 = hasUv1 ? uv1List.ToArray() : null;
+            var colors = mesh.colors;
+            bool hasColors = colors != null && colors.Length == vertCount;
+            var boneWeights = mesh.boneWeights;
+            bool hasBW = boneWeights != null && boneWeights.Length == vertCount;
+
+            var newVerts   = new Vector3[newVertCount];
+            var newUv0     = new Vector2[newVertCount];
+            Vector3[] newNormals  = hasNormals  ? new Vector3[newVertCount] : null;
+            Vector4[] newTangents = hasTangents ? new Vector4[newVertCount] : null;
+            Vector2[] newUv1      = hasUv1      ? new Vector2[newVertCount] : null;
+            Color[]   newColors   = hasColors   ? new Color[newVertCount]   : null;
+            BoneWeight[] newBW    = hasBW       ? new BoneWeight[newVertCount] : null;
+
+            for (int i = 0; i < vertCount; i++)
+            {
+                int ni = compactMap[i];
+                if (ni < 0) continue;
+                newVerts[ni] = verts[i];
+                newUv0[ni]   = uv0[i];
+                if (hasNormals)  newNormals[ni]  = normals[i];
+                if (hasTangents) newTangents[ni] = tangents[i];
+                if (hasUv1)      newUv1[ni]      = uv1[i];
+                if (hasColors)   newColors[ni]   = colors[i];
+                if (hasBW)       newBW[ni]       = boneWeights[i];
+            }
+
+            var result = new Mesh();
+            result.name = mesh.name;
+            result.vertices = newVerts;
+            result.uv = newUv0;
+            if (hasNormals)  result.normals  = newNormals;
+            if (hasTangents) result.tangents = newTangents;
+            if (hasUv1) result.SetUVs(1, newUv1);
+            if (hasColors) result.colors = newColors;
+            if (hasBW) result.boneWeights = newBW;
+
+            int subCount = mesh.subMeshCount;
+            result.subMeshCount = subCount;
+            int triOffset = 0;
+            for (int s = 0; s < subCount; s++)
+            {
+                var desc = mesh.GetSubMesh(s);
+                int idxCount = desc.indexCount;
+                int[] subTris = new int[idxCount];
+                System.Array.Copy(newTris, triOffset, subTris, 0, idxCount);
+                result.SetTriangles(subTris, s);
+                triOffset += idxCount;
+            }
+
+            if (mesh.bindposes != null && mesh.bindposes.Length > 0)
+                result.bindposes = mesh.bindposes;
+
+            result.RecalculateBounds();
+
+            int shellsBefore = UvShellExtractor.Extract(uv0, tris).Count;
+            int shellsAfter  = UvShellExtractor.Extract(newUv0, newTris).Count;
+            int removed = vertCount - newVertCount;
+            Debug.Log($"[UV0Fix] UvEdgeWeld '{mesh.name}': " +
+                      $"welded {weldCount} pairs, removed {removed} verts " +
+                      $"({vertCount} → {newVertCount}), " +
+                      $"shells {shellsBefore} → {shellsAfter}");
+
+            return result;
+        }
+
+        static void AddEdge(Dictionary<long, List<(int vA, int vB)>> edgeMap,
+                            int[] posGroup, int i0, int i1)
+        {
+            int gA = posGroup[i0], gB = posGroup[i1];
+            // Normalize: lower group first
+            int vLow, vHigh;
+            if (gA <= gB) { vLow = i0; vHigh = i1; }
+            else           { vLow = i1; vHigh = i0; gA = posGroup[i1]; gB = posGroup[i0]; }
+
+            long key = ((long)gA << 32) | (uint)gB;
+            if (!edgeMap.ContainsKey(key))
+                edgeMap[key] = new List<(int, int)>();
+            edgeMap[key].Add((vLow, vHigh));
+        }
+
+        static int Find(int[] parent, int x)
+        {
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+            return x;
+        }
+
+        static void Union(int[] parent, int[] rank, int a, int b)
+        {
+            a = Find(parent, a); b = Find(parent, b);
+            if (a == b) return;
+            if (rank[a] < rank[b]) { int t = a; a = b; b = t; }
+            parent[b] = a;
+            if (rank[a] == rank[b]) rank[a]++;
+        }
+
+        // ═══════════════════════════════════════════════════════════
         //  Build weld map: duplicate vertex → keep vertex
         //  Groups vertices by quantized position, then checks
         //  UV0 + normal within epsilon.

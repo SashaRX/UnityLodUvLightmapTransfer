@@ -884,34 +884,23 @@ namespace LightmapUvTool
                 }
             }
 
-            // ── Phase 2: source-guided weld for target LODs ──
-            int guidedWelded = 0;
-            var srcE = ForLod(sourceLodIndex);
-            for (int li = 0; li < LodN; li++)
+            // ── Phase 2: UV edge weld — merge UV shells along seam edges ──
+            int edgeWelded = 0;
+            foreach (var e in meshEntries)
             {
-                if (li == sourceLodIndex) continue;
-                var tgtE = ForLod(li);
-                for (int ti = 0; ti < tgtE.Count; ti++)
+                if (!e.include || e.originalMesh == null) continue;
+                var welded = Uv0Analyzer.UvEdgeWeld(e.originalMesh);
+                if (welded != null && welded != e.originalMesh)
                 {
-                    var te = tgtE[ti];
-                    if (te.originalMesh == null) continue;
-                    var se = ti < srcE.Count ? srcE[ti] : srcE[0];
-                    Mesh sM = se.originalMesh;
-                    if (sM == null) continue;
-
-                    var welded = Uv0Analyzer.SourceGuidedWeld(te.originalMesh, sM);
-                    if (welded != null && welded != te.originalMesh)
-                    {
-                        te.originalMesh = welded;
-                        te.wasWelded = true;
-                        guidedWelded++;
-                    }
+                    e.originalMesh = welded;
+                    e.wasWelded = true;
+                    edgeWelded++;
                 }
             }
 
-            uv0Welded = meshoptOptimized > 0 || guidedWelded > 0;
+            uv0Welded = meshoptOptimized > 0 || edgeWelded > 0;
             Debug.Log($"[UV0Fix] Optimized: {meshoptOptimized} meshopt, " +
-                      $"{guidedWelded} source-guided (working copies only, FBX untouched)");
+                      $"{edgeWelded} UV edge weld (working copies only, FBX untouched)");
 
             // Re-analyze to show updated state
             ExecAnalyzeUv0();
