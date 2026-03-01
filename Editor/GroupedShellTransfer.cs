@@ -183,16 +183,27 @@ namespace LightmapUvTool
             var tgtTris = targetMesh.triangles;
             var tgtShells = UvShellExtractor.Extract(tUv0, tgtTris);
 
-            // Compute 3D centroid for each source shell
+            // Compute 3D centroid + AABB for each source shell
             var srcCentroid3D = new Vector3[srcShells.Count];
+            var srcAABBMin = new Vector3[srcShells.Count];
+            var srcAABBMax = new Vector3[srcShells.Count];
             for (int si = 0; si < srcShells.Count; si++)
             {
                 Vector3 sum = Vector3.zero; int n = 0;
+                Vector3 bMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                Vector3 bMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
                 foreach (int vi in srcShells[si].vertexIndices)
                 {
-                    if (vi < srcVerts.Length) { sum += srcVerts[vi]; n++; }
+                    if (vi < srcVerts.Length)
+                    {
+                        sum += srcVerts[vi]; n++;
+                        bMin = Vector3.Min(bMin, srcVerts[vi]);
+                        bMax = Vector3.Max(bMax, srcVerts[vi]);
+                    }
                 }
                 srcCentroid3D[si] = n > 0 ? sum / n : Vector3.zero;
+                srcAABBMin[si] = bMin;
+                srcAABBMax[si] = bMax;
             }
 
             // ── Phase 2 & 3: Match shells + transfer vertices ──
@@ -286,47 +297,82 @@ namespace LightmapUvTool
 
                 // ── Run BOTH projections ──
 
-                // A) 3D surface projection — GLOBAL + NORMAL FILTER
-                //    Searches all source triangles, but skips those facing opposite direction.
-                //    This prevents front↔back cross-contamination on thin walls while
-                //    still covering merged target shells that span multiple source shells.
+                // A) 3D surface projection — AABB multi-shell
+                //    Find source shells whose 3D AABB overlaps target shell's AABB,
+                //    then search only their triangles. This handles merged target shells
+                //    (LOD2) without cross-contaminating non-merged shells (LOD1).
                 var uv2_3D = new Dictionary<int, Vector2>();
-                bool hasNormals = tNormals != null && tNormals.Length == tVerts.Length;
-                foreach (int vi in tShell.vertexIndices)
                 {
-                    if (vi >= tVerts.Length) continue;
-                    Vector3 tPos = tVerts[vi];
-                    Vector3 tNorm = hasNormals ? tNormals[vi] : Vector3.zero;
-                    bool useNormalFilter = hasNormals && tNorm.sqrMagnitude > 0.5f;
-
-                    float bestDSq = float.MaxValue;
-                    int bestF = -1; float bestU = 0, bestV = 0, bestW = 0;
-
-                    // Pass 1: normal-filtered global search
-                    if (useNormalFilter)
+                    // Compute target shell 3D AABB
+                    Vector3 tMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                    Vector3 tMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+                    foreach (int vi in tShell.vertexIndices)
                     {
-                        for (int f = 0; f < srcTriCount; f++)
+                        if (vi < tVerts.Length)
                         {
-                            if (Vector3.Dot(tNorm, triNormal[f]) < 0.0f) continue;
-                            float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
-                                out float u, out float v, out float w);
-                            if (dSq < bestDSq) { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
+                            tMin = Vector3.Min(tMin, tVerts[vi]);
+                            tMax = Vector3.Max(tMax, tVerts[vi]);
                         }
                     }
+                    // Pad by 10% of diagonal to catch border vertices
+                    float pad = (tMax - tMin).magnitude * 0.1f + 0.001f;
+                    tMin -= new Vector3(pad, pad, pad);
+                    tMax += new Vector3(pad, pad, pad);
 
-                    // Pass 2 fallback: unfiltered (degenerate normals or no aligned tri found)
-                    if (bestF < 0)
+                    // Collect faces from all source shells overlapping this AABB
+                    var multiFaces = new List<int>();
+                    for (int si = 0; si < srcShells.Count; si++)
                     {
-                        for (int f = 0; f < srcTriCount; f++)
+                        if (srcAABBMin[si].x <= tMax.x && srcAABBMax[si].x >= tMin.x &&
+                            srcAABBMin[si].y <= tMax.y && srcAABBMax[si].y >= tMin.y &&
+                            srcAABBMin[si].z <= tMax.z && srcAABBMax[si].z >= tMin.z)
                         {
-                            float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
-                                out float u, out float v, out float w);
-                            if (dSq < bestDSq) { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
+                            multiFaces.AddRange(srcShells[si].faceIndices);
                         }
                     }
+                    // Fallback: if no overlap found, use matched shell
+                    if (multiFaces.Count == 0)
+                        multiFaces.AddRange(srcFacesChosen);
 
-                    if (bestF >= 0)
-                        uv2_3D[vi] = triUv2A[bestF] * bestU + triUv2B[bestF] * bestV + triUv2C[bestF] * bestW;
+                    bool hasTargetNormals = tNormals != null && tNormals.Length == tVerts.Length;
+                    foreach (int vi in tShell.vertexIndices)
+                    {
+                        if (vi >= tVerts.Length) continue;
+                        Vector3 tPos = tVerts[vi];
+                        Vector3 tNrm = hasTargetNormals ? tNormals[vi] : Vector3.zero;
+                        bool useNormalFilter = hasTargetNormals;
+
+                        // Pass 1: normal-filtered (dot >= 0)
+                        float bestDSq = float.MaxValue;
+                        int bestF = -1; float bestU = 0, bestV = 0, bestW = 0;
+                        if (useNormalFilter)
+                        {
+                            for (int fi = 0; fi < multiFaces.Count; fi++)
+                            {
+                                int f = multiFaces[fi];
+                                if (Vector3.Dot(tNrm, triNormal[f]) < 0f) continue;
+                                float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
+                                    out float u, out float v, out float w);
+                                if (dSq < bestDSq) { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
+                            }
+                        }
+
+                        // Pass 2: fallback without normal filter
+                        if (bestF < 0)
+                        {
+                            bestDSq = float.MaxValue;
+                            for (int fi = 0; fi < multiFaces.Count; fi++)
+                            {
+                                int f = multiFaces[fi];
+                                float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
+                                    out float u, out float v, out float w);
+                                if (dSq < bestDSq) { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
+                            }
+                        }
+
+                        if (bestF >= 0)
+                            uv2_3D[vi] = triUv2A[bestF] * bestU + triUv2B[bestF] * bestV + triUv2C[bestF] * bestW;
+                    }
                 }
 
                 // B) UV0 projection
