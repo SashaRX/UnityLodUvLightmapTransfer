@@ -9,6 +9,16 @@
   re-selecting a previously processed LODGroup.
 - **[W] badge** on welded meshes in the mesh list.
 
+## [0.7.7] - 2026-03-01
+
+### Fixed — Correct matching spaces for weld vs transfer
+- **SourceGuidedWeld back to 3D nearest**: seam vertices have different UV0
+  by definition, so UV0 matching gives them different source shell IDs →
+  almost nothing gets welded. 3D matching works because normal check already
+  prevents thin-wall confusion. Restores 26→18 shell reduction on CementWall.
+- **Transfer stays UV0 nearest**: prevents copying UV2 from wrong side of
+  thin geometry.
+
 ## [0.7.6] - 2026-03-01
 
 ### Fixed — UV0-space matching instead of 3D
