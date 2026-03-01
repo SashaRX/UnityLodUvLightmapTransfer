@@ -150,11 +150,14 @@ namespace LightmapUvTool
             result.vertexToSourceShell = new int[vertCount];
             for (int i = 0; i < vertCount; i++) result.vertexToSourceShell[i] = -1;
 
-            // ── Pre-compute source triangle data (3D + UV2) ──
+            // ── Pre-compute source triangle data (3D + UV0 + UV2) ──
             int srcTriCount = srcTris.Length / 3;
             var triPosA = new Vector3[srcTriCount];
             var triPosB = new Vector3[srcTriCount];
             var triPosC = new Vector3[srcTriCount];
+            var triUv0A = new Vector2[srcTriCount];
+            var triUv0B = new Vector2[srcTriCount];
+            var triUv0C = new Vector2[srcTriCount];
             var triUv2A = new Vector2[srcTriCount];
             var triUv2B = new Vector2[srcTriCount];
             var triUv2C = new Vector2[srcTriCount];
@@ -163,7 +166,8 @@ namespace LightmapUvTool
             {
                 int i0 = srcTris[f * 3], i1 = srcTris[f * 3 + 1], i2 = srcTris[f * 3 + 2];
                 triPosA[f] = srcVerts[i0]; triPosB[f] = srcVerts[i1]; triPosC[f] = srcVerts[i2];
-                triUv2A[f] = srcUv2[i0]; triUv2B[f] = srcUv2[i1]; triUv2C[f] = srcUv2[i2];
+                triUv0A[f] = srcUv0[i0];  triUv0B[f] = srcUv0[i1];  triUv0C[f] = srcUv0[i2];
+                triUv2A[f] = srcUv2[i0];  triUv2B[f] = srcUv2[i1];  triUv2C[f] = srcUv2[i2];
             }
 
             // ── Phase 1: Extract shells ──
@@ -198,10 +202,9 @@ namespace LightmapUvTool
             }
 
             // ── Retry parameters ──
-            // If average 3D distance^2 to matched source shell is above this,
-            // try next-closest source shells (prevents wrong centroid matches)
-            const float kGoodDistSq = 0.001f;   // ~3cm for meter-scale
+            const float kGoodDistSq = 0.001f;
             const int kMaxRetries = 5;
+            int shells3D = 0, shellsUV0 = 0;
 
             for (int tsi = 0; tsi < tgtShells.Count; tsi++)
             {
@@ -226,11 +229,10 @@ namespace LightmapUvTool
                 }
                 ranked.Sort((a, b) => a.distSq.CompareTo(b.distSq));
 
-                // Try source shells, pick best 3D quality
+                // Find best source shell by 3D centroid
                 int chosenSrc = -1;
                 float chosenDistSq = float.MaxValue;
                 float chosenAvg3D = float.MaxValue;
-                var chosenUv2 = new Dictionary<int, Vector2>();
 
                 int tries = Mathf.Min(kMaxRetries, ranked.Count);
                 for (int attempt = 0; attempt < tries; attempt++)
@@ -238,58 +240,31 @@ namespace LightmapUvTool
                     int si = ranked[attempt].si;
                     var srcFaces = srcShells[si].faceIndices;
 
-                    // Project all target vertices onto source shell in 3D
-                    var tmpUv2 = new Dictionary<int, Vector2>();
-                    float totalDistSq = 0;
-                    int projected = 0;
-
+                    // Quick 3D distance check with first few vertices
+                    float totalDistSq = 0; int sampled = 0;
                     foreach (int vi in tShell.vertexIndices)
                     {
                         if (vi >= tVerts.Length) continue;
                         Vector3 tPos = tVerts[vi];
-
                         float bestDSq = float.MaxValue;
-                        int bestF = -1;
-                        float bestU = 0, bestV = 0, bestW = 0;
-
                         for (int fi = 0; fi < srcFaces.Count; fi++)
                         {
                             int f = srcFaces[fi];
                             float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
-                                out float u, out float v, out float w);
-                            if (dSq < bestDSq)
-                            {
-                                bestDSq = dSq; bestF = f;
-                                bestU = u; bestV = v; bestW = w;
-                            }
+                                out _, out _, out _);
+                            if (dSq < bestDSq) bestDSq = dSq;
                         }
-
-                        if (bestF >= 0)
-                        {
-                            tmpUv2[vi] = triUv2A[bestF] * bestU
-                                       + triUv2B[bestF] * bestV
-                                       + triUv2C[bestF] * bestW;
-                            totalDistSq += bestDSq;
-                            projected++;
-                        }
+                        totalDistSq += bestDSq;
+                        sampled++;
                     }
 
-                    float avgDistSq = projected > 0 ? totalDistSq / projected : float.MaxValue;
-
-                    // Track best 3D quality across all attempts
-                    if (avgDistSq < chosenAvg3D)
+                    float avgDist = sampled > 0 ? totalDistSq / sampled : float.MaxValue;
+                    if (avgDist < chosenAvg3D)
                     {
-                        if (chosenSrc >= 0 && chosenSrc != si)
-                            Debug.Log($"[GroupedTransfer] Shell {tsi}: retry #{attempt}, " +
-                                $"src {si} better 3D fit (avg={Mathf.Sqrt(avgDistSq):F4} " +
-                                $"vs prev={Mathf.Sqrt(chosenAvg3D):F4})");
                         chosenSrc = si;
                         chosenDistSq = ranked[attempt].distSq;
-                        chosenAvg3D = avgDistSq;
-                        chosenUv2 = tmpUv2;
+                        chosenAvg3D = avgDist;
                     }
-
-                    // Good enough — stop retrying
                     if (chosenAvg3D < kGoodDistSq) break;
                 }
 
@@ -298,6 +273,56 @@ namespace LightmapUvTool
 
                 result.targetShellToSourceShell[tsi] = chosenSrc;
                 result.targetShellMatchDistSqr[tsi] = chosenDistSq;
+
+                var srcFacesChosen = srcShells[chosenSrc].faceIndices;
+
+                // ── Run BOTH projections ──
+
+                // A) 3D surface projection
+                var uv2_3D = new Dictionary<int, Vector2>();
+                foreach (int vi in tShell.vertexIndices)
+                {
+                    if (vi >= tVerts.Length) continue;
+                    Vector3 tPos = tVerts[vi];
+                    float bestDSq = float.MaxValue;
+                    int bestF = -1; float bestU = 0, bestV = 0, bestW = 0;
+                    for (int fi = 0; fi < srcFacesChosen.Count; fi++)
+                    {
+                        int f = srcFacesChosen[fi];
+                        float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
+                            out float u, out float v, out float w);
+                        if (dSq < bestDSq) { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
+                    }
+                    if (bestF >= 0)
+                        uv2_3D[vi] = triUv2A[bestF] * bestU + triUv2B[bestF] * bestV + triUv2C[bestF] * bestW;
+                }
+
+                // B) UV0 projection
+                var uv2_UV0 = new Dictionary<int, Vector2>();
+                foreach (int vi in tShell.vertexIndices)
+                {
+                    if (vi >= tUv0.Length) continue;
+                    Vector2 tUv = tUv0[vi];
+                    float bestDSq = float.MaxValue;
+                    int bestF = -1; float bestU = 0, bestV = 0, bestW = 0;
+                    for (int fi = 0; fi < srcFacesChosen.Count; fi++)
+                    {
+                        int f = srcFacesChosen[fi];
+                        float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                            out float u, out float v, out float w);
+                        if (dSq < bestDSq) { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
+                    }
+                    if (bestF >= 0)
+                        uv2_UV0[vi] = triUv2A[bestF] * bestU + triUv2B[bestF] * bestV + triUv2C[bestF] * bestW;
+                }
+
+                // ── Evaluate quality: count issues per method ──
+                int issues3D = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_3D);
+                int issuesUV0 = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_UV0);
+
+                // Pick winner: fewer issues wins; tiebreak → 3D (better for mirrored shells)
+                var chosenUv2 = (issues3D <= issuesUV0) ? uv2_3D : uv2_UV0;
+                if (issues3D <= issuesUV0) shells3D++; else shellsUV0++;
 
                 // Write chosen UV2
                 foreach (var kv in chosenUv2)
@@ -313,7 +338,7 @@ namespace LightmapUvTool
 
             Debug.Log($"[GroupedTransfer] '{targetMesh.name}': shell-first, " +
                       $"{tgtShells.Count} target → {shellsMatched} matched, " +
-                      $"{transferred}/{vertCount} verts");
+                      $"{transferred}/{vertCount} verts (3D:{shells3D} UV0:{shellsUV0})");
 
             // UV2 bounds check
             int oob = 0;
@@ -329,6 +354,40 @@ namespace LightmapUvTool
                     $"UV2=[{uvMin.x:F3},{uvMin.y:F3}]-[{uvMax.x:F3},{uvMax.y:F3}]");
 
             return result;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Count triangle issues (inverted + zero-area) for a UV2 candidate
+        //  Used to pick between 3D and UV0 projection per shell
+        // ═══════════════════════════════════════════════════════════
+
+        static int CountShellIssues(List<int> faceIndices, int[] tris, Vector2[] uv0,
+            Dictionary<int, Vector2> candidateUv2)
+        {
+            int issues = 0;
+            foreach (int f in faceIndices)
+            {
+                int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
+                if (!candidateUv2.TryGetValue(i0, out var a2) ||
+                    !candidateUv2.TryGetValue(i1, out var b2) ||
+                    !candidateUv2.TryGetValue(i2, out var c2))
+                { issues++; continue; }
+
+                // Signed area in UV2
+                float saUv2 = (b2.x - a2.x) * (c2.y - a2.y) - (c2.x - a2.x) * (b2.y - a2.y);
+
+                // Zero-area check
+                if (Mathf.Abs(saUv2) < 1e-10f) { issues++; continue; }
+
+                // Inverted check: compare winding with UV0
+                if (i0 < uv0.Length && i1 < uv0.Length && i2 < uv0.Length)
+                {
+                    var a0 = uv0[i0]; var b0 = uv0[i1]; var c0 = uv0[i2];
+                    float saUv0 = (b0.x - a0.x) * (c0.y - a0.y) - (c0.x - a0.x) * (b0.y - a0.y);
+                    if (saUv0 * saUv2 < 0f) issues++; // opposite winding
+                }
+            }
+            return issues;
         }
 
         // ═══════════════════════════════════════════════════════════
