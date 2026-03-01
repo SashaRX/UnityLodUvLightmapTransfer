@@ -1,13 +1,15 @@
-// GroupedShellTransfer.cs — UV2 transfer via UV0-space lookup with 3D guard
+// GroupedShellTransfer.cs — UV2 transfer via per-triangle UV0-space lookup with 3D guard
 //
-// Algorithm: "UV Weld Selected" philosophy
-// 1. For each target vertex, take its UV0 coordinate
-// 2. Find nearest source triangle in UV0 2D space
-// 3. If multiple source triangles at same UV0 distance (overlapping shells),
-//    use 3D position + normal to pick correct one
-// 4. Compute UV0 barycentric → interpolate UV2
+// Algorithm: "Per-Triangle Transfer"
+// 1. For each target TRIANGLE, compute centroid in UV0 and 3D
+// 2. Find nearest source triangle by UV0 centroid
+// 3. If multiple source triangles at same UV0 distance (tiling/overlap),
+//    use 3D centroid distance + normal to pick correct one
+// 4. For all 3 vertices of target triangle, compute UV0 barycentric on
+//    the SAME source triangle → interpolate UV2
+// 5. Shared vertices: closest 3D match wins
 //
-// UV0 is the PRIMARY search space. 3D is ONLY used to disambiguate overlaps.
+// Per-triangle ensures vertices of one face always come from same UV2 region.
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -100,13 +102,13 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Transfer: UV0-space lookup with 3D disambiguation
+        //  Transfer: Per-triangle UV0-space lookup with 3D disambiguation
         //
-        //  For each target vertex:
-        //  1. Find nearest source triangles in UV0 2D space
-        //  2. If only one candidate → use it
-        //  3. If multiple (overlapping UV shells) → pick by 3D nearest + normal
-        //  4. Compute UV0 barycentric → interpolate UV2
+        //  For each target TRIANGLE:
+        //  1. Find nearest source triangle by UV0 centroid
+        //  2. If multiple candidates (tiling) → pick by 3D centroid + normal
+        //  3. Project all 3 vertices onto same source → interpolate UV2
+        //  Shared vertices: closest 3D match wins
         // ═══════════════════════════════════════════════════════════
 
         const float OVERLAP_THRESHOLD = 1e-4f; // UV0 dist² threshold to detect overlapping candidates
@@ -169,100 +171,117 @@ namespace LightmapUvTool
                     triFaceN[f] = ((srcNormals[i0] + srcNormals[i1] + srcNormals[i2]) / 3f).normalized;
             }
 
-            // ── Main transfer loop ──
+            // ── Per-triangle transfer loop ──
+            // For each TARGET triangle: pick ONE source triangle (by centroid),
+            // then interpolate UV2 for all 3 vertices from that same source.
+            // This prevents vertices of one triangle landing in different UV2 regions.
+
+            var tTris = targetMesh.triangles;
+            int tTriCount = tTris.Length / 3;
             int transferred = 0;
             int disambiguated = 0;
 
-            for (int vi = 0; vi < vertCount; vi++)
-            {
-                Vector2 tUv = tUv0[vi];
-                Vector3 tPos = tVerts[vi];
-                Vector3 tN = tHasN ? tNormals[vi] : Vector3.up;
+            // Track best match per vertex (closest 3D distance wins)
+            var vertBestDist = new float[vertCount];
+            var vertWritten = new bool[vertCount];
+            for (int i = 0; i < vertCount; i++) vertBestDist[i] = float.MaxValue;
 
-                // Step 1: Find nearest source triangle in UV0 space
+            for (int ti = 0; ti < tTriCount; ti++)
+            {
+                int tI0 = tTris[ti * 3], tI1 = tTris[ti * 3 + 1], tI2 = tTris[ti * 3 + 2];
+
+                // Target triangle centroid in UV0 and 3D
+                Vector2 tCentUv0 = (tUv0[tI0] + tUv0[tI1] + tUv0[tI2]) / 3f;
+                Vector3 tCent3D = (tVerts[tI0] + tVerts[tI1] + tVerts[tI2]) / 3f;
+                Vector3 tE1 = tVerts[tI1] - tVerts[tI0];
+                Vector3 tE2 = tVerts[tI2] - tVerts[tI0];
+                Vector3 tFaceN = Vector3.Cross(tE1, tE2).normalized;
+                if (tFaceN.sqrMagnitude < 0.5f && tHasN)
+                    tFaceN = ((tNormals[tI0] + tNormals[tI1] + tNormals[tI2]) / 3f).normalized;
+
+                // Step 1: Find best source triangle by centroid UV0
                 float bestUv0DistSq = float.MaxValue;
                 int bestFace = -1;
-                float bestU = 0, bestV = 0, bestW = 0;
 
                 for (int f = 0; f < srcTriCount; f++)
                 {
-                    float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                        out float u, out float v, out float w);
+                    float dSq = PointToTri2D(tCentUv0, triUv0A[f], triUv0B[f], triUv0C[f],
+                        out _, out _, out _);
                     if (dSq < bestUv0DistSq)
                     {
                         bestUv0DistSq = dSq;
                         bestFace = f;
-                        bestU = u; bestV = v; bestW = w;
                     }
                 }
 
                 if (bestFace < 0) continue;
 
-                // Step 2: Check for overlapping UV shells
-                // Collect all triangles at ~same UV0 distance (within threshold)
+                // Step 2: Check for overlapping UV candidates
                 float threshold = bestUv0DistSq + OVERLAP_THRESHOLD;
+                float best3DDist = (tCent3D - tri3DCentroid[bestFace]).sqrMagnitude;
 
-                // Count how many triangles are within threshold
-                // If only bestFace → no overlap, use directly
-                // If multiple → need 3D disambiguation
                 int candidateCount = 0;
                 for (int f = 0; f < srcTriCount; f++)
                 {
-                    float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                    float dSq = PointToTri2D(tCentUv0, triUv0A[f], triUv0B[f], triUv0C[f],
                         out _, out _, out _);
                     if (dSq <= threshold) candidateCount++;
-                    if (candidateCount > 1) break; // early exit
+                    if (candidateCount > 1) break;
                 }
 
                 if (candidateCount > 1)
                 {
-                    // 3D disambiguation: among UV0-close triangles, pick best by
-                    // 3D distance to centroid with normal compatibility
                     disambiguated++;
-                    float best3DDistSq = float.MaxValue;
+                    best3DDist = float.MaxValue;
 
                     for (int f = 0; f < srcTriCount; f++)
                     {
-                        float uvDSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                            out float u, out float v, out float w);
+                        float uvDSq = PointToTri2D(tCentUv0, triUv0A[f], triUv0B[f], triUv0C[f],
+                            out _, out _, out _);
                         if (uvDSq > threshold) continue;
 
-                        // Normal check
-                        float dot = Vector3.Dot(tN, triFaceN[f]);
+                        float dot = Vector3.Dot(tFaceN, triFaceN[f]);
                         if (dot < NORMAL_DOT_MIN) continue;
 
-                        // 3D distance: closest point on triangle surface
-                        int ii0 = srcTris[f * 3], ii1 = srcTris[f * 3 + 1], ii2 = srcTris[f * 3 + 2];
-                        float d3D = ClosestPointOnTri3DSq(tPos, srcVerts[ii0], srcVerts[ii1], srcVerts[ii2]);
-                        if (d3D < best3DDistSq)
+                        float d3D = (tCent3D - tri3DCentroid[f]).sqrMagnitude;
+                        if (d3D < best3DDist)
                         {
-                            best3DDistSq = d3D;
+                            best3DDist = d3D;
                             bestFace = f;
-                            bestU = u; bestV = v; bestW = w;
                         }
                     }
                 }
 
-                // Step 3: Interpolate UV2 using UV0 barycentrics
-                result.uv2[vi] = triUv2A[bestFace] * bestU
-                               + triUv2B[bestFace] * bestV
-                               + triUv2C[bestFace] * bestW;
-                transferred++;
+                // Step 3: Interpolate UV2 for all 3 vertices from this ONE source triangle
+                int sf = bestFace;
+                int[] triVerts = { tI0, tI1, tI2 };
+                for (int k = 0; k < 3; k++)
+                {
+                    int vi = triVerts[k];
+                    // Only overwrite if this source is closer in 3D
+                    if (best3DDist >= vertBestDist[vi] && vertWritten[vi]) continue;
+
+                    PointToTri2D(tUv0[vi], triUv0A[sf], triUv0B[sf], triUv0C[sf],
+                        out float u, out float v, out float w);
+                    result.uv2[vi] = triUv2A[sf] * u + triUv2B[sf] * v + triUv2C[sf] * w;
+                    vertBestDist[vi] = best3DDist;
+                    vertWritten[vi] = true;
+                }
             }
+
+            // Count transferred
+            for (int i = 0; i < vertCount; i++)
+                if (vertWritten[i]) transferred++;
 
             result.verticesTransferred = transferred;
 
-            // Count source shells that contributed to transfer
-            var usedFaces = new HashSet<int>();
-            // We know bestFace was set for each vertex - count unique source shells
-            // Simple heuristic: count source UV0 shells
             var srcShells = UvShellExtractor.Extract(srcUv0, srcTris);
             result.shellsMatched = srcShells.Count;
 
             Debug.Log($"[GroupedTransfer] '{targetMesh.name}': " +
-                      $"UV0-first + 3D-guard, " +
+                      $"per-triangle UV0+3D, " +
                       $"{transferred}/{vertCount} verts" +
-                      (disambiguated > 0 ? $", {disambiguated} 3D-disambiguated" : ""));
+                      (disambiguated > 0 ? $", {disambiguated}/{tTriCount} tris disambiguated" : ""));
 
             // UV2 bounds check
             int oob = 0;
