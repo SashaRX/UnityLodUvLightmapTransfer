@@ -183,6 +183,12 @@ namespace LightmapUvTool
             var tgtTris = targetMesh.triangles;
             var tgtShells = UvShellExtractor.Extract(tUv0, tgtTris);
 
+            // Build face → source shell lookup
+            var faceToSrcShell = new int[srcTriCount];
+            for (int si = 0; si < srcShells.Count; si++)
+                foreach (int f in srcShells[si].faceIndices)
+                    faceToSrcShell[f] = si;
+
             // Compute 3D centroid + AABB for each source shell
             var srcCentroid3D = new Vector3[srcShells.Count];
             var srcAABBMin = new Vector3[srcShells.Count];
@@ -302,6 +308,7 @@ namespace LightmapUvTool
                 //    then search only their triangles. This handles merged target shells
                 //    (LOD2) without cross-contaminating non-merged shells (LOD1).
                 var uv2_3D = new Dictionary<int, Vector2>();
+                var face3D = new Dictionary<int, int>(); // vertex → best source face
                 {
                     // Compute target shell 3D AABB
                     Vector3 tMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
@@ -371,7 +378,10 @@ namespace LightmapUvTool
                         }
 
                         if (bestF >= 0)
+                        {
                             uv2_3D[vi] = triUv2A[bestF] * bestU + triUv2B[bestF] * bestV + triUv2C[bestF] * bestW;
+                            face3D[vi] = bestF;
+                        }
                     }
                 }
 
@@ -394,13 +404,32 @@ namespace LightmapUvTool
                         uv2_UV0[vi] = triUv2A[bestF] * bestU + triUv2B[bestF] * bestV + triUv2C[bestF] * bestW;
                 }
 
-                // ── Evaluate quality: count issues per method ──
-                int issues3D = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_3D);
-                int issuesUV0 = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_UV0);
+                // ── Detect merged shell: does 3D projection reach multiple source shells? ──
+                int foreignCount = 0, sameCount = 0;
+                foreach (var kv in face3D)
+                {
+                    if (faceToSrcShell[kv.Value] != chosenSrc) foreignCount++;
+                    else sameCount++;
+                }
+                int totalProj = foreignCount + sameCount;
+                bool isMergedShell = totalProj > 0 && (float)foreignCount / totalProj > 0.2f;
 
-                // Pick winner: fewer issues wins; tiebreak → UV0 (safer, stays in matched shell)
-                var chosenUv2 = (issues3D < issuesUV0) ? uv2_3D : uv2_UV0;
-                if (issues3D < issuesUV0) shells3D++; else shellsUV0++;
+                // Pick winner based on shell type
+                Dictionary<int, Vector2> chosenUv2;
+                if (isMergedShell)
+                {
+                    // Merged shell: 3D is correct (needs multi-shell coverage)
+                    chosenUv2 = uv2_3D;
+                    shells3D++;
+                }
+                else
+                {
+                    // Single-source shell: compare quality, tiebreak UV0
+                    int issues3D = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_3D);
+                    int issuesUV0 = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_UV0);
+                    chosenUv2 = (issues3D < issuesUV0) ? uv2_3D : uv2_UV0;
+                    if (issues3D < issuesUV0) shells3D++; else shellsUV0++;
+                }
 
                 // Write chosen UV2
                 foreach (var kv in chosenUv2)
@@ -469,12 +498,6 @@ namespace LightmapUvTool
                     float absUv2 = Mathf.Abs(saUv2);
                     if (absUv0 > 1e-10f && absUv2 / absUv0 > 100f) issues++;
                 }
-
-                // Cross-atlas edge check: UV2 edge > 0.5 means vertices from different atlas regions
-                float maxEdgeSq = Mathf.Max(
-                    (b2 - a2).sqrMagnitude,
-                    Mathf.Max((c2 - b2).sqrMagnitude, (a2 - c2).sqrMagnitude));
-                if (maxEdgeSq > 0.25f) issues++; // edge > 0.5 in UV2 space
             }
             return issues;
         }
