@@ -278,7 +278,8 @@ namespace LightmapUvTool
 
                 // ── Run BOTH projections ──
 
-                // A) 3D surface projection
+                // A) 3D surface projection — GLOBAL (all source triangles)
+                //    Handles merged target shells that span multiple source shells
                 var uv2_3D = new Dictionary<int, Vector2>();
                 foreach (int vi in tShell.vertexIndices)
                 {
@@ -286,9 +287,8 @@ namespace LightmapUvTool
                     Vector3 tPos = tVerts[vi];
                     float bestDSq = float.MaxValue;
                     int bestF = -1; float bestU = 0, bestV = 0, bestW = 0;
-                    for (int fi = 0; fi < srcFacesChosen.Count; fi++)
+                    for (int f = 0; f < srcTriCount; f++)
                     {
-                        int f = srcFacesChosen[fi];
                         float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
                             out float u, out float v, out float w);
                         if (dSq < bestDSq) { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
