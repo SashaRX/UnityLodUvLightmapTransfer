@@ -56,6 +56,7 @@ namespace LightmapUvTool
         float canvasZoom = 1f;
         Vector2 canvasPan;
         bool canvasPanning;
+        Rect lastCanvasRect;
         RenderTexture canvasRT;
         int  pvChannel = 2;
         int  pvLod     = 0;
@@ -627,7 +628,7 @@ namespace LightmapUvTool
             // ── Zoom + alpha ──
             canvasZoom = EditorGUILayout.Slider(canvasZoom, .1f, 20f, GUILayout.Width(90));
             if (GUILayout.Button("Fit", EditorStyles.toolbarButton, GUILayout.Width(28)))
-            { canvasZoom = 1f; canvasPan = Vector2.zero; }
+                FitToUvBounds();
             if (fillMode != FillMode.None)
                 fillAlpha = EditorGUILayout.Slider(fillAlpha, .05f, .6f, GUILayout.Width(70));
 
@@ -671,6 +672,7 @@ namespace LightmapUvTool
 
             var canvasRect = GUILayoutUtility.GetRect(GUIContent.none, GUIStyle.none,
                 GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+            lastCanvasRect = canvasRect;
 
             float baseSz = Mathf.Max(64, Mathf.Min(canvasRect.width, canvasRect.height));
             float sz = baseSz * canvasZoom;
@@ -708,6 +710,19 @@ namespace LightmapUvTool
                     GL.Color(new Color(.12f,.12f,.12f));
                     GL.Vertex3(cx, cy, 0); GL.Vertex3(cx + sz, cy, 0);
                     GL.Vertex3(cx + sz, cy + sz, 0); GL.Vertex3(cx, cy + sz, 0);
+                    GL.End();
+
+                    // UDIM tile backgrounds (slightly darker)
+                    GL.Begin(GL.QUADS);
+                    GL.Color(new Color(.10f,.10f,.10f));
+                    for (int tu = -1; tu <= 3; tu++)
+                    for (int tv = -1; tv <= 3; tv++)
+                    {
+                        if (tu == 0 && tv == 0) continue;
+                        float tx = cx + tu * sz, ty = cy - tv * sz;
+                        GL.Vertex3(tx, ty, 0); GL.Vertex3(tx + sz, ty, 0);
+                        GL.Vertex3(tx + sz, ty + sz, 0); GL.Vertex3(tx, ty + sz, 0);
+                    }
                     GL.End();
 
                     GlGrid(cx, cy, sz);
@@ -762,6 +777,40 @@ namespace LightmapUvTool
             }
         }
 
+        void FitToUvBounds()
+        {
+            var ee = ForLod(pvLod);
+            float minU = 0f, maxU = 1f, minV = 0f, maxV = 1f;
+            bool any = false;
+            foreach (var entry in ee)
+            {
+                var mesh = DMesh(entry);
+                if (mesh == null) continue;
+                var uvs = RdUv(mesh, pvChannel);
+                if (uvs == null) continue;
+                foreach (var uv in uvs)
+                {
+                    if (!UOk(uv)) continue;
+                    if (!any) { minU = maxU = uv.x; minV = maxV = uv.y; any = true; }
+                    else { if (uv.x < minU) minU = uv.x; if (uv.x > maxU) maxU = uv.x; if (uv.y < minV) minV = uv.y; if (uv.y > maxV) maxV = uv.y; }
+                }
+            }
+            float pad = 0.05f;
+            minU -= pad; maxU += pad; minV -= pad; maxV += pad;
+            float rangeU = Mathf.Max(maxU - minU, 0.1f);
+            float rangeV = Mathf.Max(maxV - minV, 0.1f);
+            float W = lastCanvasRect.width, H = lastCanvasRect.height;
+            if (W < 1 || H < 1) { canvasZoom = 1f; canvasPan = Vector2.zero; return; }
+            float baseSz = Mathf.Max(64, Mathf.Min(W, H));
+            canvasZoom = Mathf.Clamp(Mathf.Min(W / (baseSz * rangeU), H / (baseSz * rangeV)), 0.1f, 20f);
+            float sz = baseSz * canvasZoom;
+            float centerU = (minU + maxU) * 0.5f;
+            float centerV = (minV + maxV) * 0.5f;
+            canvasPan.x = sz * (0.5f - centerU);
+            canvasPan.y = sz * (centerV - 0.5f);
+            Repaint();
+        }
+
         void HandleCanvasInput(Rect canvasRect, float baseSz, float sz, float cx, float cy)
         {
             var e = Event.current;
@@ -793,7 +842,7 @@ namespace LightmapUvTool
             if (e.rawType == EventType.MouseUp && (e.button == 2 || e.button == 0)) canvasPanning = false;
 
             if (e.type == EventType.MouseDown && e.button == 2 && e.clickCount == 2 && canvasRect.Contains(e.mousePosition))
-            { canvasZoom = 1f; canvasPan = Vector2.zero; e.Use(); Repaint(); }
+            { FitToUvBounds(); e.Use(); }
         }
 
         // ── GL helpers ──
@@ -832,6 +881,7 @@ namespace LightmapUvTool
 
         void GlGrid(float ox, float oy, float sz)
         {
+            // Main 0-1 tile grid
             GL.Begin(GL.LINES);
             GL.Color(new Color(.25f,.25f,.25f));
             for (int g = 0; g <= 4; g++) { float p = g*.25f*sz; GL.Vertex3(ox+p,oy,0); GL.Vertex3(ox+p,oy+sz,0); GL.Vertex3(ox,oy+p,0); GL.Vertex3(ox+sz,oy+p,0); }
@@ -840,6 +890,18 @@ namespace LightmapUvTool
             GL.Vertex3(ox+sz,oy,0); GL.Vertex3(ox+sz,oy+sz,0);
             GL.Vertex3(ox+sz,oy+sz,0); GL.Vertex3(ox,oy+sz,0);
             GL.Vertex3(ox,oy+sz,0); GL.Vertex3(ox,oy,0);
+            // Adjacent UDIM tiles (faded outlines)
+            GL.Color(new Color(.3f,.3f,.3f,.4f));
+            for (int tu = -1; tu <= 3; tu++)
+            for (int tv = -1; tv <= 3; tv++)
+            {
+                if (tu == 0 && tv == 0) continue;
+                float tx = ox + tu * sz, ty = oy - tv * sz;
+                GL.Vertex3(tx,ty,0); GL.Vertex3(tx+sz,ty,0);
+                GL.Vertex3(tx+sz,ty,0); GL.Vertex3(tx+sz,ty+sz,0);
+                GL.Vertex3(tx+sz,ty+sz,0); GL.Vertex3(tx,ty+sz,0);
+                GL.Vertex3(tx,ty+sz,0); GL.Vertex3(tx,ty,0);
+            }
             GL.End();
         }
 
