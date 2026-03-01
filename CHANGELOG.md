@@ -9,6 +9,15 @@
   re-selecting a previously processed LODGroup.
 - **[W] badge** on welded meshes in the mesh list.
 
+## [0.7.9] - 2026-03-01
+
+### Fixed — Normal-filtered 3D transfer (overlapping UV0 disambiguation)
+- **Transfer uses normal filter + 3D nearest** instead of UV0 nearest.
+  UV0 is overlapping/tiling on CementWall (front/back share same UV0),
+  so UV0 nearest picks wrong matches. Normal filter (dot > 0.5) separates
+  wall sides, then 3D nearest among filtered set gives unambiguous match.
+  Falls back to unfiltered 3D nearest if no normal-compatible source found.
+
 ## [0.7.8] - 2026-03-01
 
 ### Fixed — Normal-filtered UV0 transfer (thin wall disambiguation)

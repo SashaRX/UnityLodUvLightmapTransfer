@@ -1,8 +1,8 @@
-// GroupedShellTransfer.cs — UV2 transfer via normal-filtered UV0 nearest vertex
+// GroupedShellTransfer.cs — UV2 transfer via normal-filtered 3D nearest vertex
 // For each target LOD vertex: filter source vertices by normal similarity
-// (dot > 0.5), then find nearest by UV0 distance, copy UV2.
+// (dot > 0.5), then find nearest by 3D position among filtered set, copy UV2.
 // Normal filter separates front/back of thin geometry (CementWall).
-// UV0 nearest gives precise positioning within the same geometric side.
+// 3D nearest (not UV0) avoids ambiguity from overlapping UV0 shells (tiling).
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -120,13 +120,13 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Step 2: Transfer UV2 via normal-filtered UV0 nearest vertex
+        //  Step 2: Transfer UV2 via normal-filtered 3D nearest vertex
         //  For each target vertex:
         //  1. Filter source vertices by normal similarity (dot > 0.5)
-        //  2. Among filtered set, find nearest by UV0 distance
+        //  2. Among filtered set, find nearest by 3D position
         //  3. Copy UV2
         //  Normal filter separates front/back of thin walls.
-        //  UV0 nearest gives precise positioning within same side.
+        //  3D nearest (not UV0) avoids ambiguity from overlapping UV0.
         // ═══════════════════════════════════════════════════════════
 
         const float NORMAL_DOT_THRESHOLD = 0.5f;
@@ -136,9 +136,7 @@ namespace LightmapUvTool
         {
             var result = new TransferResult();
 
-            var tUv0List = new List<Vector2>();
-            targetMesh.GetUVs(0, tUv0List);
-            var tUv0 = tUv0List.ToArray();
+            var tVerts = targetMesh.vertices;
             var tNormals = targetMesh.normals;
             int vertCount = targetMesh.vertexCount;
             bool tHasNormals = tNormals != null && tNormals.Length == vertCount;
@@ -148,9 +146,9 @@ namespace LightmapUvTool
 
             // Build flat arrays of all source data
             int totalSrcVerts = 0;
-            foreach (var si in sourceInfos) totalSrcVerts += si.shellUv0.Length;
+            foreach (var si in sourceInfos) totalSrcVerts += si.worldPositions.Length;
 
-            var allSrcUv0 = new Vector2[totalSrcVerts];
+            var allSrcPos = new Vector3[totalSrcVerts];
             var allSrcUv2 = new Vector2[totalSrcVerts];
             var allSrcNrm = new Vector3[totalSrcVerts];
             var allSrcShell = new int[totalSrcVerts];
@@ -158,9 +156,9 @@ namespace LightmapUvTool
             for (int s = 0; s < sourceInfos.Length; s++)
             {
                 var si = sourceInfos[s];
-                for (int i = 0; i < si.shellUv0.Length; i++)
+                for (int i = 0; i < si.worldPositions.Length; i++)
                 {
-                    allSrcUv0[offset] = si.shellUv0[i];
+                    allSrcPos[offset] = si.worldPositions[i];
                     allSrcUv2[offset] = si.shellUv2[i];
                     allSrcNrm[offset] = si.normals[i];
                     allSrcShell[offset] = s;
@@ -168,26 +166,26 @@ namespace LightmapUvTool
                 }
             }
 
-            // For each target vertex: normal-filtered UV0 nearest
+            // For each target vertex: normal-filtered 3D nearest
             int[] matchedShell = new int[vertCount];
             bool[] vertexDone = new bool[vertCount];
             int normalFiltered = 0;
 
             for (int vi = 0; vi < vertCount; vi++)
             {
-                Vector2 tUv = tUv0[vi];
+                Vector3 tPos = tVerts[vi];
                 Vector3 tN = tHasNormals ? tNormals[vi] : Vector3.up;
 
                 float bestDist = float.MaxValue;
                 int bestIdx = -1;
 
-                // Pass 1: UV0 nearest among normal-compatible source verts
+                // Pass 1: 3D nearest among normal-compatible source verts
                 for (int si = 0; si < totalSrcVerts; si++)
                 {
                     float dot = Vector3.Dot(tN, allSrcNrm[si]);
                     if (dot < NORMAL_DOT_THRESHOLD) continue;
 
-                    float d = (tUv - allSrcUv0[si]).sqrMagnitude;
+                    float d = (tPos - allSrcPos[si]).sqrMagnitude;
                     if (d < bestDist) { bestDist = d; bestIdx = si; }
                 }
 
@@ -197,7 +195,7 @@ namespace LightmapUvTool
                     normalFiltered++;
                     for (int si = 0; si < totalSrcVerts; si++)
                     {
-                        float d = (tUv - allSrcUv0[si]).sqrMagnitude;
+                        float d = (tPos - allSrcPos[si]).sqrMagnitude;
                         if (d < bestDist) { bestDist = d; bestIdx = si; }
                     }
                 }
