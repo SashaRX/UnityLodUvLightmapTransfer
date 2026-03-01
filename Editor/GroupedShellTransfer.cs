@@ -150,11 +150,11 @@ namespace LightmapUvTool
             result.vertexToSourceShell = new int[vertCount];
             for (int i = 0; i < vertCount; i++) result.vertexToSourceShell[i] = -1;
 
-            // ── Pre-compute source triangle data ──
+            // ── Pre-compute source triangle data (3D + UV2) ──
             int srcTriCount = srcTris.Length / 3;
-            var triUv0A = new Vector2[srcTriCount];
-            var triUv0B = new Vector2[srcTriCount];
-            var triUv0C = new Vector2[srcTriCount];
+            var triPosA = new Vector3[srcTriCount];
+            var triPosB = new Vector3[srcTriCount];
+            var triPosC = new Vector3[srcTriCount];
             var triUv2A = new Vector2[srcTriCount];
             var triUv2B = new Vector2[srcTriCount];
             var triUv2C = new Vector2[srcTriCount];
@@ -162,7 +162,7 @@ namespace LightmapUvTool
             for (int f = 0; f < srcTriCount; f++)
             {
                 int i0 = srcTris[f * 3], i1 = srcTris[f * 3 + 1], i2 = srcTris[f * 3 + 2];
-                triUv0A[f] = srcUv0[i0]; triUv0B[f] = srcUv0[i1]; triUv0C[f] = srcUv0[i2];
+                triPosA[f] = srcVerts[i0]; triPosB[f] = srcVerts[i1]; triPosC[f] = srcVerts[i2];
                 triUv2A[f] = srcUv2[i0]; triUv2B[f] = srcUv2[i1]; triUv2C[f] = srcUv2[i2];
             }
 
@@ -197,6 +197,12 @@ namespace LightmapUvTool
                 result.targetShellMatchDistSqr[i] = float.MaxValue;
             }
 
+            // ── Retry parameters ──
+            // If average 3D distance^2 to matched source shell is above this,
+            // try next-closest source shells (prevents wrong centroid matches)
+            const float kGoodDistSq = 0.001f;   // ~3cm for meter-scale
+            const int kMaxRetries = 5;
+
             for (int tsi = 0; tsi < tgtShells.Count; tsi++)
             {
                 var tShell = tgtShells[tsi];
@@ -209,57 +215,96 @@ namespace LightmapUvTool
                 }
                 if (tN > 0) tCentroid /= tN;
 
-                // Find best source shell by 3D centroid distance
-                float bestDist = float.MaxValue;
-                int bestSrc = -1;
+                result.targetShellCentroids[tsi] = tCentroid;
+
+                // Rank source shells by 3D centroid distance
+                var ranked = new List<(int si, float distSq)>();
                 for (int si = 0; si < srcShells.Count; si++)
                 {
                     float d = (tCentroid - srcCentroid3D[si]).sqrMagnitude;
-                    if (d < bestDist) { bestDist = d; bestSrc = si; }
+                    ranked.Add((si, d));
                 }
+                ranked.Sort((a, b) => a.distSq.CompareTo(b.distSq));
 
-                // Record diagnostics
-                result.targetShellCentroids[tsi] = tCentroid;
+                // Try source shells, pick best 3D quality
+                int chosenSrc = -1;
+                float chosenDistSq = float.MaxValue;
+                float chosenAvg3D = float.MaxValue;
+                var chosenUv2 = new Dictionary<int, Vector2>();
 
-                if (bestSrc < 0) continue;
-                shellsMatched++;
-
-                result.targetShellToSourceShell[tsi] = bestSrc;
-                result.targetShellMatchDistSqr[tsi] = bestDist;
-
-                // Get matched source shell's face list
-                var srcFaces = srcShells[bestSrc].faceIndices;
-
-                // Per-vertex UV0→UV2 lookup within matched shell only
-                foreach (int vi in tShell.vertexIndices)
+                int tries = Mathf.Min(kMaxRetries, ranked.Count);
+                for (int attempt = 0; attempt < tries; attempt++)
                 {
-                    if (vi >= tUv0.Length) continue;
-                    Vector2 tUv = tUv0[vi];
+                    int si = ranked[attempt].si;
+                    var srcFaces = srcShells[si].faceIndices;
 
-                    float bestDSq = float.MaxValue;
-                    int bestF = -1;
-                    float bestU = 0, bestV = 0, bestW = 0;
+                    // Project all target vertices onto source shell in 3D
+                    var tmpUv2 = new Dictionary<int, Vector2>();
+                    float totalDistSq = 0;
+                    int projected = 0;
 
-                    for (int fi = 0; fi < srcFaces.Count; fi++)
+                    foreach (int vi in tShell.vertexIndices)
                     {
-                        int f = srcFaces[fi];
-                        float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                            out float u, out float v, out float w);
-                        if (dSq < bestDSq)
+                        if (vi >= tVerts.Length) continue;
+                        Vector3 tPos = tVerts[vi];
+
+                        float bestDSq = float.MaxValue;
+                        int bestF = -1;
+                        float bestU = 0, bestV = 0, bestW = 0;
+
+                        for (int fi = 0; fi < srcFaces.Count; fi++)
                         {
-                            bestDSq = dSq; bestF = f;
-                            bestU = u; bestV = v; bestW = w;
+                            int f = srcFaces[fi];
+                            float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
+                                out float u, out float v, out float w);
+                            if (dSq < bestDSq)
+                            {
+                                bestDSq = dSq; bestF = f;
+                                bestU = u; bestV = v; bestW = w;
+                            }
+                        }
+
+                        if (bestF >= 0)
+                        {
+                            tmpUv2[vi] = triUv2A[bestF] * bestU
+                                       + triUv2B[bestF] * bestV
+                                       + triUv2C[bestF] * bestW;
+                            totalDistSq += bestDSq;
+                            projected++;
                         }
                     }
 
-                    if (bestF >= 0)
+                    float avgDistSq = projected > 0 ? totalDistSq / projected : float.MaxValue;
+
+                    // Track best 3D quality across all attempts
+                    if (avgDistSq < chosenAvg3D)
                     {
-                        result.uv2[vi] = triUv2A[bestF] * bestU
-                                       + triUv2B[bestF] * bestV
-                                       + triUv2C[bestF] * bestW;
-                        result.vertexToSourceShell[vi] = bestSrc;
-                        transferred++;
+                        if (chosenSrc >= 0 && chosenSrc != si)
+                            Debug.Log($"[GroupedTransfer] Shell {tsi}: retry #{attempt}, " +
+                                $"src {si} better 3D fit (avg={Mathf.Sqrt(avgDistSq):F4} " +
+                                $"vs prev={Mathf.Sqrt(chosenAvg3D):F4})");
+                        chosenSrc = si;
+                        chosenDistSq = ranked[attempt].distSq;
+                        chosenAvg3D = avgDistSq;
+                        chosenUv2 = tmpUv2;
                     }
+
+                    // Good enough — stop retrying
+                    if (chosenAvg3D < kGoodDistSq) break;
+                }
+
+                if (chosenSrc < 0) continue;
+                shellsMatched++;
+
+                result.targetShellToSourceShell[tsi] = chosenSrc;
+                result.targetShellMatchDistSqr[tsi] = chosenDistSq;
+
+                // Write chosen UV2
+                foreach (var kv in chosenUv2)
+                {
+                    result.uv2[kv.Key] = kv.Value;
+                    result.vertexToSourceShell[kv.Key] = chosenSrc;
+                    transferred++;
                 }
             }
 
@@ -284,6 +329,55 @@ namespace LightmapUvTool
                     $"UV2=[{uvMin.x:F3},{uvMin.y:F3}]-[{uvMax.x:F3},{uvMax.y:F3}]");
 
             return result;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  3D point-to-triangle distance (world space)
+        //  Returns squared distance; outputs barycentric (u,v,w)
+        // ═══════════════════════════════════════════════════════════
+
+        static float PointToTri3D(Vector3 p, Vector3 a, Vector3 b, Vector3 c,
+            out float u, out float v, out float w)
+        {
+            Vector3 ab = b - a, ac = c - a, ap = p - a;
+            float d00 = Vector3.Dot(ab, ab), d01 = Vector3.Dot(ab, ac);
+            float d11 = Vector3.Dot(ac, ac), d20 = Vector3.Dot(ap, ab);
+            float d21 = Vector3.Dot(ap, ac);
+            float denom = d00 * d11 - d01 * d01;
+
+            if (Mathf.Abs(denom) < 1e-12f)
+            { u = 1f; v = 0f; w = 0f; return (p - a).sqrMagnitude; }
+
+            float bV = (d11 * d20 - d01 * d21) / denom;
+            float bW = (d00 * d21 - d01 * d20) / denom;
+            float bU = 1f - bV - bW;
+
+            if (bU >= 0f && bV >= 0f && bW >= 0f)
+            {
+                u = bU; v = bV; w = bW;
+                Vector3 proj = a * u + b * v + c * w;
+                return (p - proj).sqrMagnitude;
+            }
+
+            // Clamp to edges
+            float best = float.MaxValue; u = 1; v = 0; w = 0;
+            { // AB
+                float t = Mathf.Clamp01(Vector3.Dot(p - a, ab) / Mathf.Max(d00, 1e-12f));
+                float d = (p - (a + ab * t)).sqrMagnitude;
+                if (d < best) { best = d; u = 1f - t; v = t; w = 0f; }
+            }
+            { // AC
+                float t = Mathf.Clamp01(Vector3.Dot(p - a, ac) / Mathf.Max(d11, 1e-12f));
+                float d = (p - (a + ac * t)).sqrMagnitude;
+                if (d < best) { best = d; u = 1f - t; v = 0f; w = t; }
+            }
+            { // BC
+                Vector3 bc = c - b; float bcL = Vector3.Dot(bc, bc);
+                float t = Mathf.Clamp01(Vector3.Dot(p - b, bc) / Mathf.Max(bcL, 1e-12f));
+                float d = (p - (b + bc * t)).sqrMagnitude;
+                if (d < best) { best = d; u = 0f; v = 1f - t; w = t; }
+            }
+            return best;
         }
 
         // ═══════════════════════════════════════════════════════════
