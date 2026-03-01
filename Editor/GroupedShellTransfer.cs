@@ -1,14 +1,14 @@
-// GroupedShellTransfer.cs — UV2 transfer via per-vertex UV0 lookup + triangle region lock
+// GroupedShellTransfer.cs — UV2 transfer via shell-level matching
 //
-// Algorithm: "Per-Vertex with Region Coherence"
-// Phase 1: For each target triangle, find source 3D region by centroid UV0+3D
-// Phase 2: For each target vertex:
-//   1. Take its UV0 coordinate, find nearest source triangle in UV0 2D space
-//   2. If multiple candidates (tiling/overlap), disambiguate using the
-//      region anchor from adjacent triangles (not raw 3D vertex position)
-//   3. Compute UV0 barycentric → interpolate UV2
+// Algorithm: "Shell-First Matching"
+// Phase 1: Extract UV0 shells from source and target
+// Phase 2: Match each target shell → best source shell by 3D centroid
+// Phase 3: For each vertex in target shell, UV0→UV2 lookup within matched
+//          source shell's faces only (no disambiguation needed — UV0 is
+//          unique within a single shell)
 //
-// Per-vertex UV0 gives correct barycentrics; region lock ensures coherence.
+// This guarantees shell topology is preserved: all vertices in a target
+// shell reference the same source shell.
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -101,16 +101,15 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Transfer: Per-vertex UV0 lookup with triangle-coherent 3D region
+        //  Transfer: Shell-first matching
         //
-        //  Phase 1: For each target triangle, find source region by centroid
-        //  Phase 2: For each vertex, UV0 lookup → if disambiguation needed,
-        //           constrain to region from adjacent triangles
-        //  This gives per-vertex UV0 accuracy with triangle coherence.
+        //  Phase 1: Extract UV0 shells from source & target
+        //  Phase 2: Match each target shell → source shell by 3D centroid
+        //  Phase 3: Per-vertex UV0→UV2 lookup within matched shell only
+        //
+        //  Within a single source shell, UV0 doesn't overlap — no
+        //  disambiguation needed. Shell topology is guaranteed preserved.
         // ═══════════════════════════════════════════════════════════
-
-        const float OVERLAP_THRESHOLD = 1e-4f; // UV0 dist² threshold to detect overlapping candidates
-        const float NORMAL_DOT_MIN = 0.3f;
 
         public static TransferResult Transfer(Mesh targetMesh, Mesh sourceMesh)
         {
@@ -118,24 +117,20 @@ namespace LightmapUvTool
 
             // Source data
             var srcVerts = sourceMesh.vertices;
-            var srcNormals = sourceMesh.normals;
             var srcTris = sourceMesh.triangles;
             var srcUv0List = new List<Vector2>(); sourceMesh.GetUVs(0, srcUv0List);
             var srcUv2List = new List<Vector2>(); sourceMesh.GetUVs(2, srcUv2List);
             var srcUv0 = srcUv0List.ToArray();
             var srcUv2 = srcUv2List.ToArray();
-            bool srcHasN = srcNormals != null && srcNormals.Length == srcVerts.Length;
 
             if (srcUv0.Length == 0 || srcUv2.Length == 0)
             { Debug.LogError("[GroupedTransfer] Source missing UV0/UV2"); return result; }
 
             // Target data
             var tVerts = targetMesh.vertices;
-            var tNormals = targetMesh.normals;
             var tUv0List = new List<Vector2>(); targetMesh.GetUVs(0, tUv0List);
             var tUv0 = tUv0List.ToArray();
             int vertCount = targetMesh.vertexCount;
-            bool tHasN = tNormals != null && tNormals.Length == vertCount;
 
             if (tUv0.Length == 0)
             { Debug.LogError("[GroupedTransfer] Target missing UV0"); return result; }
@@ -143,246 +138,108 @@ namespace LightmapUvTool
             result.uv2 = new Vector2[vertCount];
             result.verticesTotal = vertCount;
 
-            // ── Pre-compute source triangle data in UV0 space ──
+            // ── Pre-compute source triangle data ──
             int srcTriCount = srcTris.Length / 3;
-
-            // Per-triangle: UV0 coords, UV2 coords, 3D centroid, face normal
             var triUv0A = new Vector2[srcTriCount];
             var triUv0B = new Vector2[srcTriCount];
             var triUv0C = new Vector2[srcTriCount];
             var triUv2A = new Vector2[srcTriCount];
             var triUv2B = new Vector2[srcTriCount];
             var triUv2C = new Vector2[srcTriCount];
-            var tri3DCentroid = new Vector3[srcTriCount];
-            var triFaceN = new Vector3[srcTriCount];
 
             for (int f = 0; f < srcTriCount; f++)
             {
                 int i0 = srcTris[f * 3], i1 = srcTris[f * 3 + 1], i2 = srcTris[f * 3 + 2];
                 triUv0A[f] = srcUv0[i0]; triUv0B[f] = srcUv0[i1]; triUv0C[f] = srcUv0[i2];
                 triUv2A[f] = srcUv2[i0]; triUv2B[f] = srcUv2[i1]; triUv2C[f] = srcUv2[i2];
-                tri3DCentroid[f] = (srcVerts[i0] + srcVerts[i1] + srcVerts[i2]) / 3f;
-                Vector3 e1 = srcVerts[i1] - srcVerts[i0];
-                Vector3 e2 = srcVerts[i2] - srcVerts[i0];
-                triFaceN[f] = Vector3.Cross(e1, e2).normalized;
-                if (triFaceN[f].sqrMagnitude < 0.5f && srcHasN)
-                    triFaceN[f] = ((srcNormals[i0] + srcNormals[i1] + srcNormals[i2]) / 3f).normalized;
             }
 
-            // ── Phase 1: Per-triangle region anchoring ──
-            // For each target triangle, find which source 3D region it maps to
-            var tTris = targetMesh.triangles;
-            int tTriCount = tTris.Length / 3;
-            var triRegionAnchor = new Vector3[tTriCount]; // 3D centroid of best source tri
+            // ── Phase 1: Extract shells ──
+            var srcShells = UvShellExtractor.Extract(srcUv0, srcTris);
+            var tgtTris = targetMesh.triangles;
+            var tgtShells = UvShellExtractor.Extract(tUv0, tgtTris);
 
-            for (int ti = 0; ti < tTriCount; ti++)
+            // Compute 3D centroid for each source shell
+            var srcCentroid3D = new Vector3[srcShells.Count];
+            for (int si = 0; si < srcShells.Count; si++)
             {
-                int tI0 = tTris[ti * 3], tI1 = tTris[ti * 3 + 1], tI2 = tTris[ti * 3 + 2];
-                Vector2 tCentUv0 = (tUv0[tI0] + tUv0[tI1] + tUv0[tI2]) / 3f;
-                Vector3 tCent3D = (tVerts[tI0] + tVerts[tI1] + tVerts[tI2]) / 3f;
-                Vector3 tE1 = tVerts[tI1] - tVerts[tI0];
-                Vector3 tE2 = tVerts[tI2] - tVerts[tI0];
-                Vector3 tFN = Vector3.Cross(tE1, tE2).normalized;
-                if (tFN.sqrMagnitude < 0.5f && tHasN)
-                    tFN = ((tNormals[tI0] + tNormals[tI1] + tNormals[tI2]) / 3f).normalized;
-
-                float bestUvDSq = float.MaxValue;
-                int bestF = -1;
-                for (int f = 0; f < srcTriCount; f++)
+                Vector3 sum = Vector3.zero; int n = 0;
+                foreach (int vi in srcShells[si].vertexIndices)
                 {
-                    float dSq = PointToTri2D(tCentUv0, triUv0A[f], triUv0B[f], triUv0C[f],
-                        out _, out _, out _);
-                    if (dSq < bestUvDSq) { bestUvDSq = dSq; bestF = f; }
+                    if (vi < srcVerts.Length) { sum += srcVerts[vi]; n++; }
                 }
-
-                float th = bestUvDSq + OVERLAP_THRESHOLD;
-                int cc = 0;
-                for (int f = 0; f < srcTriCount; f++)
-                {
-                    if (PointToTri2D(tCentUv0, triUv0A[f], triUv0B[f], triUv0C[f],
-                        out _, out _, out _) <= th) cc++;
-                    if (cc > 1) break;
-                }
-
-                if (cc > 1)
-                {
-                    float bestD = float.MaxValue;
-                    for (int f = 0; f < srcTriCount; f++)
-                    {
-                        if (PointToTri2D(tCentUv0, triUv0A[f], triUv0B[f], triUv0C[f],
-                            out _, out _, out _) > th) continue;
-                        float dot = Vector3.Dot(tFN, triFaceN[f]);
-                        if (dot < NORMAL_DOT_MIN) continue;
-                        float d = (tCent3D - tri3DCentroid[f]).sqrMagnitude;
-                        if (d < bestD) { bestD = d; bestF = f; }
-                    }
-                }
-
-                triRegionAnchor[ti] = bestF >= 0 ? tri3DCentroid[bestF] : Vector3.zero;
+                srcCentroid3D[si] = n > 0 ? sum / n : Vector3.zero;
             }
 
-            // Build vertex → adjacent triangles lookup
-            var vertTris = new List<int>[vertCount];
-            for (int i = 0; i < vertCount; i++) vertTris[i] = new List<int>(6);
-            for (int ti = 0; ti < tTriCount; ti++)
-            {
-                vertTris[tTris[ti * 3]].Add(ti);
-                vertTris[tTris[ti * 3 + 1]].Add(ti);
-                vertTris[tTris[ti * 3 + 2]].Add(ti);
-            }
-
-            // Compute per-vertex region anchor (average of adjacent triangle anchors)
-            var vertRegion = new Vector3[vertCount];
-            for (int vi = 0; vi < vertCount; vi++)
-            {
-                Vector3 sum = Vector3.zero;
-                foreach (int ti in vertTris[vi]) sum += triRegionAnchor[ti];
-                vertRegion[vi] = vertTris[vi].Count > 0 ? sum / vertTris[vi].Count : tVerts[vi];
-            }
-
-            // ── Phase 2: Per-vertex UV0 lookup with region-constrained disambiguation ──
+            // ── Phase 2 & 3: Match shells + transfer vertices ──
             int transferred = 0;
-            int disambiguated = 0;
-            var vertBestFace = new int[vertCount];
-            for (int i = 0; i < vertCount; i++) vertBestFace[i] = -1;
+            int shellsMatched = 0;
 
-            for (int vi = 0; vi < vertCount; vi++)
+            for (int tsi = 0; tsi < tgtShells.Count; tsi++)
             {
-                Vector2 tUv = tUv0[vi];
-                Vector3 tPos = tVerts[vi];
-                Vector3 tN = tHasN ? tNormals[vi] : Vector3.up;
-                Vector3 regionAnchor = vertRegion[vi];
+                var tShell = tgtShells[tsi];
 
-                // Step 1: Find nearest source triangle in UV0 space
-                float bestUv0DistSq = float.MaxValue;
-                int bestFace = -1;
-                float bestU = 0, bestV = 0, bestW = 0;
-
-                for (int f = 0; f < srcTriCount; f++)
+                // Compute target shell 3D centroid
+                Vector3 tCentroid = Vector3.zero; int tN = 0;
+                foreach (int vi in tShell.vertexIndices)
                 {
-                    float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                        out float u, out float v, out float w);
-                    if (dSq < bestUv0DistSq)
-                    {
-                        bestUv0DistSq = dSq;
-                        bestFace = f;
-                        bestU = u; bestV = v; bestW = w;
-                    }
+                    if (vi < tVerts.Length) { tCentroid += tVerts[vi]; tN++; }
+                }
+                if (tN > 0) tCentroid /= tN;
+
+                // Find best source shell by 3D centroid distance
+                float bestDist = float.MaxValue;
+                int bestSrc = -1;
+                for (int si = 0; si < srcShells.Count; si++)
+                {
+                    float d = (tCentroid - srcCentroid3D[si]).sqrMagnitude;
+                    if (d < bestDist) { bestDist = d; bestSrc = si; }
                 }
 
-                if (bestFace < 0) continue;
+                if (bestSrc < 0) continue;
+                shellsMatched++;
 
-                // Step 2: Disambiguation using region anchor
-                float threshold = bestUv0DistSq + OVERLAP_THRESHOLD;
+                // Get matched source shell's face list
+                var srcFaces = srcShells[bestSrc].faceIndices;
 
-                int candidateCount = 0;
-                for (int f = 0; f < srcTriCount; f++)
+                // Per-vertex UV0→UV2 lookup within matched shell only
+                foreach (int vi in tShell.vertexIndices)
                 {
-                    float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                        out _, out _, out _);
-                    if (dSq <= threshold) candidateCount++;
-                    if (candidateCount > 1) break;
-                }
+                    if (vi >= tUv0.Length) continue;
+                    Vector2 tUv = tUv0[vi];
 
-                if (candidateCount > 1)
-                {
-                    disambiguated++;
-                    float best3DDistSq = float.MaxValue;
+                    float bestDSq = float.MaxValue;
+                    int bestF = -1;
+                    float bestU = 0, bestV = 0, bestW = 0;
 
-                    for (int f = 0; f < srcTriCount; f++)
+                    for (int fi = 0; fi < srcFaces.Count; fi++)
                     {
-                        float uvDSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                        int f = srcFaces[fi];
+                        float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
                             out float u, out float v, out float w);
-                        if (uvDSq > threshold) continue;
-
-                        float dot = Vector3.Dot(tN, triFaceN[f]);
-                        if (dot < NORMAL_DOT_MIN) continue;
-
-                        // Distance from source centroid to vertex's REGION anchor
-                        float d3D = (regionAnchor - tri3DCentroid[f]).sqrMagnitude;
-                        if (d3D < best3DDistSq)
+                        if (dSq < bestDSq)
                         {
-                            best3DDistSq = d3D;
-                            bestFace = f;
+                            bestDSq = dSq; bestF = f;
                             bestU = u; bestV = v; bestW = w;
                         }
                     }
-                }
 
-                // Step 3: Interpolate UV2 using UV0 barycentrics
-                result.uv2[vi] = triUv2A[bestFace] * bestU
-                               + triUv2B[bestFace] * bestV
-                               + triUv2C[bestFace] * bestW;
-                vertBestFace[vi] = bestFace;
-                transferred++;
+                    if (bestF >= 0)
+                    {
+                        result.uv2[vi] = triUv2A[bestF] * bestU
+                                       + triUv2B[bestF] * bestV
+                                       + triUv2C[bestF] * bestW;
+                        transferred++;
+                    }
+                }
             }
 
             result.verticesTransferred = transferred;
+            result.shellsMatched = shellsMatched;
 
-            var srcShells = UvShellExtractor.Extract(srcUv0, srcTris);
-            result.shellsMatched = srcShells.Count;
-
-            Debug.Log($"[GroupedTransfer] '{targetMesh.name}': " +
-                      $"per-vertex UV0 + region-lock, " +
-                      $"{transferred}/{vertCount} verts" +
-                      (disambiguated > 0 ? $", {disambiguated} disambiguated" : ""));
-
-            // ── Post-transfer: shell majority vote ──
-            // Build source face → UV2 shell mapping
-            var srcUv2Shells = UvShellExtractor.Extract(srcUv2, srcTris);
-            var srcFaceShell = new int[srcTriCount];
-            for (int si = 0; si < srcUv2Shells.Count; si++)
-                foreach (int fi in srcUv2Shells[si].faceIndices)
-                    srcFaceShell[fi] = si;
-
-            // For each target triangle: if 2 of 3 verts agree on UV2 shell, fix the outlier
-            int majorityFixed = 0;
-            for (int ti = 0; ti < tTriCount; ti++)
-            {
-                int tI0 = tTris[ti * 3], tI1 = tTris[ti * 3 + 1], tI2 = tTris[ti * 3 + 2];
-                int f0 = vertBestFace[tI0], f1 = vertBestFace[tI1], f2 = vertBestFace[tI2];
-                if (f0 < 0 || f1 < 0 || f2 < 0) continue;
-
-                int s0 = srcFaceShell[f0], s1 = srcFaceShell[f1], s2 = srcFaceShell[f2];
-                // All agree or all different — skip
-                if (s0 == s1 && s1 == s2) continue;
-                if (s0 != s1 && s1 != s2 && s0 != s2) continue;
-
-                // Find outlier and majority shell
-                int outlierVi, majorityShell;
-                if (s0 == s1) { outlierVi = tI2; majorityShell = s0; }
-                else if (s0 == s2) { outlierVi = tI1; majorityShell = s0; }
-                else { outlierVi = tI0; majorityShell = s1; }
-
-                // Re-transfer outlier constrained to majority shell's source faces
-                Vector2 oUv = tUv0[outlierVi];
-                Vector3 oN = tHasN ? tNormals[outlierVi] : Vector3.up;
-
-                float bestDSq = float.MaxValue;
-                int bestF2 = -1;
-                float bestU2 = 0, bestV2 = 0, bestW2 = 0;
-                for (int f = 0; f < srcTriCount; f++)
-                {
-                    if (srcFaceShell[f] != majorityShell) continue;
-                    float dSq = PointToTri2D(oUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                        out float u, out float v, out float w);
-                    if (dSq < bestDSq)
-                    {
-                        bestDSq = dSq; bestF2 = f;
-                        bestU2 = u; bestV2 = v; bestW2 = w;
-                    }
-                }
-                if (bestF2 >= 0)
-                {
-                    result.uv2[outlierVi] = triUv2A[bestF2] * bestU2
-                                          + triUv2B[bestF2] * bestV2
-                                          + triUv2C[bestF2] * bestW2;
-                    vertBestFace[outlierVi] = bestF2;
-                    majorityFixed++;
-                }
-            }
-            if (majorityFixed > 0)
-                Debug.Log($"[GroupedTransfer] '{targetMesh.name}': {majorityFixed} verts fixed by shell majority vote");
+            Debug.Log($"[GroupedTransfer] '{targetMesh.name}': shell-first, " +
+                      $"{tgtShells.Count} target → {shellsMatched} matched, " +
+                      $"{transferred}/{vertCount} verts");
 
             // UV2 bounds check
             int oob = 0;
@@ -445,52 +302,6 @@ namespace LightmapUvTool
                 float t = Mathf.Clamp01(Vector2.Dot(p - b, bc) / Mathf.Max(bcL, 1e-12f));
                 float d = (p - (b + bc * t)).sqrMagnitude;
                 if (d < best) { best = d; u = 0f; v = 1f - t; w = t; }
-            }
-            return best;
-        }
-
-        // ═══════════════════════════════════════════════════════════
-        //  3D closest point on triangle — returns squared distance
-        // ═══════════════════════════════════════════════════════════
-
-        static float ClosestPointOnTri3DSq(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
-        {
-            Vector3 ab = b - a, ac = c - a, ap = p - a;
-            float d00 = Vector3.Dot(ab, ab), d01 = Vector3.Dot(ab, ac);
-            float d11 = Vector3.Dot(ac, ac), d20 = Vector3.Dot(ap, ab);
-            float d21 = Vector3.Dot(ap, ac);
-            float denom = d00 * d11 - d01 * d01;
-
-            if (Mathf.Abs(denom) < 1e-12f)
-                return (p - a).sqrMagnitude;
-
-            float bv = (d11 * d20 - d01 * d21) / denom;
-            float bw = (d00 * d21 - d01 * d20) / denom;
-            float bu = 1f - bv - bw;
-
-            if (bu >= 0f && bv >= 0f && bw >= 0f)
-            {
-                Vector3 proj = a * bu + b * bv + c * bw;
-                return (p - proj).sqrMagnitude;
-            }
-
-            // Clamp to edges
-            float best = float.MaxValue;
-            { // AB
-                float t = Mathf.Clamp01(Vector3.Dot(p - a, ab) / Mathf.Max(d00, 1e-12f));
-                float d = (p - (a + ab * t)).sqrMagnitude;
-                if (d < best) best = d;
-            }
-            { // AC
-                float t = Mathf.Clamp01(Vector3.Dot(p - a, ac) / Mathf.Max(d11, 1e-12f));
-                float d = (p - (a + ac * t)).sqrMagnitude;
-                if (d < best) best = d;
-            }
-            { // BC
-                Vector3 bc = c - b; float bcL = Vector3.Dot(bc, bc);
-                float t = Mathf.Clamp01(Vector3.Dot(p - b, bc) / Mathf.Max(bcL, 1e-12f));
-                float d = (p - (b + bc * t)).sqrMagnitude;
-                if (d < best) best = d;
             }
             return best;
         }
