@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.5] - 2026-03-01
+
+### Fixed — Weld button runs source-guided weld
+- **Weld button now two-phase**: Phase 1 = false-seam weld (pos+uv0+normal)
+  for all meshes. Phase 2 = source-guided weld for target LODs — merges
+  vertices by pos+normal when both belong to same source UV0 shell.
+  Previously source-guided weld was hidden inside Transfer step only.
+- **SourceGuidedWeld returns original** when nothing to weld (avoids
+  unnecessary mesh copies).
+
 ## [0.7.4] - 2026-03-01
 
 ### Changed — Source-guided weld + 3D nearest-vertex transfer

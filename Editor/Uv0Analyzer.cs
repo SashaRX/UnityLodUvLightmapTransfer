@@ -487,7 +487,7 @@ namespace LightmapUvTool
             if (weldMap.Count == 0)
             {
                 Debug.Log($"[UV0Fix] SourceGuidedWeld '{target.name}': nothing to weld");
-                return Object.Instantiate(target);
+                return target;
             }
 
             // ── Remap + compact (same as WeldUv0) ──

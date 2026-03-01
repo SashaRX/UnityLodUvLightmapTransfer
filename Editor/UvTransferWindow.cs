@@ -376,10 +376,13 @@ namespace LightmapUvTool
                     }
                 }
 
-                if (anyIssues && !uv0Welded)
+                // Show weld button if: false seam issues exist, OR target LODs exist
+                // (source-guided weld may be needed even without false seams)
+                bool hasTargetLods = meshEntries.Any(e => e.include && e.lodIndex != sourceLodIndex);
+                if ((anyIssues || hasTargetLods) && !uv0Welded)
                 {
                     EditorGUILayout.Space(4);
-                    ColorBtn(new Color(.9f,.7f,.2f), "Weld False Seams (all meshes)", 24, ExecWeldUv0);
+                    ColorBtn(new Color(.9f,.7f,.2f), "Weld (false seams + source-guided)", 24, ExecWeldUv0);
                 }
                 else if (uv0Welded)
                 {
@@ -849,28 +852,54 @@ namespace LightmapUvTool
         {
             if (lodGroup == null) return;
 
-            int totalWelded = 0;
+            // ── Phase 1: false-seam weld (pos+uv0+normal match) ──
+            int falseSeamWelded = 0;
             foreach (var e in meshEntries)
             {
                 if (!e.include || e.originalMesh == null) continue;
 
-                // Check if this mesh has false seams
                 int id = e.originalMesh.GetInstanceID();
                 if (!uv0Reports.TryGetValue(id, out var report)) continue;
                 if (report.falseSeamPairs == 0) continue;
 
-                // Weld: creates new mesh with merged indices
                 var welded = Uv0Analyzer.WeldUv0(e.originalMesh);
                 if (welded != null && welded != e.originalMesh)
                 {
                     e.originalMesh = welded;
                     e.wasWelded = true;
-                    totalWelded++;
+                    falseSeamWelded++;
                 }
             }
 
-            uv0Welded = totalWelded > 0;
-            Debug.Log($"[UV0Fix] Welded {totalWelded} meshes (working copies only, FBX untouched)");
+            // ── Phase 2: source-guided weld for target LODs ──
+            // Merge target vertices that map to the same source UV0 shell
+            int guidedWelded = 0;
+            var srcE = ForLod(sourceLodIndex);
+            for (int li = 0; li < LodN; li++)
+            {
+                if (li == sourceLodIndex) continue;
+                var tgtE = ForLod(li);
+                for (int ti = 0; ti < tgtE.Count; ti++)
+                {
+                    var te = tgtE[ti];
+                    if (te.originalMesh == null) continue;
+                    var se = ti < srcE.Count ? srcE[ti] : srcE[0];
+                    Mesh sM = se.originalMesh;
+                    if (sM == null) continue;
+
+                    var welded = Uv0Analyzer.SourceGuidedWeld(te.originalMesh, sM);
+                    if (welded != null && welded != te.originalMesh)
+                    {
+                        te.originalMesh = welded;
+                        te.wasWelded = true;
+                        guidedWelded++;
+                    }
+                }
+            }
+
+            uv0Welded = falseSeamWelded > 0 || guidedWelded > 0;
+            Debug.Log($"[UV0Fix] Welded: {falseSeamWelded} false-seam, " +
+                      $"{guidedWelded} source-guided (working copies only, FBX untouched)");
 
             // Re-analyze to show updated state
             ExecAnalyzeUv0();
