@@ -231,8 +231,9 @@ namespace LightmapUvTool
                         float dot = Vector3.Dot(tN, triFaceN[f]);
                         if (dot < NORMAL_DOT_MIN) continue;
 
-                        // 3D distance to triangle centroid
-                        float d3D = (tPos - tri3DCentroid[f]).sqrMagnitude;
+                        // 3D distance: closest point on triangle surface
+                        int ii0 = srcTris[f * 3], ii1 = srcTris[f * 3 + 1], ii2 = srcTris[f * 3 + 2];
+                        float d3D = ClosestPointOnTri3DSq(tPos, srcVerts[ii0], srcVerts[ii1], srcVerts[ii2]);
                         if (d3D < best3DDistSq)
                         {
                             best3DDistSq = d3D;
@@ -324,6 +325,52 @@ namespace LightmapUvTool
                 float t = Mathf.Clamp01(Vector2.Dot(p - b, bc) / Mathf.Max(bcL, 1e-12f));
                 float d = (p - (b + bc * t)).sqrMagnitude;
                 if (d < best) { best = d; u = 0f; v = 1f - t; w = t; }
+            }
+            return best;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  3D closest point on triangle — returns squared distance
+        // ═══════════════════════════════════════════════════════════
+
+        static float ClosestPointOnTri3DSq(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+        {
+            Vector3 ab = b - a, ac = c - a, ap = p - a;
+            float d00 = Vector3.Dot(ab, ab), d01 = Vector3.Dot(ab, ac);
+            float d11 = Vector3.Dot(ac, ac), d20 = Vector3.Dot(ap, ab);
+            float d21 = Vector3.Dot(ap, ac);
+            float denom = d00 * d11 - d01 * d01;
+
+            if (Mathf.Abs(denom) < 1e-12f)
+                return (p - a).sqrMagnitude;
+
+            float bv = (d11 * d20 - d01 * d21) / denom;
+            float bw = (d00 * d21 - d01 * d20) / denom;
+            float bu = 1f - bv - bw;
+
+            if (bu >= 0f && bv >= 0f && bw >= 0f)
+            {
+                Vector3 proj = a * bu + b * bv + c * bw;
+                return (p - proj).sqrMagnitude;
+            }
+
+            // Clamp to edges
+            float best = float.MaxValue;
+            { // AB
+                float t = Mathf.Clamp01(Vector3.Dot(p - a, ab) / Mathf.Max(d00, 1e-12f));
+                float d = (p - (a + ab * t)).sqrMagnitude;
+                if (d < best) best = d;
+            }
+            { // AC
+                float t = Mathf.Clamp01(Vector3.Dot(p - a, ac) / Mathf.Max(d11, 1e-12f));
+                float d = (p - (a + ac * t)).sqrMagnitude;
+                if (d < best) best = d;
+            }
+            { // BC
+                Vector3 bc = c - b; float bcL = Vector3.Dot(bc, bc);
+                float t = Mathf.Clamp01(Vector3.Dot(p - b, bc) / Mathf.Max(bcL, 1e-12f));
+                float d = (p - (b + bc * t)).sqrMagnitude;
+                if (d < best) best = d;
             }
             return best;
         }
