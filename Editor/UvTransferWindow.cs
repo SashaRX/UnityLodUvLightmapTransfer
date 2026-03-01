@@ -50,8 +50,9 @@ namespace LightmapUvTool
         bool hasRepack, hasTransfer;
 
         // Canvas
-        Vector2 canvasScroll;
-        float zoom = 1f;
+        float canvasZoom = 1f;
+        Vector2 canvasPan;      // pixel offset from centered position
+        bool canvasPanning;
         int  pvChannel = 2;
         int  pvLod     = 0;
         bool showFill = true, showWire = true, showBorder, showStatus;
@@ -622,7 +623,9 @@ namespace LightmapUvTool
             showBorder = GUILayout.Toggle(showBorder, "Bd", EditorStyles.toolbarButton, GUILayout.Width(22));
             showStatus = GUILayout.Toggle(showStatus, "St", EditorStyles.toolbarButton, GUILayout.Width(22));
             GUILayout.Space(4);
-            zoom = EditorGUILayout.Slider(zoom, .5f, 4f, GUILayout.Width(100));
+            canvasZoom = EditorGUILayout.Slider(canvasZoom, .1f, 20f, GUILayout.Width(100));
+            if (GUILayout.Button("Fit", EditorStyles.toolbarButton, GUILayout.Width(28)))
+            { canvasZoom = 1f; canvasPan = Vector2.zero; }
             if (showFill) fillAlpha = EditorGUILayout.Slider(fillAlpha, .05f, .6f, GUILayout.Width(80));
 
             GUILayout.Space(8);
@@ -656,21 +659,30 @@ namespace LightmapUvTool
             }
             if (draws.Count == 0) return;
 
-            float avW = position.width - sideW - 24;
-            float avH = position.height - 105;
-            float sz = Mathf.Max(64, Mathf.Min(avW, avH) * zoom);
+            // Full available area for the canvas (no ScrollView)
+            var canvasRect = GUILayoutUtility.GetRect(GUIContent.none, GUIStyle.none,
+                GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
 
-            canvasScroll = EditorGUILayout.BeginScrollView(canvasScroll);
-            var rect = GUILayoutUtility.GetRect(sz + 20, sz + 20);
-            float ox = rect.x + 10, oy = rect.y + 10;
+            float baseSz = Mathf.Max(64, Mathf.Min(canvasRect.width, canvasRect.height));
+            float sz = baseSz * canvasZoom;
+
+            // UV square origin in canvas-local coords (centered by default)
+            float cx = (canvasRect.width - sz) * 0.5f + canvasPan.x;
+            float cy = (canvasRect.height - sz) * 0.5f + canvasPan.y;
+
+            // ── Input handling ──
+            HandleCanvasInput(canvasRect, baseSz, sz, cx, cy);
 
             if (Event.current.type == EventType.Repaint && glMat != null)
             {
-                EditorGUI.DrawRect(new Rect(ox, oy, sz, sz), new Color(.12f,.12f,.12f));
+                // Dark background for entire canvas area
+                EditorGUI.DrawRect(canvasRect, new Color(.08f,.08f,.08f));
 
-                // Clip GL rendering to preview rect so UV<0 doesn't overflow onto sidebar
-                GUI.BeginClip(new Rect(ox, oy, sz, sz));
-                float cx = 0, cy = 0; // local coords inside clip rect
+                // Clip ALL GL rendering to the canvas rect (prevents overflow onto sidebar)
+                GUI.BeginClip(canvasRect);
+
+                // UV square background
+                EditorGUI.DrawRect(new Rect(cx, cy, sz, sz), new Color(.12f,.12f,.12f));
 
                 bool push = false;
                 try
@@ -708,7 +720,62 @@ namespace LightmapUvTool
 
                 GUI.EndClip();
             }
-            EditorGUILayout.EndScrollView();
+        }
+
+        void HandleCanvasInput(Rect canvasRect, float baseSz, float sz, float cx, float cy)
+        {
+            var e = Event.current;
+
+            // Scroll wheel → zoom centered on cursor
+            if (e.type == EventType.ScrollWheel && canvasRect.Contains(e.mousePosition))
+            {
+                float oldZoom = canvasZoom;
+                float oldSz = baseSz * oldZoom;
+                float factor = e.delta.y > 0 ? 0.9f : 1.1f;
+                canvasZoom = Mathf.Clamp(canvasZoom * factor, 0.1f, 20f);
+                float newSz = baseSz * canvasZoom;
+
+                // Keep UV point under cursor fixed
+                Vector2 local = e.mousePosition - canvasRect.position;
+                float mx = local.x - cx;
+                float my = local.y - cy;
+                float newCx = local.x - mx * (newSz / oldSz);
+                float newCy = local.y - my * (newSz / oldSz);
+                canvasPan.x = newCx - (canvasRect.width - newSz) * 0.5f;
+                canvasPan.y = newCy - (canvasRect.height - newSz) * 0.5f;
+
+                e.Use();
+                Repaint();
+            }
+
+            // Middle mouse or Alt+Left drag → pan
+            bool startPan = canvasRect.Contains(e.mousePosition) &&
+                            ((e.type == EventType.MouseDown && e.button == 2) ||
+                             (e.type == EventType.MouseDown && e.button == 0 && e.alt));
+            if (startPan)
+            {
+                canvasPanning = true;
+                e.Use();
+            }
+            if (e.type == EventType.MouseDrag && canvasPanning)
+            {
+                canvasPan += e.delta;
+                e.Use();
+                Repaint();
+            }
+            if (e.rawType == EventType.MouseUp && (e.button == 2 || e.button == 0))
+            {
+                canvasPanning = false;
+            }
+
+            // Double-click middle button → fit to view
+            if (e.type == EventType.MouseDown && e.button == 2 && e.clickCount == 2 && canvasRect.Contains(e.mousePosition))
+            {
+                canvasZoom = 1f;
+                canvasPan = Vector2.zero;
+                e.Use();
+                Repaint();
+            }
         }
 
         // ── GL helpers ──
