@@ -861,22 +861,26 @@ namespace LightmapUvTool
         {
             if (lodGroup == null) return;
 
-            // ── Phase 1: false-seam weld (pos+uv0+normal match) ──
-            int falseSeamWelded = 0;
+            // ── Phase 1: meshoptimizer (dedup + cache + overdraw + fetch) ──
+            int meshoptOptimized = 0;
             foreach (var e in meshEntries)
             {
                 if (!e.include || e.originalMesh == null) continue;
 
-                int id = e.originalMesh.GetInstanceID();
-                if (!uv0Reports.TryGetValue(id, out var report)) continue;
-                if (report.falseSeamPairs == 0) continue;
-
-                var welded = Uv0Analyzer.WeldUv0(e.originalMesh);
-                if (welded != null && welded != e.originalMesh)
+                var copy = Instantiate(e.originalMesh);
+                copy.name = e.originalMesh.name + "_optimized";
+                var optResult = MeshOptimizer.Optimize(copy);
+                if (optResult.ok)
                 {
-                    e.originalMesh = welded;
+                    Debug.Log($"[meshopt] '{e.originalMesh.name}': {optResult.originalVertexCount} → {optResult.optimizedVertexCount} verts");
+                    e.originalMesh = copy;
                     e.wasWelded = true;
-                    falseSeamWelded++;
+                    meshoptOptimized++;
+                }
+                else
+                {
+                    Debug.LogWarning($"[meshopt] '{e.originalMesh.name}' failed: {optResult.error}");
+                    DestroyImmediate(copy);
                 }
             }
 
@@ -906,8 +910,8 @@ namespace LightmapUvTool
                 }
             }
 
-            uv0Welded = falseSeamWelded > 0 || guidedWelded > 0;
-            Debug.Log($"[UV0Fix] Welded: {falseSeamWelded} false-seam, " +
+            uv0Welded = meshoptOptimized > 0 || guidedWelded > 0;
+            Debug.Log($"[UV0Fix] Optimized: {meshoptOptimized} meshopt, " +
                       $"{guidedWelded} source-guided (working copies only, FBX untouched)");
 
             // Re-analyze to show updated state
