@@ -710,6 +710,35 @@ namespace LightmapUvTool
             EditorGUILayout.EndScrollView();
         }
 
+        // ── GL helpers ──
+
+        /// <summary>
+        /// Create a writable copy of a mesh. Instantiate() inherits isReadable=false
+        /// from imported FBX meshes, so we manually copy all channels into a new Mesh().
+        /// </summary>
+        static Mesh MakeReadableCopy(Mesh src)
+        {
+            var dst = new Mesh(); // new Mesh() is always isReadable=true
+            dst.indexFormat = src.indexFormat;
+            dst.SetVertices(new List<Vector3>(src.vertices));
+            if (src.normals  != null && src.normals.Length  > 0) dst.SetNormals(new List<Vector3>(src.normals));
+            if (src.tangents != null && src.tangents.Length > 0) dst.SetTangents(new List<Vector4>(src.tangents));
+            if (src.colors   != null && src.colors.Length   > 0) dst.SetColors(new List<Color>(src.colors));
+            if (src.boneWeights != null && src.boneWeights.Length > 0) dst.boneWeights = src.boneWeights;
+            if (src.bindposes   != null && src.bindposes.Length   > 0) dst.bindposes   = src.bindposes;
+            for (int ch = 0; ch < 8; ch++)
+            {
+                var uv = new List<Vector4>();
+                src.GetUVs(ch, uv);
+                if (uv.Count > 0) dst.SetUVs(ch, uv);
+            }
+            dst.subMeshCount = src.subMeshCount;
+            for (int s = 0; s < src.subMeshCount; s++)
+                dst.SetTriangles(src.GetTriangles(s), s);
+            dst.bounds = src.bounds;
+            return dst;
+        }
+
         // ── GL ──
 
         static Vector2[] RdUv(Mesh m, int ch) { var l = new List<Vector2>(); m.GetUVs(ch, l); return l.Count > 0 ? l.ToArray() : null; }
@@ -875,7 +904,7 @@ namespace LightmapUvTool
             {
                 if (!e.include || e.originalMesh == null) continue;
 
-                var copy = Instantiate(e.originalMesh);
+                var copy = MakeReadableCopy(e.originalMesh);
                 copy.name = e.originalMesh.name + "_optimized";
                 var optResult = MeshOptimizer.Optimize(copy);
                 if (optResult.ok)
