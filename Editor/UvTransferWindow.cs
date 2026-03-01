@@ -13,6 +13,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEditor;
 
 namespace LightmapUvTool
@@ -726,11 +727,30 @@ namespace LightmapUvTool
             if (src.colors   != null && src.colors.Length   > 0) dst.SetColors(new List<Color>(src.colors));
             if (src.boneWeights != null && src.boneWeights.Length > 0) dst.boneWeights = src.boneWeights;
             if (src.bindposes   != null && src.bindposes.Length   > 0) dst.bindposes   = src.bindposes;
+            // Copy UVs preserving original dimension (Vector2/3/4).
+            // Skip UV2 (channel 2) — it will be overwritten by transfer and its presence
+            // would change MeshOptimizer's channel layout, causing dedup mismatch with postprocessor.
             for (int ch = 0; ch < 8; ch++)
             {
-                var uv = new List<Vector4>();
-                src.GetUVs(ch, uv);
-                if (uv.Count > 0) dst.SetUVs(ch, uv);
+                if (ch == 2) continue; // UV2 is our output channel
+                var attr = (VertexAttribute)((int)VertexAttribute.TexCoord0 + ch);
+                if (!src.HasVertexAttribute(attr)) continue;
+                int dim = src.GetVertexAttributeDimension(attr);
+                if (dim <= 2)
+                {
+                    var uv = new List<Vector2>(); src.GetUVs(ch, uv);
+                    if (uv.Count > 0) dst.SetUVs(ch, uv);
+                }
+                else if (dim == 3)
+                {
+                    var uv = new List<Vector3>(); src.GetUVs(ch, uv);
+                    if (uv.Count > 0) dst.SetUVs(ch, uv);
+                }
+                else
+                {
+                    var uv = new List<Vector4>(); src.GetUVs(ch, uv);
+                    if (uv.Count > 0) dst.SetUVs(ch, uv);
+                }
             }
             dst.subMeshCount = src.subMeshCount;
             for (int s = 0; s < src.subMeshCount; s++)
