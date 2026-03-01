@@ -165,6 +165,9 @@ EXPORT int xatlasGetOutputIndices(
 // vertexData:          interleaved vertex buffer, position MUST be first 12 bytes (float3)
 // vertexCount:         number of vertices in the input
 // vertexStride:        bytes per vertex (must be >= 12)
+// dedupStride:         bytes to compare per vertex for deduplication (0 = full vertexStride)
+//                      Use this to exclude tangent/color from dedup comparison.
+//                      Dedup-relevant channels (pos, normal, uvs) must be packed first in layout.
 // indices:             input index buffer (triangles)
 // indexCount:          number of indices (must be multiple of 3)
 // overdrawThreshold:   meshopt_optimizeOverdraw threshold (typically 1.05)
@@ -179,6 +182,7 @@ EXPORT int meshoptOptimize(
     const unsigned char* vertexData,
     uint32_t             vertexCount,
     uint32_t             vertexStride,
+    uint32_t             dedupStride,
     const uint32_t*      indices,
     uint32_t             indexCount,
     float                overdrawThreshold,
@@ -199,12 +203,28 @@ EXPORT int meshoptOptimize(
     }
 
     // ── 1. Generate vertex remap (deduplication) ──
+    // If dedupStride is set, build a key-only buffer for comparison
+    uint32_t actualDedupStride = (dedupStride > 0 && dedupStride <= vertexStride) ? dedupStride : vertexStride;
+    
     std::vector<unsigned int> remap(vertexCount);
-    size_t newVertexCount = meshopt_generateVertexRemap(
-        remap.data(), indices, indexCount,
-        vertexData, vertexCount, vertexStride);
+    size_t newVertexCount;
+    
+    if (actualDedupStride < vertexStride) {
+        // Build compacted key buffer (only dedup-relevant bytes per vertex)
+        std::vector<unsigned char> keyBuffer(vertexCount * actualDedupStride);
+        for (uint32_t i = 0; i < vertexCount; i++)
+            memcpy(&keyBuffer[i * actualDedupStride], &vertexData[i * vertexStride], actualDedupStride);
+        
+        newVertexCount = meshopt_generateVertexRemap(
+            remap.data(), indices, indexCount,
+            keyBuffer.data(), vertexCount, actualDedupStride);
+    } else {
+        newVertexCount = meshopt_generateVertexRemap(
+            remap.data(), indices, indexCount,
+            vertexData, vertexCount, vertexStride);
+    }
 
-    // ── 2. Apply remap to index and vertex buffers ──
+    // ── 2. Apply remap to FULL vertex buffer (all channels including tangent) ──
     meshopt_remapIndexBuffer(outIndices, indices, indexCount, remap.data());
     meshopt_remapVertexBuffer(outVertexData, vertexData, vertexCount, vertexStride, remap.data());
 

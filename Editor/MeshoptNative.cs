@@ -19,6 +19,7 @@ namespace LightmapUvTool
             byte[]   vertexData,
             uint     vertexCount,
             uint     vertexStride,
+            uint     dedupStride,
             uint[]   indices,
             uint     indexCount,
             float    overdrawThreshold,

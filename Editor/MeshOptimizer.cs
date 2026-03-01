@@ -38,6 +38,7 @@ namespace LightmapUvTool
             public int tangentOffset;
             public int colorOffset;
             public int totalStride;
+            public int dedupStride; // bytes to compare for dedup (pos + normal + uv0 only)
         }
 
         /// <summary>
@@ -86,7 +87,7 @@ namespace LightmapUvTool
                 uvDimStr.Append(layout.uvDim[ch]);
             }
 
-            Debug.Log($"[meshopt] Channel layout: stride={layout.totalStride}, " +
+            Debug.Log($"[meshopt] Channel layout: stride={layout.totalStride}, dedupStride={layout.dedupStride}, " +
                       $"normal={layout.hasNormal}, tangent={layout.hasTangent}, color={layout.hasColor}, " +
                       $"uv dims=[{uvDimStr}]");
 
@@ -161,6 +162,7 @@ namespace LightmapUvTool
                 // Call native meshoptimizer pipeline
                 int err = MeshoptNative.meshoptOptimize(
                     vertexBytes, (uint)localVertCount, (uint)layout.totalStride,
+                    (uint)layout.dedupStride,
                     localIndices, localIndexCount,
                     overdrawThreshold,
                     outVertexBytes, outIndices, out outVertCount);
@@ -269,6 +271,7 @@ namespace LightmapUvTool
                     layout.uvDim[ch] = mesh.GetVertexAttributeDimension(attr);
             }
 
+            // ── Dedup-relevant channels FIRST: pos + normal + uv0 ──
             // Position is always first: 12 bytes (float3)
             int offset = 12;
 
@@ -276,6 +279,14 @@ namespace LightmapUvTool
             layout.normalOffset = offset;
             if (layout.hasNormal) offset += 12;
 
+            // UV0: dim * 4 bytes (placed before tangent for dedup!)
+            layout.uvOffset[0] = offset;
+            if (layout.uvDim[0] > 0) offset += layout.uvDim[0] * 4;
+
+            // ── dedupStride boundary ── everything above is compared for dedup
+            layout.dedupStride = offset;
+
+            // ── Non-dedup channels after ──
             // Tangent: 16 bytes (float4)
             layout.tangentOffset = offset;
             if (layout.hasTangent) offset += 16;
@@ -284,12 +295,12 @@ namespace LightmapUvTool
             layout.colorOffset = offset;
             if (layout.hasColor) offset += 4;
 
-            // UV channels: dim * 4 bytes each
-            for (int ch = 0; ch < MAX_UV_CHANNELS; ch++)
+            // UV channels 1–7: dim * 4 bytes each
+            for (int ch = 1; ch < MAX_UV_CHANNELS; ch++)
             {
                 layout.uvOffset[ch] = offset;
                 if (layout.uvDim[ch] > 0)
-                    offset += layout.uvDim[ch] * 4;  // sizeof(float) * dimension
+                    offset += layout.uvDim[ch] * 4;
             }
 
             layout.totalStride = offset;
