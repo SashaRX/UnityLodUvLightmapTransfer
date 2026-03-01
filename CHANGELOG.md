@@ -9,6 +9,20 @@
   re-selecting a previously processed LODGroup.
 - **[W] badge** on welded meshes in the mesh list.
 
+## [0.8.1] - 2026-03-01
+
+### Changed — Triangle surface projection transfer (replaces vertex-based)
+- **Completely replaced vertex-based nearest matching with triangle projection**.
+  For each target vertex: find nearest source TRIANGLE by point-to-triangle
+  distance (filtered by face normal dot > 0.3), compute barycentric coordinates,
+  interpolate UV2 from the 3 source triangle vertices.
+- Triangle is atomic — all 3 vertices belong to same UV2 shell, eliminating
+  seam ambiguity that plagued all vertex-based approaches.
+- Includes full ClosestPointOnTriangle implementation (Ericson algorithm)
+  with proper edge/vertex clamping for barycentric coords.
+- UvTransferWindow now calls Transfer(targetMesh, sourceMesh) instead of
+  Transfer(targetMesh, sourceShellInfos).
+
 ## [0.8.0] - 2026-03-01
 
 ### Fixed — 3-pass transfer: normal → 3D → UV0 disambiguation

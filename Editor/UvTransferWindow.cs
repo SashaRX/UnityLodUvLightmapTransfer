@@ -1005,8 +1005,8 @@ namespace LightmapUvTool
                         tM = weldedTarget;
                     }
 
-                    // Transfer: 3D nearest-vertex UV2 copy
-                    var tr = GroupedShellTransfer.Transfer(tM, srcInfos);
+                    // Transfer: triangle surface projection UV2 copy
+                    var tr = GroupedShellTransfer.Transfer(tM, sM);
                     if (tr.uv2 == null) continue;
 
                     var om = Instantiate(tM); om.name = tM.name+"_uvTransfer";
