@@ -1,10 +1,10 @@
-// GroupedShellTransfer.cs — UV2 transfer via triangle surface projection
-// For each target vertex:
-// 1. Find nearest source TRIANGLE (not vertex) filtered by face normal
-// 2. Compute barycentric coordinates on that triangle
-// 3. Interpolate UV2 from the 3 triangle vertices
-// Triangle is atomic: all 3 vertices in same UV2 shell → no seam ambiguity.
-// Normal filter separates front/back of thin walls.
+// GroupedShellTransfer.cs — UV2 transfer via shell assignment + UV0-space projection
+// Two-phase approach:
+// Phase 1: Shell assignment — for each target vertex, determine source shell
+//          via 3D nearest vertex with normal filter (separates thin wall sides)
+// Phase 2: UV0 transfer — within assigned shell, find nearest source triangle
+//          in UV0 SPACE (not 3D), compute UV0 barycentric, interpolate UV2.
+//          This is equivalent to 3ds Max "UV Weld Selected" approach.
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -13,7 +13,7 @@ namespace LightmapUvTool
 {
     public static class GroupedShellTransfer
     {
-        // ─── Shell info for cross-LOD analysis (kept for UI stats) ───
+        // ─── Shell info for cross-LOD analysis ───
         public class SourceShellInfo
         {
             public int shellId;
@@ -28,6 +28,9 @@ namespace LightmapUvTool
             public Vector3[] normals;
             public Vector2[] shellUv0;
             public Vector2[] shellUv2;
+
+            // Triangle data for UV0-space projection
+            public List<int> faceIndices;
         }
 
         // ─── Result of transfer for one target mesh ───
@@ -41,8 +44,9 @@ namespace LightmapUvTool
             public int verticesTotal;
         }
 
+
         // ═══════════════════════════════════════════════════════════
-        //  Step 1: Analyze source mesh — extract UV0 shells (for UI)
+        //  Step 1: Analyze source mesh — extract UV0 shells
         // ═══════════════════════════════════════════════════════════
 
         public static SourceShellInfo[] AnalyzeSource(Mesh sourceMesh)
@@ -108,7 +112,8 @@ namespace LightmapUvTool
                     worldPositions = posList.ToArray(),
                     normals = nrmList.ToArray(),
                     shellUv0 = uv0sList.ToArray(),
-                    shellUv2 = uv2sList.ToArray()
+                    shellUv2 = uv2sList.ToArray(),
+                    faceIndices = shell.faceIndices
                 };
             }
 
@@ -117,16 +122,13 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Step 2: Transfer UV2 via triangle surface projection
-        //  For each target vertex:
-        //  1. Find nearest source TRIANGLE by point-to-triangle distance
-        //     filtered by face normal (dot > threshold)
-        //  2. Compute barycentric coordinates on that triangle
-        //  3. Interpolate UV2 from the 3 triangle vertices
+        //  Step 2: Two-phase transfer
+        //  Phase 1: Shell assignment via 3D nearest + normal filter
+        //  Phase 2: UV0-space triangle projection within assigned shell
         //
-        //  Triangle is atomic — all 3 vertices belong to the same
-        //  UV2 shell. No seam ambiguity possible.
-        //  Normal filter separates front/back of thin walls.
+        //  This matches 3ds Max "UV Weld Selected" logic:
+        //  shell identity comes from 3D geometry,
+        //  UV2 transfer happens entirely in UV0 space.
         // ═══════════════════════════════════════════════════════════
 
         const float NORMAL_DOT_THRESHOLD = 0.3f;
@@ -139,60 +141,74 @@ namespace LightmapUvTool
             var srcVerts = sourceMesh.vertices;
             var srcNormals = sourceMesh.normals;
             var srcTris = sourceMesh.triangles;
+            var srcUv0List = new List<Vector2>();
             var srcUv2List = new List<Vector2>();
+            sourceMesh.GetUVs(0, srcUv0List);
             sourceMesh.GetUVs(2, srcUv2List);
+            var srcUv0 = srcUv0List.ToArray();
             var srcUv2 = srcUv2List.ToArray();
             bool srcHasNormals = srcNormals != null && srcNormals.Length == srcVerts.Length;
 
-            if (srcUv2.Length == 0)
+            if (srcUv0.Length == 0 || srcUv2.Length == 0)
             {
-                Debug.LogError("[GroupedTransfer] Source mesh has no UV2");
+                Debug.LogError("[GroupedTransfer] Source mesh missing UV0 or UV2");
                 return result;
             }
 
             // Target data
             var tVerts = targetMesh.vertices;
             var tNormals = targetMesh.normals;
+            var tUv0List = new List<Vector2>();
+            targetMesh.GetUVs(0, tUv0List);
+            var tUv0 = tUv0List.ToArray();
             int vertCount = targetMesh.vertexCount;
             bool tHasNormals = tNormals != null && tNormals.Length == vertCount;
+
+            if (tUv0.Length == 0)
+            {
+                Debug.LogError("[GroupedTransfer] Target mesh missing UV0");
+                return result;
+            }
 
             result.uv2 = new Vector2[vertCount];
             result.verticesTotal = vertCount;
 
-            // Pre-compute source triangle data
-            int triCount = srcTris.Length / 3;
-            var triA = new Vector3[triCount];
-            var triB = new Vector3[triCount];
-            var triC = new Vector3[triCount];
-            var triFaceNormal = new Vector3[triCount];
-            var triUv2A = new Vector2[triCount];
-            var triUv2B = new Vector2[triCount];
-            var triUv2C = new Vector2[triCount];
+            // ── Extract source UV0 shells ──
+            var shells = UvShellExtractor.Extract(srcUv0, srcTris);
 
-            for (int t = 0; t < triCount; t++)
+            // Build vertex→shell mapping for source
+            int[] srcVertShell = new int[srcVerts.Length];
+            for (int i = 0; i < srcVertShell.Length; i++) srcVertShell[i] = -1;
+            for (int si = 0; si < shells.Count; si++)
+                foreach (int vi in shells[si].vertexIndices)
+                    srcVertShell[vi] = si;
+
+            // ── Build per-shell triangle lists ──
+            // Each shell has triangles; we store their UV0 coords and UV2 coords
+            int srcTriCount = srcTris.Length / 3;
+            int[] triShell = new int[srcTriCount];
+            for (int f = 0; f < srcTriCount; f++)
             {
-                int i0 = srcTris[t * 3], i1 = srcTris[t * 3 + 1], i2 = srcTris[t * 3 + 2];
-                triA[t] = srcVerts[i0];
-                triB[t] = srcVerts[i1];
-                triC[t] = srcVerts[i2];
-                triUv2A[t] = srcUv2[i0];
-                triUv2B[t] = srcUv2[i1];
-                triUv2C[t] = srcUv2[i2];
-
-                // Face normal from cross product
-                Vector3 edge1 = triB[t] - triA[t];
-                Vector3 edge2 = triC[t] - triA[t];
-                triFaceNormal[t] = Vector3.Cross(edge1, edge2).normalized;
-
-                // Fallback: use averaged vertex normals if cross product is degenerate
-                if (triFaceNormal[t].sqrMagnitude < 0.5f && srcHasNormals)
-                {
-                    triFaceNormal[t] = ((srcNormals[i0] + srcNormals[i1] + srcNormals[i2]) / 3f).normalized;
-                }
+                int i0 = srcTris[f * 3];
+                triShell[f] = srcVertShell[i0]; // all 3 verts of a face are in same shell
             }
 
-            // For each target vertex: find nearest source triangle, interpolate UV2
-            int normalFallback = 0;
+            // Per-shell: list of face indices
+            var shellFaces = new List<int>[shells.Count];
+            for (int si = 0; si < shells.Count; si++)
+                shellFaces[si] = new List<int>();
+            for (int f = 0; f < srcTriCount; f++)
+            {
+                int si = triShell[f];
+                if (si >= 0 && si < shells.Count)
+                    shellFaces[si].Add(f);
+            }
+
+            // ══════════════════════════════════════════════
+            //  PHASE 1: Shell assignment via 3D nearest + normal
+            // ══════════════════════════════════════════════
+            int[] targetShell = new int[vertCount];
+            int shellAssignFail = 0;
 
             for (int vi = 0; vi < vertCount; vi++)
             {
@@ -200,62 +216,111 @@ namespace LightmapUvTool
                 Vector3 tN = tHasNormals ? tNormals[vi] : Vector3.up;
 
                 float bestDistSq = float.MaxValue;
-                int bestTri = -1;
-                float bestU = 0, bestV = 0, bestW = 0;
+                int bestShell = -1;
 
-                // Pass 1: find nearest triangle among normal-compatible
-                for (int t = 0; t < triCount; t++)
+                // Find nearest source vertex with normal compatibility
+                for (int sv = 0; sv < srcVerts.Length; sv++)
                 {
-                    float dot = Vector3.Dot(tN, triFaceNormal[t]);
-                    if (dot < NORMAL_DOT_THRESHOLD) continue;
+                    if (srcVertShell[sv] < 0) continue;
 
-                    float distSq = PointToTriangleDistSq(
-                        tPos, triA[t], triB[t], triC[t],
-                        out float u, out float v, out float w);
-
-                    if (distSq < bestDistSq)
+                    // Normal filter: skip source vertices facing wrong way
+                    if (srcHasNormals)
                     {
-                        bestDistSq = distSq;
-                        bestTri = t;
-                        bestU = u; bestV = v; bestW = w;
+                        float dot = Vector3.Dot(tN, srcNormals[sv]);
+                        if (dot < NORMAL_DOT_THRESHOLD) continue;
+                    }
+
+                    float dSq = (tPos - srcVerts[sv]).sqrMagnitude;
+                    if (dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        bestShell = srcVertShell[sv];
                     }
                 }
 
-                // Fallback: no normal-compatible triangle found
-                if (bestTri < 0)
+                // Fallback: no normal-compatible source found
+                if (bestShell < 0)
                 {
-                    normalFallback++;
-                    for (int t = 0; t < triCount; t++)
+                    shellAssignFail++;
+                    for (int sv = 0; sv < srcVerts.Length; sv++)
                     {
-                        float distSq = PointToTriangleDistSq(
-                            tPos, triA[t], triB[t], triC[t],
-                            out float u, out float v, out float w);
-
-                        if (distSq < bestDistSq)
+                        if (srcVertShell[sv] < 0) continue;
+                        float dSq = (tPos - srcVerts[sv]).sqrMagnitude;
+                        if (dSq < bestDistSq)
                         {
-                            bestDistSq = distSq;
-                            bestTri = t;
-                            bestU = u; bestV = v; bestW = w;
+                            bestDistSq = dSq;
+                            bestShell = srcVertShell[sv];
                         }
                     }
                 }
 
-                // Interpolate UV2 using barycentric coordinates
-                if (bestTri >= 0)
+                targetShell[vi] = bestShell;
+            }
+
+            // ══════════════════════════════════════════════
+            //  PHASE 2: UV0-space triangle projection within shell
+            //  For each target vertex:
+            //  - take its UV0 coordinate as a 2D point
+            //  - within the assigned source shell, find nearest triangle in UV0 space
+            //  - compute UV0 barycentric coordinates
+            //  - interpolate UV2 using those barycentrics
+            // ══════════════════════════════════════════════
+            int transferred = 0;
+            int shellsUsed = 0;
+            var usedShells = new HashSet<int>();
+
+            for (int vi = 0; vi < vertCount; vi++)
+            {
+                int si = targetShell[vi];
+                if (si < 0 || si >= shells.Count) continue;
+
+                Vector2 tUv = tUv0[vi];  // target vertex UV0 coordinate
+                var faces = shellFaces[si];
+
+                float bestDistSq = float.MaxValue;
+                int bestFace = -1;
+                float bestU = 0, bestV = 0, bestW = 0;
+
+                // Find nearest source triangle in UV0 space
+                foreach (int f in faces)
                 {
-                    result.uv2[vi] = triUv2A[bestTri] * bestU
-                                   + triUv2B[bestTri] * bestV
-                                   + triUv2C[bestTri] * bestW;
-                    result.verticesTransferred++;
+                    int i0 = srcTris[f * 3], i1 = srcTris[f * 3 + 1], i2 = srcTris[f * 3 + 2];
+                    Vector2 a = srcUv0[i0], b = srcUv0[i1], c = srcUv0[i2];
+
+                    float dSq = PointToTriangle2DDistSq(tUv, a, b, c,
+                        out float u, out float v, out float w);
+
+                    if (dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        bestFace = f;
+                        bestU = u; bestV = v; bestW = w;
+                    }
+                }
+
+                // Interpolate UV2 using UV0 barycentrics
+                if (bestFace >= 0)
+                {
+                    int i0 = srcTris[bestFace * 3];
+                    int i1 = srcTris[bestFace * 3 + 1];
+                    int i2 = srcTris[bestFace * 3 + 2];
+
+                    result.uv2[vi] = srcUv2[i0] * bestU
+                                   + srcUv2[i1] * bestV
+                                   + srcUv2[i2] * bestW;
+                    transferred++;
+                    usedShells.Add(si);
                 }
             }
 
-            result.shellsMatched = 0; // triangle-based, no shell tracking needed
+            result.verticesTransferred = transferred;
+            result.shellsMatched = usedShells.Count;
 
             Debug.Log($"[GroupedTransfer] '{targetMesh.name}': " +
-                      $"triangle projection, " +
-                      $"{result.verticesTransferred}/{result.verticesTotal} verts" +
-                      (normalFallback > 0 ? $", {normalFallback} normal-fallback" : ""));
+                      $"shell-assign + UV0-space projection, " +
+                      $"{transferred}/{vertCount} verts, " +
+                      $"{usedShells.Count} shells used" +
+                      (shellAssignFail > 0 ? $", {shellAssignFail} normal-fallback" : ""));
 
             // UV2 bounds check
             int outOfBounds = 0;
@@ -279,24 +344,24 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Point-to-triangle distance with barycentric coordinates
-        //  Returns squared distance; outputs clamped barycentric (u,v,w)
-        //  where point ≈ a*u + b*v + c*w
+        //  2D Point-to-triangle distance with barycentric coordinates
+        //  Works in UV0 space. Returns squared distance.
+        //  Outputs clamped barycentric (u,v,w) where point ≈ a*u + b*v + c*w
         // ═══════════════════════════════════════════════════════════
 
-        static float PointToTriangleDistSq(
-            Vector3 p, Vector3 a, Vector3 b, Vector3 c,
+        static float PointToTriangle2DDistSq(
+            Vector2 p, Vector2 a, Vector2 b, Vector2 c,
             out float u, out float v, out float w)
         {
-            Vector3 ab = b - a;
-            Vector3 ac = c - a;
-            Vector3 ap = p - a;
+            Vector2 ab = b - a;
+            Vector2 ac = c - a;
+            Vector2 ap = p - a;
 
-            float d00 = Vector3.Dot(ab, ab);
-            float d01 = Vector3.Dot(ab, ac);
-            float d11 = Vector3.Dot(ac, ac);
-            float d20 = Vector3.Dot(ap, ab);
-            float d21 = Vector3.Dot(ap, ac);
+            float d00 = Vector2.Dot(ab, ab);
+            float d01 = Vector2.Dot(ab, ac);
+            float d11 = Vector2.Dot(ac, ac);
+            float d20 = Vector2.Dot(ap, ab);
+            float d21 = Vector2.Dot(ap, ac);
 
             float denom = d00 * d11 - d01 * d01;
 
@@ -311,39 +376,38 @@ namespace LightmapUvTool
             float baryW = (d00 * d21 - d01 * d20) / denom;
             float baryU = 1f - baryV - baryW;
 
-            // Inside triangle — project directly
+            // Inside triangle
             if (baryU >= 0f && baryV >= 0f && baryW >= 0f)
             {
                 u = baryU; v = baryV; w = baryW;
-                Vector3 proj = a * u + b * v + c * w;
+                Vector2 proj = a * u + b * v + c * w;
                 return (p - proj).sqrMagnitude;
             }
 
             // Outside triangle — clamp to nearest edge/vertex
-            // Test all 3 edges, pick closest point
             float bestDist = float.MaxValue;
             u = 1; v = 0; w = 0;
 
-            // Edge AB (w=0): point = a*(1-t) + b*t
+            // Edge AB (w=0)
             {
-                float t = Mathf.Clamp01(Vector3.Dot(p - a, ab) / Mathf.Max(d00, 1e-12f));
-                Vector3 cp = a + ab * t;
+                float t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / Mathf.Max(d00, 1e-12f));
+                Vector2 cp = a + ab * t;
                 float d = (p - cp).sqrMagnitude;
                 if (d < bestDist) { bestDist = d; u = 1f - t; v = t; w = 0f; }
             }
-            // Edge AC (v=0): point = a*(1-t) + c*t
+            // Edge AC (v=0)
             {
-                float t = Mathf.Clamp01(Vector3.Dot(p - a, ac) / Mathf.Max(d11, 1e-12f));
-                Vector3 cp = a + ac * t;
+                float t = Mathf.Clamp01(Vector2.Dot(p - a, ac) / Mathf.Max(d11, 1e-12f));
+                Vector2 cp = a + ac * t;
                 float d = (p - cp).sqrMagnitude;
                 if (d < bestDist) { bestDist = d; u = 1f - t; v = 0f; w = t; }
             }
-            // Edge BC (u=0): point = b*(1-t) + c*t
+            // Edge BC (u=0)
             {
-                Vector3 bc = c - b;
-                float bcLen = Vector3.Dot(bc, bc);
-                float t = Mathf.Clamp01(Vector3.Dot(p - b, bc) / Mathf.Max(bcLen, 1e-12f));
-                Vector3 cp = b + bc * t;
+                Vector2 bc = c - b;
+                float bcLen = Vector2.Dot(bc, bc);
+                float t = Mathf.Clamp01(Vector2.Dot(p - b, bc) / Mathf.Max(bcLen, 1e-12f));
+                Vector2 cp = b + bc * t;
                 float d = (p - cp).sqrMagnitude;
                 if (d < bestDist) { bestDist = d; u = 0f; v = 1f - t; w = t; }
             }
@@ -352,7 +416,7 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Signed area of shell in UV space (used by AnalyzeSource)
+        //  Signed area of shell in UV space
         // ═══════════════════════════════════════════════════════════
 
         static float ComputeSignedArea(int[] tris, Vector2[] uvs, List<int> faceIndices)
@@ -376,8 +440,7 @@ namespace LightmapUvTool
             Mesh targetMesh, SourceShellInfo[] sourceInfos)
         {
             Debug.LogWarning("[GroupedTransfer] Legacy vertex-based Transfer called. " +
-                             "Use Transfer(targetMesh, sourceMesh) for triangle projection.");
-            // Fallback: cannot do triangle projection without source mesh
+                             "Use Transfer(targetMesh, sourceMesh) for UV0-space projection.");
             return new TransferResult
             {
                 uv2 = new Vector2[targetMesh.vertexCount],

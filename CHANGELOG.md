@@ -9,6 +9,20 @@
   re-selecting a previously processed LODGroup.
 - **[W] badge** on welded meshes in the mesh list.
 
+## [0.8.2] - 2026-03-01
+
+### Changed — Two-phase transfer: shell assignment + UV0-space projection
+- **Phase 1: Shell assignment** — for each target vertex, find nearest source
+  vertex by 3D distance with normal filter (dot > 0.3). This determines which
+  source UV0 shell the target vertex belongs to. Normal filter separates
+  front/back of thin walls.
+- **Phase 2: UV0-space transfer** — within the assigned shell, find nearest
+  source TRIANGLE in UV0 SPACE (not 3D!), compute 2D barycentric coordinates
+  on the UV0 triangle, interpolate UV2. This is equivalent to 3ds Max
+  "UV Weld Selected" — the actual UV transfer happens in UV space, eliminating
+  all thin-wall / overlapping geometry issues.
+- Shell identity comes from 3D geometry; UV2 values come from UV0 space.
+
 ## [0.8.1] - 2026-03-01
 
 ### Changed — Triangle surface projection transfer (replaces vertex-based)
