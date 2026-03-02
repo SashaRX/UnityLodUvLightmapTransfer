@@ -1148,30 +1148,6 @@ namespace LightmapUvTool
             uv0Welded = meshoptOptimized > 0 || edgeWelded > 0;
             UvtLog.Info($"[UV0Fix] Optimized: {meshoptOptimized} meshopt, {edgeWelded} UV edge weld");
 
-            // ── Normalize UV0 winding on ALL optimized meshes ──
-            // Flip mirrored shells to positive winding ONCE, so all
-            // downstream stages (repack, transfer) share the same UV0 space.
-            int totalNormalized = 0;
-            foreach (var e in meshEntries)
-            {
-                if (!e.include || e.originalMesh == null) continue;
-                var mesh = e.originalMesh;
-                var uv0 = new List<Vector2>(); mesh.GetUVs(0, uv0);
-                if (uv0.Count == 0) continue;
-                var uv0Arr = uv0.ToArray();
-                var tris = mesh.triangles;
-                List<UvShell> shells; List<List<int>> overlap;
-                UvShellExtractor.BuildPerFaceShellIds(uv0Arr, tris, out shells, out overlap);
-                int flipped = XatlasRepack.NormalizeShellWinding(uv0Arr, tris, shells);
-                if (flipped > 0)
-                {
-                    mesh.SetUVs(0, new List<Vector2>(uv0Arr));
-                    totalNormalized += flipped;
-                }
-            }
-            if (totalNormalized > 0)
-                UvtLog.Info($"[UV0Fix] Normalized {totalNormalized} mirrored UV0 shell(s) across all meshes");
-
             ExecAnalyzeUv0();
         }
 
@@ -1248,6 +1224,26 @@ namespace LightmapUvTool
                     meshCopies.Add(cp);
                 }
                 if (meshCopies.Count == 0) return;
+
+                // Normalize UV0 winding on temp copies only (not working copies)
+                int totalNormalized = 0;
+                foreach (var cp in meshCopies)
+                {
+                    var uv0List = new List<Vector2>(); cp.GetUVs(0, uv0List);
+                    if (uv0List.Count == 0) continue;
+                    var uv0Arr = uv0List.ToArray();
+                    var tris = cp.triangles;
+                    List<UvShell> shells; List<List<int>> overlap;
+                    UvShellExtractor.BuildPerFaceShellIds(uv0Arr, tris, out shells, out overlap);
+                    int flipped = XatlasRepack.NormalizeShellWinding(uv0Arr, tris, shells);
+                    if (flipped > 0)
+                    {
+                        cp.SetUVs(0, new List<Vector2>(uv0Arr));
+                        totalNormalized += flipped;
+                    }
+                }
+                if (totalNormalized > 0)
+                    UvtLog.Info($"[Repack] Normalized {totalNormalized} mirrored UV0 shell(s) on temp copies");
 
                 EditorUtility.DisplayProgressBar("Repack", "Packing " + meshCopies.Count + " meshes...", 0.5f);
 
@@ -1424,8 +1420,9 @@ namespace LightmapUvTool
                 if (uv2List.Count == 0) continue;
 
                 var positions = resultMesh.vertices;
+                // Save original (un-normalized) UV0 for postprocessor matching
                 var uv0List = new List<Vector2>();
-                resultMesh.GetUVs(0, uv0List);
+                (e.originalMesh ?? resultMesh).GetUVs(0, uv0List);
 
                 if (!fbxGroups.ContainsKey(fbxPath))
                     fbxGroups[fbxPath] = new List<(string, Vector2[], bool, bool, Vector3[], Vector2[])>();
