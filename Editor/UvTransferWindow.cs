@@ -324,6 +324,20 @@ namespace LightmapUvTool
                 ColorBtn(new Color(.9f,.35f,.35f), "Reset All Working Copies", 20, ResetWorkingCopies);
             }
 
+            // ── Repack Settings (quick access) ──
+            EditorGUILayout.Space(4);
+            H("Repack");
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Resolution", GUILayout.Width(66));
+            atlasResolution = EditorGUILayout.IntField(atlasResolution, GUILayout.Width(60));
+            GUILayout.Space(8);
+            EditorGUILayout.LabelField("Pad", GUILayout.Width(26));
+            shellPaddingPx = EditorGUILayout.IntField(shellPaddingPx, GUILayout.Width(30));
+            GUILayout.Space(8);
+            EditorGUILayout.LabelField("Bdr", GUILayout.Width(24));
+            borderPaddingPx = EditorGUILayout.IntField(borderPaddingPx, GUILayout.Width(30));
+            EditorGUILayout.EndHorizontal();
+
             // ── Run Full Pipeline ──
             EditorGUILayout.Space(6);
             ColorBtn(new Color(.2f,.75f,.95f), "▶  Run Full Pipeline", 30, ExecFullPipeline);
@@ -500,15 +514,6 @@ namespace LightmapUvTool
             EditorGUILayout.Space(6);
             ColorBtn(new Color(.3f,.6f,1f), "Transfer All Targets", 26, ExecTransferAll);
 
-            // Per-LOD re-run
-            EditorGUILayout.Space(2);
-            for (int li = 0; li < LodN; li++)
-            {
-                if (li == sourceLodIndex || ForLod(li).Count == 0) continue;
-                if (GUILayout.Button("Re-transfer LOD" + li, EditorStyles.miniButton))
-                    ExecTransferLod(li);
-            }
-
             // ── Validation Report (inline) ──
             if (hasTransfer)
             {
@@ -599,17 +604,28 @@ namespace LightmapUvTool
                     string label = i == sourceLodIndex ? "LOD" + i + "(S)" : "LOD" + i;
                     var bg = GUI.backgroundColor;
                     if (pvLod == i) GUI.backgroundColor = new Color(.35f,.65f,1f);
+                    else            GUI.backgroundColor = new Color(.75f,.85f,.95f);
                     if (GUILayout.Button(label, EditorStyles.toolbarButton, GUILayout.Width(58)))
                         pvLod = i;
                     GUI.backgroundColor = bg;
                 }
-                GUILayout.Space(6);
+
+                // Separator
+                GUILayout.Space(2);
+                var sep = GUILayoutUtility.GetRect(1, 18, GUILayout.Width(1));
+                EditorGUI.DrawRect(sep, new Color(.5f,.5f,.5f,.6f));
+                GUILayout.Space(2);
             }
 
             // ── UV channel toggle ──
-            int ci = pvChannel == 0 ? 0 : 1;
-            ci = GUILayout.Toolbar(ci, new[]{"UV0","UV2"}, EditorStyles.toolbarButton, GUILayout.Width(80));
-            pvChannel = ci == 0 ? 0 : 2;
+            {
+                var bg = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(.85f,.75f,.95f);
+                int ci = pvChannel == 0 ? 0 : 1;
+                ci = GUILayout.Toolbar(ci, new[]{"UV0","UV2"}, EditorStyles.toolbarButton, GUILayout.Width(80));
+                pvChannel = ci == 0 ? 0 : 2;
+                GUI.backgroundColor = bg;
+            }
 
             GUILayout.Space(6);
 
