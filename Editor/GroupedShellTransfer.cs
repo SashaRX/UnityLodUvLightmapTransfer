@@ -430,7 +430,55 @@ namespace LightmapUvTool
 
                 var srcFacesChosen = srcShells[chosenSrc].faceIndices;
 
+                // ── Detect merged shell via UV0 coverage ──
+                int uv0BadCount = 0;
+                const float kUv0BadThreshold = 0.01f;
+                foreach (int vi in tShell.vertexIndices)
+                {
+                    if (vi >= tUv0.Length) continue;
+                    Vector2 tUv = tUv0[vi];
+                    float bestDSq = float.MaxValue;
+                    for (int fi = 0; fi < srcFacesChosen.Count; fi++)
+                    {
+                        int f = srcFacesChosen[fi];
+                        float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                            out _, out _, out _);
+                        if (dSq < bestDSq) bestDSq = dSq;
+                        if (bestDSq < 1e-8f) break;
+                    }
+                    if (bestDSq > kUv0BadThreshold) uv0BadCount++;
+                }
+                int tShellVerts = tShell.vertexIndices.Count;
+                bool isMergedShell = tShellVerts > 0 && (float)uv0BadCount / tShellVerts > 0.3f;
+
                 Dictionary<int, Vector2> chosenUv2;
+
+                if (isMergedShell)
+                {
+                    // ── Merged shell: UV0 multi-shell interpolation ──
+                    // Search ALL source triangles via UV0 nearest, interpolate UV2.
+                    // Interpolation is bounded by source UV2 triangles — no extrapolation.
+                    var uv2_merged = new Dictionary<int, Vector2>();
+                    foreach (int vi in tShell.vertexIndices)
+                    {
+                        if (vi >= tUv0.Length) continue;
+                        Vector2 tUv = tUv0[vi];
+                        float bestDSq2 = float.MaxValue;
+                        int bestF2 = -1; float bestU2 = 0, bestV2 = 0, bestW2 = 0;
+                        for (int f = 0; f < srcTriCount; f++)
+                        {
+                            float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                                out float u, out float v, out float w);
+                            if (dSq < bestDSq2) { bestDSq2 = dSq; bestF2 = f; bestU2 = u; bestV2 = v; bestW2 = w; }
+                            if (bestDSq2 < 1e-8f) break;
+                        }
+                        if (bestF2 >= 0)
+                            uv2_merged[vi] = triUv2A[bestF2] * bestU2 + triUv2B[bestF2] * bestV2 + triUv2C[bestF2] * bestW2;
+                    }
+                    chosenUv2 = uv2_merged;
+                    shellsMerged++;
+                }
+                else
                 {
                     // ── Non-merged shell: try similarity transform first ──
                     var xf = srcTransforms[chosenSrc];
@@ -630,60 +678,6 @@ namespace LightmapUvTool
               float d = (p - (b + bc * t)).sqrMagnitude;
               if (d < best) { best = d; u = 0f; v = 1f - t; w = t; } }
             return best;
-        }
-
-        // ═══════════════════════════════════════════════════════════
-        //  Ray-Triangle intersection (Möller–Trumbore)
-        //  Returns true if ray hits triangle, with t = distance along ray.
-        //  Also outputs barycentric (u,v,w) for interpolation.
-        // ═══════════════════════════════════════════════════════════
-
-        static bool RayTriIntersect(Vector3 rayOrigin, Vector3 rayDir,
-            Vector3 a, Vector3 b, Vector3 c,
-            out float t, out float u, out float v, out float w)
-        {
-            t = 0; u = 0; v = 0; w = 0;
-            const float kEpsilon = 1e-7f;
-
-            Vector3 e1 = b - a, e2 = c - a;
-            Vector3 h = Vector3.Cross(rayDir, e2);
-            float det = Vector3.Dot(e1, h);
-
-            if (det > -kEpsilon && det < kEpsilon) return false; // parallel
-
-            float invDet = 1f / det;
-            Vector3 s = rayOrigin - a;
-            float baryV = Vector3.Dot(s, h) * invDet;
-            if (baryV < 0f || baryV > 1f) return false;
-
-            Vector3 q = Vector3.Cross(s, e1);
-            float baryW = Vector3.Dot(rayDir, q) * invDet;
-            if (baryW < 0f || baryV + baryW > 1f) return false;
-
-            t = Vector3.Dot(e2, q) * invDet;
-            u = 1f - baryV - baryW;
-            v = baryV;
-            w = baryW;
-            return true;
-        }
-
-        // ═══════════════════════════════════════════════════════════
-        //  UV0 bounding box overlap ratio (for merged shell candidate search)
-        //  Returns ratio of overlap area to smaller bbox area
-        // ═══════════════════════════════════════════════════════════
-
-        static float Uv0BboxOverlap(Vector2 aMin, Vector2 aMax, Vector2 bMin, Vector2 bMax)
-        {
-            float oMinX = Mathf.Max(aMin.x, bMin.x);
-            float oMinY = Mathf.Max(aMin.y, bMin.y);
-            float oMaxX = Mathf.Min(aMax.x, bMax.x);
-            float oMaxY = Mathf.Min(aMax.y, bMax.y);
-            if (oMaxX <= oMinX || oMaxY <= oMinY) return 0f;
-            float overlapArea = (oMaxX - oMinX) * (oMaxY - oMinY);
-            float areaA = Mathf.Max(0f, (aMax.x - aMin.x) * (aMax.y - aMin.y));
-            float areaB = Mathf.Max(0f, (bMax.x - bMin.x) * (bMax.y - bMin.y));
-            float smaller = Mathf.Min(areaA, areaB);
-            return smaller > 0f ? overlapArea / smaller : 0f;
         }
 
         static float SignedArea2D(Vector2 a, Vector2 b, Vector2 c)
