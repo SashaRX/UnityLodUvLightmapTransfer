@@ -1,16 +1,16 @@
 // GroupedShellTransfer.cs — UV2 transfer via shell-level matching
 //
-// Algorithm: "Shell-First Matching with Similarity Transform"
+// Algorithm: "Shell-First Matching with Interpolation Primary"
 // Phase 1: Extract UV0 shells from source and target
 // Phase 1b: Precompute per-source-shell similarity transform (UV0→UV2)
 // Phase 2: Match each target shell → best source shell by 3D centroid
-// Phase 3: Apply similarity transform (primary). Per-vertex interpolation
-//          is fallback only when CountShellIssues shows transform is worse.
+// Phase 3: Per-vertex UV0 interpolation (primary, bounded by source UV2).
+//          Similarity transform is fallback only when interpolation has
+//          strictly more inverted/zero-area triangles.
 //
-// xatlas repack preserves shell internal structure — only changes placement.
-// So UV0→UV2 per shell is a pure similarity transform (a, b, tx, ty).
-// Applying the same transform to target UV0 preserves shell as atomic unit,
-// preventing cross-shell contamination and UV2 overlaps.
+// Interpolation stays within the convex hull of source UV2 triangles,
+// preventing extrapolation artifacts. Transform can extrapolate when
+// target UV0 differs from source UV0 (always the case on LOD meshes).
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -228,14 +228,14 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Transfer: Shell-first matching with similarity transform
+        //  Transfer: Shell-first matching, interpolation primary
         //
         //  Phase 1:  Extract UV0 shells from source & target
         //  Phase 1b: Precompute similarity transform per source shell
         //  Phase 2:  Match each target shell → source shell by 3D centroid
-        //  Phase 3:  Apply source shell's transform to target UV0 (primary)
-        //            Fall back to per-vertex interpolation only if
-        //            CountShellIssues shows transform produced more issues.
+        //  Phase 3:  Per-vertex UV0 interpolation (primary, bounded).
+        //            Similarity transform only if it produces strictly
+        //            fewer inverted/zero-area triangles.
         // ═══════════════════════════════════════════════════════════
 
         public static TransferResult Transfer(Mesh targetMesh, Mesh sourceMesh)
@@ -455,43 +455,25 @@ namespace LightmapUvTool
 
                 if (isMergedShell)
                 {
-                    // ── Merged shell: per-vertex source shell assignment + per-shell transforms ──
-                    // Each target vertex finds its nearest source triangle in UV0 (all sources),
-                    // determines which source shell it belongs to, and uses that shell's transform.
+                    // ── Merged shell: UV0 multi-shell interpolation ──
+                    // Search ALL source triangles via UV0 nearest, interpolate UV2.
+                    // Interpolation is bounded by source UV2 triangles — no extrapolation.
                     var uv2_merged = new Dictionary<int, Vector2>();
                     foreach (int vi in tShell.vertexIndices)
                     {
                         if (vi >= tUv0.Length) continue;
                         Vector2 tUv = tUv0[vi];
-
-                        // Find nearest source triangle across all shells
                         float bestDSq2 = float.MaxValue;
-                        int bestF2 = -1;
+                        int bestF2 = -1; float bestU2 = 0, bestV2 = 0, bestW2 = 0;
                         for (int f = 0; f < srcTriCount; f++)
                         {
                             float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                                out _, out _, out _);
-                            if (dSq < bestDSq2) { bestDSq2 = dSq; bestF2 = f; }
+                                out float u, out float v, out float w);
+                            if (dSq < bestDSq2) { bestDSq2 = dSq; bestF2 = f; bestU2 = u; bestV2 = v; bestW2 = w; }
                             if (bestDSq2 < 1e-8f) break;
                         }
-                        if (bestF2 < 0) continue;
-
-                        // Which source shell does this triangle belong to?
-                        int srcShellIdx = faceToSrcShell[bestF2];
-                        var xf = srcTransforms[srcShellIdx];
-
-                        if (xf.valid)
-                        {
-                            // Apply that shell's similarity transform
-                            uv2_merged[vi] = xf.Apply(tUv);
-                        }
-                        else
-                        {
-                            // Degenerate source shell — fallback to interpolation
-                            PointToTri2D(tUv, triUv0A[bestF2], triUv0B[bestF2], triUv0C[bestF2],
-                                out float u, out float v, out float w);
-                            uv2_merged[vi] = triUv2A[bestF2] * u + triUv2B[bestF2] * v + triUv2C[bestF2] * w;
-                        }
+                        if (bestF2 >= 0)
+                            uv2_merged[vi] = triUv2A[bestF2] * bestU2 + triUv2B[bestF2] * bestV2 + triUv2C[bestF2] * bestW2;
                     }
                     chosenUv2 = uv2_merged;
                     shellsMerged++;
@@ -536,8 +518,9 @@ namespace LightmapUvTool
                     }
                     int issuesInterp = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_interp);
 
-                    // Pick winner: transform preferred (preserves shell), interpolation only if strictly fewer issues
-                    if (uv2_transform != null && issuesTransform <= issuesInterp)
+                    // Pick winner: interpolation is primary (bounded, no extrapolation).
+                    // Transform wins ONLY if it has strictly fewer issues than interpolation.
+                    if (uv2_transform != null && issuesTransform < issuesInterp)
                     {
                         chosenUv2 = uv2_transform;
                         shellsTransform++;
