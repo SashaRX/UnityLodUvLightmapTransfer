@@ -98,6 +98,7 @@ namespace LightmapUvTool
             public TransferQualityEvaluator.TransferReport? report;
             public GroupedShellTransfer.TransferResult shellTransferResult;
             public TransferValidator.ValidationReport validationReport;
+            public bool hasExistingUv2; // cached: FBX mesh already has UV2 (post-Apply)
         }
 
         // ════════════════════════════════════════════════════════════
@@ -188,20 +189,29 @@ namespace LightmapUvTool
             selectedFbxPath = null;
             selectedResetLabel = null;
 
-            if (!CheckerTexturePreview.IsActive) return;
-
-            var go = Selection.activeGameObject;
-            if (go == null) return;
-
-            // Collect unique FBX paths from all MeshFilters on the selected object and children
+            // Collect FBX paths from loaded meshEntries (always available when LODGroup assigned)
             var fbxPaths = new HashSet<string>();
-            var filters = go.GetComponentsInChildren<MeshFilter>();
-            foreach (var mf in filters)
+            foreach (var e in meshEntries)
             {
-                if (mf.sharedMesh == null) continue;
-                string path = AssetDatabase.GetAssetPath(mf.sharedMesh);
+                Mesh m = e.fbxMesh ?? e.originalMesh;
+                if (m == null) continue;
+                string path = AssetDatabase.GetAssetPath(m);
                 if (!string.IsNullOrEmpty(path) && path.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
                     fbxPaths.Add(path);
+            }
+
+            // Fallback: scan selected object if no LODGroup loaded
+            if (fbxPaths.Count == 0)
+            {
+                var go = Selection.activeGameObject;
+                if (go == null) return;
+                foreach (var mf in go.GetComponentsInChildren<MeshFilter>())
+                {
+                    if (mf.sharedMesh == null) continue;
+                    string path = AssetDatabase.GetAssetPath(mf.sharedMesh);
+                    if (!string.IsNullOrEmpty(path) && path.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                        fbxPaths.Add(path);
+                }
             }
 
             // Find the first FBX that has a sidecar
@@ -241,12 +251,17 @@ namespace LightmapUvTool
                     if (r == null) continue;
                     var mf = r.GetComponent<MeshFilter>();
                     if (mf == null || mf.sharedMesh == null) continue;
+                    var fbm = mf.sharedMesh;
+                    var uv2Check = new List<Vector2>();
+                    fbm.GetUVs(2, uv2Check);
                     meshEntries.Add(new MeshEntry {
                         lodIndex = li, renderer = r, meshFilter = mf,
-                        originalMesh = mf.sharedMesh,
-                        fbxMesh = mf.sharedMesh });
+                        originalMesh = fbm,
+                        fbxMesh = fbm,
+                        hasExistingUv2 = uv2Check.Count > 0 });
                 }
             }
+            UpdateSelectedSidecar();
         }
 
         List<MeshEntry> ForLod(int li) => meshEntries.Where(e => e.lodIndex == li && e.include).ToList();
@@ -353,7 +368,7 @@ namespace LightmapUvTool
                 {
                     EditorGUILayout.BeginHorizontal();
                     e.include = EditorGUILayout.Toggle(e.include, GUILayout.Width(14));
-                    string badge = e.repackedMesh != null ? "[R]" : e.transferredMesh != null ? "[T]" : e.wasWelded ? "[W]" : "";
+                    string badge = e.repackedMesh != null ? "[R]" : e.transferredMesh != null ? "[T]" : e.wasWelded ? "[W]" : e.hasExistingUv2 ? "[UV2]" : "";
                     string name = e.renderer.name;
                     if (name.Length > 22) name = name.Substring(0, 20) + "..";
                     EditorGUILayout.LabelField(badge + name, EditorStyles.miniLabel, GUILayout.MinWidth(60));
@@ -363,7 +378,17 @@ namespace LightmapUvTool
                 }
             }
 
-            // ── Reset button ──
+            // ── UV2 sidecar detected ──
+            if (selectedSidecarPath != null)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.HelpBox(
+                    "UV2 applied: " + selectedResetLabel + "\n" + selectedSidecarPath,
+                    MessageType.Info);
+                ColorBtn(new Color(.95f,.35f,.3f), "Reset UV2 (delete sidecar)", 22, ResetSelectedUv2);
+            }
+
+            // ── Reset working copies ──
             bool anyModified = meshEntries.Any(e =>
                 e.wasWelded || e.repackedMesh != null || e.transferredMesh != null);
             if (anyModified)
