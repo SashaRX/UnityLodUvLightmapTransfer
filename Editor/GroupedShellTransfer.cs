@@ -403,9 +403,46 @@ namespace LightmapUvTool
             result.verticesTransferred = transferred;
             result.shellsMatched = shellsMatched;
 
-            // Post-transfer UV2 shell flip removed: target UV0 is now normalized
-            // before lookup, so UV2 winding is correct from the start.
-            result.shellsMirrored = 0;
+            // ── Post-transfer: flip UV2 shells with negative winding ──
+            // For mirrored UV0 shells, the UV0→UV2 mapping inherently contains
+            // a reflection, so transferred UV2 ends up with negative winding.
+            // Fix: flip U of such UV2 shells around their AABB center.
+            {
+                List<UvShell> uv2Shells;
+                List<List<int>> uv2Overlap;
+                UvShellExtractor.BuildPerFaceShellIds(result.uv2, tgtTris, out uv2Shells, out uv2Overlap);
+                int reflipped = 0;
+                foreach (var shell in uv2Shells)
+                {
+                    double area = 0;
+                    foreach (int f in shell.faceIndices)
+                    {
+                        int i0 = tgtTris[f * 3], i1 = tgtTris[f * 3 + 1], i2 = tgtTris[f * 3 + 2];
+                        if (i0 >= result.uv2.Length || i1 >= result.uv2.Length || i2 >= result.uv2.Length) continue;
+                        area += (result.uv2[i1].x - result.uv2[i0].x) * (result.uv2[i2].y - result.uv2[i0].y)
+                              - (result.uv2[i2].x - result.uv2[i0].x) * (result.uv2[i1].y - result.uv2[i0].y);
+                    }
+                    if (area >= 0) continue;
+
+                    float minU = float.MaxValue, maxU = float.MinValue;
+                    foreach (int vi in shell.vertexIndices)
+                    {
+                        if (vi >= result.uv2.Length) continue;
+                        if (result.uv2[vi].x < minU) minU = result.uv2[vi].x;
+                        if (result.uv2[vi].x > maxU) maxU = result.uv2[vi].x;
+                    }
+                    float twoCenter = minU + maxU;
+                    foreach (int vi in shell.vertexIndices)
+                    {
+                        if (vi >= result.uv2.Length) continue;
+                        result.uv2[vi] = new Vector2(twoCenter - result.uv2[vi].x, result.uv2[vi].y);
+                    }
+                    reflipped++;
+                }
+                result.shellsMirrored = reflipped;
+                if (reflipped > 0)
+                    UvtLog.Info($"[GroupedTransfer] '{targetMesh.name}': reflipped {reflipped} UV2 shell(s) with negative winding");
+            }
 
             // UV2 bounds check
             int oob = 0;
