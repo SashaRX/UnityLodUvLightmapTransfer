@@ -62,6 +62,9 @@ namespace LightmapUvTool
         bool showWire = true, showBorder;
         float fillAlpha = 0.25f;
 
+        // Checker mode (user toggle, independent from CheckerTexturePreview.IsActive)
+        bool checkerEnabled;
+
         // Selection tracking — UV2 reset for arbitrary selected model
         string selectedSidecarPath;
         string selectedFbxPath;
@@ -156,7 +159,8 @@ namespace LightmapUvTool
 
         void OnDisable()
         {
-            if (CheckerTexturePreview.IsActive) CheckerTexturePreview.Restore();
+            if (checkerEnabled) CheckerTexturePreview.Restore();
+            checkerEnabled = false;
             if (canvasRT) { canvasRT.Release(); DestroyImmediate(canvasRT); canvasRT = null; }
             if (glMat) DestroyImmediate(glMat);
             glMat = null;
@@ -172,7 +176,7 @@ namespace LightmapUvTool
             }
 
             // Re-apply checker to new selection
-            if (CheckerTexturePreview.IsActive)
+            if (checkerEnabled)
                 ReapplyCheckerToSelection();
 
             UpdateSelectedSidecar();
@@ -722,8 +726,8 @@ namespace LightmapUvTool
             // ── Checker ──
             {
                 var bg2 = GUI.backgroundColor;
-                if (CheckerTexturePreview.IsActive) GUI.backgroundColor = new Color(1f,.4f,.3f);
-                string ckLbl = CheckerTexturePreview.IsActive ? "■ Checker" : "▶ Checker";
+                if (checkerEnabled) GUI.backgroundColor = new Color(1f,.4f,.3f);
+                string ckLbl = checkerEnabled ? "■ Checker" : "▶ Checker";
                 if (GUILayout.Button(ckLbl, EditorStyles.toolbarButton, GUILayout.Width(66)))
                     ToggleChecker();
                 GUI.backgroundColor = bg2;
@@ -1486,25 +1490,26 @@ namespace LightmapUvTool
                 }
             }
 
+            // Always restore old visuals first
+            CheckerTexturePreview.Restore();
+
+            // Apply to new selection if it has UV2; otherwise just clear visuals
+            // (checkerEnabled stays true — user must toggle off manually)
             if (entries.Count > 0)
-            {
-                CheckerTexturePreview.Restore();
                 CheckerTexturePreview.Apply(entries);
-            }
-            // If no UV2 found on new selection — checker stays on previous object
         }
 
         void ToggleChecker()
         {
-            if (CheckerTexturePreview.IsActive)
+            if (checkerEnabled)
             {
+                checkerEnabled = false;
                 CheckerTexturePreview.Restore();
-                selectedSidecarPath = null;
-                selectedFbxPath = null;
-                selectedResetLabel = null;
                 Repaint();
                 return;
             }
+
+            checkerEnabled = true;
 
             var entries = new List<(Renderer renderer, Mesh meshWithUv2)>();
             foreach (var e in meshEntries)
@@ -1657,10 +1662,10 @@ namespace LightmapUvTool
             UvtLog.Info($"[Reset] Deleted sidecar for '{selectedResetLabel}', reimported FBX");
 
             // Update checker if it's still active
-            if (CheckerTexturePreview.IsActive)
+            if (checkerEnabled)
             {
                 CheckerTexturePreview.Restore();
-                ToggleChecker(); // re-apply to reflect removed UV2
+                ReapplyCheckerToSelection();
             }
 
             // Refresh loaded LODGroup if it references the same FBX
@@ -1706,7 +1711,7 @@ namespace LightmapUvTool
 
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Deleted {deleted} sidecar(s), reimported {fbxPaths.Count} FBX");
-            if (CheckerTexturePreview.IsActive) CheckerTexturePreview.Restore();
+            if (checkerEnabled) CheckerTexturePreview.Restore();
             Refresh();
             Repaint();
         }
