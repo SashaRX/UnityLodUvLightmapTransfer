@@ -19,6 +19,21 @@ namespace LightmapUvTool
             public bool remapped;     // true if position remap was used
         }
 
+        void OnPreprocessModel()
+        {
+            var modelImporter = assetImporter as ModelImporter;
+            if (modelImporter == null) return;
+
+            string sidecarPath = Uv2DataAsset.GetSidecarPath(assetPath);
+            if (!System.IO.File.Exists(sidecarPath)) return;
+
+            if (!modelImporter.isReadable)
+            {
+                modelImporter.isReadable = true;
+                UvtLog.Info($"[UV2 Preprocess] Enabled Read/Write on '{assetPath}' for UV2 injection");
+            }
+        }
+
         void OnPostprocessModel(GameObject root)
         {
             string modelPath = assetPath;
