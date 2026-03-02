@@ -101,6 +101,25 @@ namespace LightmapUvTool
                 }
             }
 
+            // Phase 3: Normalize UV0 winding (must match editor's ExecWeldUv0)
+            // Sidecar stores UV0 from post-normalize space, so the mesh must also
+            // be normalized for RemapUv2IfNeeded's UV0 disambiguation to work.
+            if (entry.welded || entry.edgeWelded)
+            {
+                var uv0List = new List<Vector2>();
+                mesh.GetUVs(0, uv0List);
+                if (uv0List.Count > 0)
+                {
+                    var uv0Arr = uv0List.ToArray();
+                    var tris = mesh.triangles;
+                    List<UvShell> shells; List<List<int>> overlap;
+                    UvShellExtractor.BuildPerFaceShellIds(uv0Arr, tris, out shells, out overlap);
+                    int flipped = XatlasRepack.NormalizeShellWinding(uv0Arr, tris, shells);
+                    if (flipped > 0)
+                        mesh.SetUVs(0, new List<Vector2>(uv0Arr));
+                }
+            }
+
             if (entry.uv2.Length != mesh.vertexCount)
             {
                 UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': vertex count mismatch " +
