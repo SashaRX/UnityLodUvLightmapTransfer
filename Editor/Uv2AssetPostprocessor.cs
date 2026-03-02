@@ -32,14 +32,6 @@ namespace LightmapUvTool
                 modelImporter.isReadable = true;
                 UvtLog.Info($"[UV2 Preprocess] Enabled Read/Write on '{assetPath}' for UV2 injection");
             }
-
-            // Disable Unity's built-in lightmap UV generation so it doesn't
-            // overwrite our custom UV2 during reimport.
-            if (modelImporter.generateSecondaryUVs)
-            {
-                modelImporter.generateSecondaryUVs = false;
-                UvtLog.Info($"[UV2 Preprocess] Disabled generateSecondaryUVs on '{assetPath}' — using custom UV2 from sidecar");
-            }
         }
 
         void OnPostprocessModel(GameObject root)
