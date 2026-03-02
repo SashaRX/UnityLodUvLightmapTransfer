@@ -1677,9 +1677,11 @@ namespace LightmapUvTool
             var fbxPaths = new HashSet<string>();
             foreach (var e in meshEntries)
             {
-                if (e.originalMesh == null) continue;
-                string p = AssetDatabase.GetAssetPath(e.originalMesh);
-                if (!string.IsNullOrEmpty(p)) fbxPaths.Add(p);
+                Mesh m = e.fbxMesh ?? e.originalMesh;
+                if (m == null) continue;
+                string p = AssetDatabase.GetAssetPath(m);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                    fbxPaths.Add(p);
             }
             if (fbxPaths.Count == 0) return;
 
