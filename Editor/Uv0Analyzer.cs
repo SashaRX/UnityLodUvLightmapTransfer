@@ -427,25 +427,81 @@ namespace LightmapUvTool
                 foreach (int vi in shell.vertexIndices)
                     srcVertShellId[vi] = shell.shellId;
 
-            // ── For each target vertex, find nearest source vertex by 3D ──
-            // 3D works here because weld only merges vertices with matching
-            // position+normal — the normal check prevents thin-wall confusion.
-            // UV0 nearest fails for weld because seam vertices have DIFFERENT
-            // UV0 by definition (that's why they're separate vertices).
-            int[] tVertShellId = new int[tVertCount];
-            for (int i = 0; i < tVertCount; i++)
+            // ── Spatial hash grid for source vertices (replaces O(n*m) brute force) ──
+            // Technique from UnityMeshSimplifier: spatial hashing for efficient
+            // nearest-neighbor queries. Cell size based on mesh AABB diagonal.
+            Vector3 srcMin = sVerts[0], srcMax = sVerts[0];
+            for (int s = 1; s < sVertCount; s++)
             {
-                float bestDist = float.MaxValue;
-                int bestSrc = 0;
-                for (int s = 0; s < sVertCount; s++)
+                srcMin = Vector3.Min(srcMin, sVerts[s]);
+                srcMax = Vector3.Max(srcMax, sVerts[s]);
+            }
+            float srcDiag = (srcMax - srcMin).magnitude;
+            float srcCellSize = Mathf.Max(srcDiag / Mathf.Max(Mathf.Pow(sVertCount, 0.333f), 1f), 1e-5f);
+
+            var srcGrid = new Dictionary<long, List<int>>();
+            for (int s = 0; s < sVertCount; s++)
+            {
+                long key = SpatialKey(sVerts[s], srcCellSize);
+                if (!srcGrid.TryGetValue(key, out var list))
                 {
-                    float d = (tVerts[i] - sVerts[s]).sqrMagnitude;
-                    if (d < bestDist) { bestDist = d; bestSrc = s; }
+                    list = new List<int>();
+                    srcGrid[key] = list;
                 }
-                tVertShellId[i] = srcVertShellId[bestSrc];
+                list.Add(s);
             }
 
-            // ── Find position+normal duplicates, weld if same source shell ──
+            // For each target vertex, find nearest source vertex via grid lookup (27 cells)
+            int[] tVertShellId = new int[tVertCount];
+            int gridMisses = 0;
+            for (int i = 0; i < tVertCount; i++)
+            {
+                Vector3 tp = tVerts[i];
+                int cx = Mathf.FloorToInt(tp.x / srcCellSize);
+                int cy = Mathf.FloorToInt(tp.y / srcCellSize);
+                int cz = Mathf.FloorToInt(tp.z / srcCellSize);
+
+                float bestDist = float.MaxValue;
+                int bestSrc = -1;
+
+                for (int dx = -1; dx <= 1; dx++)
+                for (int dy = -1; dy <= 1; dy++)
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    long nKey = (long)(cx + dx) * 73856093L ^
+                                (long)(cy + dy) * 19349663L ^
+                                (long)(cz + dz) * 83492791L;
+                    if (!srcGrid.TryGetValue(nKey, out var bucket)) continue;
+                    for (int bi = 0; bi < bucket.Count; bi++)
+                    {
+                        int s = bucket[bi];
+                        float d = (tp - sVerts[s]).sqrMagnitude;
+                        if (d < bestDist) { bestDist = d; bestSrc = s; }
+                    }
+                }
+
+                // Fallback: if grid miss (target vertex far from all source),
+                // expand search to all source vertices for this vertex only.
+                if (bestSrc < 0)
+                {
+                    gridMisses++;
+                    for (int s = 0; s < sVertCount; s++)
+                    {
+                        float d = (tp - sVerts[s]).sqrMagnitude;
+                        if (d < bestDist) { bestDist = d; bestSrc = s; }
+                    }
+                }
+
+                tVertShellId[i] = bestSrc >= 0 ? srcVertShellId[bestSrc] : -1;
+            }
+
+            if (gridMisses > 0)
+                UvtLog.Verbose($"[UV0Fix] SourceGuidedWeld grid fallback for {gridMisses} verts");
+
+            // ── Find position+normal duplicates, weld if conditions met ──
+            // Two weld modes (from UnityMeshSimplifier seam/foldover distinction):
+            //   Foldover (same UV0): weld unconditionally — genuinely duplicate verts
+            //   Seam (different UV0): weld only if same source shell
             float cellSize = POS_EPS * 100f;
             var cells = new Dictionary<long, List<int>>();
             for (int i = 0; i < tVertCount; i++)
@@ -460,6 +516,7 @@ namespace LightmapUvTool
             }
 
             var weldMap = new Dictionary<int, int>();
+            int foldoverWelds = 0, seamWelds = 0;
             foreach (var kv in cells)
             {
                 var list = kv.Value;
@@ -477,11 +534,22 @@ namespace LightmapUvTool
                         if (!VecEqual(tVerts[vi], tVerts[vj], POS_EPS)) continue;
                         // Normal must match
                         if (tHasNormals && !VecEqual(tNormals[vi], tNormals[vj], NORMAL_EPS)) continue;
-                        // Both must map to the same source shell
+
+                        // Foldover path: same UV0 → weld unconditionally
+                        if (vi < tUv0.Length && vj < tUv0.Length &&
+                            Vec2Equal(tUv0[vi], tUv0[vj], UV_EPS))
+                        {
+                            weldMap[vj] = vi;
+                            foldoverWelds++;
+                            continue;
+                        }
+
+                        // Seam path: different UV0 → require same source shell
                         if (tVertShellId[vi] != tVertShellId[vj]) continue;
-                        if (tVertShellId[vi] < 0) continue; // no source match
+                        if (tVertShellId[vi] < 0) continue;
 
                         weldMap[vj] = vi;
+                        seamWelds++;
                     }
                 }
             }
@@ -577,8 +645,8 @@ namespace LightmapUvTool
             int shellsBefore = UvShellExtractor.Extract(tUv0, tTris).Count;
             int shellsAfter = UvShellExtractor.Extract(newUv0, newTris).Count;
             UvtLog.Verbose($"[UV0Fix] SourceGuidedWeld '{target.name}': " +
-                      $"welded {weldMap.Count} pairs, removed {removed} verts " +
-                      $"({tVertCount} → {newVertCount}), " +
+                      $"welded {weldMap.Count} pairs (foldover:{foldoverWelds} seam:{seamWelds}), " +
+                      $"removed {removed} verts ({tVertCount} → {newVertCount}), " +
                       $"shells {shellsBefore} → {shellsAfter}");
 
             return result;

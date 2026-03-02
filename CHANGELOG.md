@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.9.94] - 2026-03-03
+
+### Added — Edge analysis + spatial hash optimization (inspired by UnityMeshSimplifier)
+- **EdgeAnalyzer** (`EdgeAnalyzer.cs`): new utility for edge-level mesh topology
+  analysis. Builds edge-face adjacency via position-group spatial hashing,
+  classifies each geometric edge as Border, Interior, UvSeam, UvFoldover,
+  HardEdge, or NonManifold. Provides `FindHardEdgeVertices()` for the planned
+  hard-edge shell splitting feature, and `FindBorderVertices()` for mesh
+  boundary detection. Uses Union-Find on position groups similar to
+  UnityMeshSimplifier's Smart Linking approach.
+- **SourceGuidedWeld spatial hash** (`Uv0Analyzer.cs`): replaced O(n×m) brute
+  force nearest-source-vertex lookup with 3D spatial hash grid (27-cell
+  neighborhood search). Cell size auto-computed from source mesh AABB diagonal
+  divided by cube root of vertex count. Falls back to brute force per-vertex
+  on grid miss. Typical speedup ~10-50× for large meshes.
+- **Seam/foldover weld distinction** (`Uv0Analyzer.cs`): SourceGuidedWeld now
+  classifies vertex pairs as foldover (same UV0 → weld unconditionally) or
+  seam (different UV0 → require same source shell). Foldover pairs no longer
+  need the expensive source shell lookup. Logs `foldover:N seam:N` counts.
+
 ## [0.9.93] - 2026-03-02
 
 ### Added — Consistency check + texel density metric (inspired by CurioMesh)
