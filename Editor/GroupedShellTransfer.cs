@@ -64,6 +64,7 @@ namespace LightmapUvTool
             public int shellsTransform;    // shells that used similarity transform
             public int shellsInterpolation; // shells that fell back to interpolation
             public int shellsMerged;       // merged shells (multi-source)
+            public int consistencyCorrected; // verts where 3D check overrode UV0 in merged shells
             public int verticesTransferred;
             public int verticesTotal;
 
@@ -455,28 +456,86 @@ namespace LightmapUvTool
 
                 if (isMergedShell)
                 {
-                    // ── Merged shell: UV0 multi-shell interpolation ──
-                    // Search ALL source triangles via UV0 nearest, interpolate UV2.
-                    // Interpolation is bounded by source UV2 triangles — no extrapolation.
+                    // ── Merged shell: UV0 multi-shell interpolation + 3D consistency check ──
+                    // Primary: search ALL source triangles via UV0 nearest.
+                    // Secondary: 3D surface projection with normal filter (backface rejection).
+                    // If both agree (UV2 delta < threshold) → use UV0 result (more stable).
+                    // If they disagree → still prefer UV0 (bounded by source UV2 triangles).
+                    // But if UV0 hit is distant (bad coverage) and 3D hit is good → use 3D.
+                    const float kConsistencyThresh = 0.02f; // UV2-space delta
+                    const float kUv0DistantThresh = 0.05f;  // UV0-space sqr distance for "bad" hit
+                    const float kBackfaceDot = 0.3f;        // normal dot threshold for 3D hits
+                    int localConsistencyFixes = 0;
+
                     var uv2_merged = new Dictionary<int, Vector2>();
                     foreach (int vi in tShell.vertexIndices)
                     {
-                        if (vi >= tUv0.Length) continue;
+                        if (vi >= tUv0.Length || vi >= tVerts.Length) continue;
                         Vector2 tUv = tUv0[vi];
-                        float bestDSq2 = float.MaxValue;
-                        int bestF2 = -1; float bestU2 = 0, bestV2 = 0, bestW2 = 0;
+                        Vector3 tPos = tVerts[vi];
+                        Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
+                            ? tNormals[vi] : Vector3.up;
+
+                        // ── UV0 projection (primary) ──
+                        float bestDSqUv0 = float.MaxValue;
+                        int bestFUv0 = -1; float bestU_uv0 = 0, bestV_uv0 = 0, bestW_uv0 = 0;
                         for (int f = 0; f < srcTriCount; f++)
                         {
                             float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
                                 out float u, out float v, out float w);
-                            if (dSq < bestDSq2) { bestDSq2 = dSq; bestF2 = f; bestU2 = u; bestV2 = v; bestW2 = w; }
-                            if (bestDSq2 < 1e-8f) break;
+                            if (dSq < bestDSqUv0) { bestDSqUv0 = dSq; bestFUv0 = f; bestU_uv0 = u; bestV_uv0 = v; bestW_uv0 = w; }
+                            if (bestDSqUv0 < 1e-8f) break;
                         }
-                        if (bestF2 >= 0)
-                            uv2_merged[vi] = triUv2A[bestF2] * bestU2 + triUv2B[bestF2] * bestV2 + triUv2C[bestF2] * bestW2;
+
+                        // ── 3D projection (secondary, with backface filter) ──
+                        float bestDSq3D = float.MaxValue;
+                        int bestF3D = -1; float bestU_3d = 0, bestV_3d = 0, bestW_3d = 0;
+                        for (int f = 0; f < srcTriCount; f++)
+                        {
+                            // Backface rejection: skip if source normal opposes target normal
+                            if (Vector3.Dot(triNormal[f], tNrm) < kBackfaceDot) continue;
+
+                            float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
+                                out float u, out float v, out float w);
+                            if (dSq < bestDSq3D) { bestDSq3D = dSq; bestF3D = f; bestU_3d = u; bestV_3d = v; bestW_3d = w; }
+                        }
+
+                        // ── Consistency decision ──
+                        Vector2 uv2FromUv0 = (bestFUv0 >= 0)
+                            ? triUv2A[bestFUv0] * bestU_uv0 + triUv2B[bestFUv0] * bestV_uv0 + triUv2C[bestFUv0] * bestW_uv0
+                            : Vector2.zero;
+                        Vector2 uv2From3D = (bestF3D >= 0)
+                            ? triUv2A[bestF3D] * bestU_3d + triUv2B[bestF3D] * bestV_3d + triUv2C[bestF3D] * bestW_3d
+                            : Vector2.zero;
+
+                        if (bestFUv0 >= 0 && bestF3D >= 0)
+                        {
+                            float delta = (uv2FromUv0 - uv2From3D).magnitude;
+                            // UV0 hit is distant (bad coverage) but 3D hit is close → prefer 3D
+                            if (bestDSqUv0 > kUv0DistantThresh && delta > kConsistencyThresh)
+                            {
+                                uv2_merged[vi] = uv2From3D;
+                                localConsistencyFixes++;
+                            }
+                            else
+                            {
+                                uv2_merged[vi] = uv2FromUv0; // UV0 primary (bounded)
+                            }
+                        }
+                        else if (bestFUv0 >= 0)
+                        {
+                            uv2_merged[vi] = uv2FromUv0;
+                        }
+                        else if (bestF3D >= 0)
+                        {
+                            uv2_merged[vi] = uv2From3D;
+                            localConsistencyFixes++;
+                        }
                     }
+
                     chosenUv2 = uv2_merged;
                     shellsMerged++;
+                    result.consistencyCorrected += localConsistencyFixes;
                 }
                 else
                 {
@@ -550,7 +609,10 @@ namespace LightmapUvTool
             UvtLog.Info($"[GroupedTransfer] '{targetMesh.name}': " +
                 $"{tgtShells.Count} target → {shellsMatched} matched " +
                 $"(xform:{shellsTransform} interp:{shellsInterpolation} merged:{shellsMerged}), " +
-                $"{transferred}/{vertCount} verts");
+                $"{transferred}/{vertCount} verts" +
+                (result.consistencyCorrected > 0
+                    ? $" (consistency-corrected:{result.consistencyCorrected})"
+                    : ""));
 
             // UV2 bounds check
             int oob = 0;

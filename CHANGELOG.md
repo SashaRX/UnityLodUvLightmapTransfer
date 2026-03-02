@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.93] - 2026-03-02
+
+### Added — Consistency check + texel density metric (inspired by CurioMesh)
+- **Merged shell consistency check** in `GroupedShellTransfer`: for merged
+  shells (multi-source), UV0 projection remains primary but now runs a
+  secondary 3D surface projection with backface rejection (dot > 0.3).
+  If UV0 hit is distant (sqr > 0.05) and UV2 results disagree (delta > 0.02),
+  prefers the 3D result. Logs `consistency-corrected` vertex count.
+  Closes the gap where merged shell UV0-only search could silently pick
+  wrong triangles from distant UV0 regions.
+- **Texel density metric** in `TransferValidator`: computes per-triangle
+  `areaWorld / areaUV2` ratio, finds global median, flags triangles where
+  ratio deviates > 200× from median as `TexelDensity` issue. New fields:
+  `texelDensityRatios[]`, `texelDensityMedian`, `texelDensityBadCount`.
+  Visible in Review tab as cyan "Txl" bar and fill color.
+- **Backface threshold** (0.3) used in merged shell 3D fallback path,
+  filtering source triangles whose normal opposes target vertex normal.
+  Previously only used in legacy transfer pipeline.
+
 ## [0.9.74] - 2026-03-02
 
 ### Fixed — Interpolation primary, transform fallback only

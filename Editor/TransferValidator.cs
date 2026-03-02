@@ -19,6 +19,7 @@ namespace LightmapUvTool
             ZeroArea      = 1 << 2,   // degenerate UV2 triangle
             OutOfBounds   = 1 << 3,   // any vertex outside 0-1
             Overlap       = 1 << 4,   // UV2 shell overlap with another shell
+            TexelDensity  = 1 << 5,   // areaWorld/areaUV2 ratio outlier (suspicious texel density)
         }
 
         public class ValidationReport
@@ -34,11 +35,18 @@ namespace LightmapUvTool
             public int overlapShellPairs;       // number of shell pairs with actual tri overlap
             public int overlapTriangleCount;    // triangles involved in overlaps
 
+            // Texel density (areaWorld/areaUV2)
+            public int texelDensityBadCount;    // triangles with suspicious world/UV2 ratio
+            public float texelDensityMedian;    // median areaWorld/areaUV2 across all triangles
+
             // Per-triangle data for visualization
             public TriIssue[] perTriangle;
 
             // Per-triangle stretch ratio (areaUV2/areaUV0), NaN if UV0 degenerate
             public float[] stretchRatios;
+
+            // Per-triangle texel density ratio (areaWorld/areaUV2), NaN if UV2 degenerate
+            public float[] texelDensityRatios;
 
             // Shell-level stats
             public float[] shellMedianStretch;   // indexed by target shell
@@ -52,6 +60,7 @@ namespace LightmapUvTool
                 $"Tri:{totalTriangles} Clean:{cleanCount} " +
                 $"Inv:{invertedCount} Stretch:{stretchedCount} " +
                 $"Zero:{zeroAreaCount} OOB:{oobCount}" +
+                (texelDensityBadCount > 0 ? $" TxlBad:{texelDensityBadCount}" : "") +
                 (overlapShellPairs > 0 ? $" Ovlp:{overlapShellPairs}pairs/{overlapTriangleCount}tri" : "");
         }
 
@@ -63,9 +72,11 @@ namespace LightmapUvTool
             Mesh targetMesh,
             Vector2[] uv2,
             GroupedShellTransfer.TransferResult transferResult = null,
-            float stretchThreshold = 3.0f)
+            float stretchThreshold = 3.0f,
+            float texelDensityThreshold = 200.0f)
         {
             var tris = targetMesh.triangles;
+            var verts = targetMesh.vertices;
             var uv0List = new List<Vector2>();
             targetMesh.GetUVs(0, uv0List);
             var uv0 = uv0List.ToArray();
@@ -77,11 +88,13 @@ namespace LightmapUvTool
                 totalTriangles = faceCount,
                 perTriangle = new TriIssue[faceCount],
                 stretchRatios = new float[faceCount],
+                texelDensityRatios = new float[faceCount],
             };
 
             // ── Phase 1: Per-triangle metrics ──
             var areaUv0 = new float[faceCount];
             var areaUv2 = new float[faceCount];
+            var areaWorld = new float[faceCount];
             var windingUv0 = new float[faceCount]; // signed area
             var windingUv2 = new float[faceCount];
 
@@ -101,11 +114,24 @@ namespace LightmapUvTool
                     areaUv2[f] = Mathf.Abs(windingUv2[f]);
                 }
 
-                // Stretch ratio
+                // World-space triangle area
+                if (i0 < verts.Length && i1 < verts.Length && i2 < verts.Length)
+                {
+                    Vector3 cross = Vector3.Cross(verts[i1] - verts[i0], verts[i2] - verts[i0]);
+                    areaWorld[f] = cross.magnitude * 0.5f;
+                }
+
+                // Stretch ratio (UV2 vs UV0)
                 if (areaUv0[f] > 1e-10f)
                     report.stretchRatios[f] = areaUv2[f] / areaUv0[f];
                 else
                     report.stretchRatios[f] = float.NaN;
+
+                // Texel density ratio (world area / UV2 area)
+                if (areaUv2[f] > 1e-10f)
+                    report.texelDensityRatios[f] = areaWorld[f] / areaUv2[f];
+                else
+                    report.texelDensityRatios[f] = float.NaN;
             }
 
             // ── Phase 2: Compute per-shell median stretch ──
@@ -193,6 +219,36 @@ namespace LightmapUvTool
                 }
             }
 
+            // ── Phase 4: Texel density outliers ──
+            {
+                // Compute global median texel density
+                var validDensities = new List<float>();
+                for (int f = 0; f < faceCount; f++)
+                {
+                    if (!float.IsNaN(report.texelDensityRatios[f]))
+                        validDensities.Add(report.texelDensityRatios[f]);
+                }
+                if (validDensities.Count > 0)
+                {
+                    validDensities.Sort();
+                    report.texelDensityMedian = validDensities[validDensities.Count / 2];
+
+                    // Flag outliers: ratio > texelDensityThreshold × median
+                    float median = report.texelDensityMedian;
+                    if (median > 1e-10f)
+                    {
+                        for (int f = 0; f < faceCount; f++)
+                        {
+                            float td = report.texelDensityRatios[f];
+                            if (float.IsNaN(td)) continue;
+                            float ratio = td / median;
+                            if (ratio > texelDensityThreshold || ratio < 1f / texelDensityThreshold)
+                                report.perTriangle[f] |= TriIssue.TexelDensity;
+                        }
+                    }
+                }
+            }
+
             // ── Count ──
             for (int f = 0; f < faceCount; f++)
             {
@@ -202,6 +258,7 @@ namespace LightmapUvTool
                 if ((fl & TriIssue.Stretched) != 0) report.stretchedCount++;
                 if ((fl & TriIssue.ZeroArea) != 0) report.zeroAreaCount++;
                 if ((fl & TriIssue.OutOfBounds) != 0) report.oobCount++;
+                if ((fl & TriIssue.TexelDensity) != 0) report.texelDensityBadCount++;
             }
 
             return report;

@@ -151,6 +151,7 @@ namespace LightmapUvTool
         static readonly Color cValZero     = new Color(.7f, .2f, .9f, .5f);
         static readonly Color cValOOB      = new Color(1f, .5f, .1f, .5f);
         static readonly Color cValOverlap  = new Color(1f, .1f, .9f, .55f);
+        static readonly Color cValTexel    = new Color(.1f, .7f, .9f, .5f);
 
         // Fill mode labels for dropdown
         static readonly string[] fillModeLabels = { "Shells", "Status", "Shell Match", "Validation", "None" };
@@ -639,6 +640,7 @@ namespace LightmapUvTool
                                 if (vr.stretchedCount > 0) Bar("Str", vr.stretchedCount, vr.totalTriangles, cValStretch);
                                 if (vr.zeroAreaCount > 0) Bar("0A", vr.zeroAreaCount, vr.totalTriangles, cValZero);
                                 if (vr.oobCount > 0) Bar("OB", vr.oobCount, vr.totalTriangles, cValOOB);
+                                if (vr.texelDensityBadCount > 0) Bar("Txl", vr.texelDensityBadCount, vr.totalTriangles, cValTexel);
                                 if (vr.overlapShellPairs > 0) Bar("Ov", vr.overlapTriangleCount, vr.totalTriangles, cValOverlap);
                             }
                         }
@@ -1131,6 +1133,7 @@ namespace LightmapUvTool
                 else if ((fl & TransferValidator.TriIssue.Stretched) != 0) nc = cValStretch;
                 else if ((fl & TransferValidator.TriIssue.Overlap) != 0)   nc = cValOverlap;
                 else if ((fl & TransferValidator.TriIssue.OutOfBounds) != 0) nc = cValOOB;
+                else if ((fl & TransferValidator.TriIssue.TexelDensity) != 0) nc = cValTexel;
                 else nc = cValClean;
                 if (nc.r != cc.r || nc.g != cc.g || nc.b != cc.b)
                 { GL.End(); GL.Begin(GL.TRIANGLES); cc = nc; GL.Color(cc); b = 0; }
@@ -1171,7 +1174,7 @@ namespace LightmapUvTool
             switch (fillMode)
             {
                 case FillMode.Validation:
-                    Sw("✓", cValClean); Sw("Str", cValStretch); Sw("0A", cValZero); Sw("OB", cValOOB); Sw("Ov", cValOverlap);
+                    Sw("✓", cValClean); Sw("Str", cValStretch); Sw("0A", cValZero); Sw("OB", cValOOB); Sw("Txl", cValTexel); Sw("Ov", cValOverlap);
                     break;
                 case FillMode.ShellMatch:
                     EditorGUILayout.LabelField("Shell Match: color = source shell", EditorStyles.miniLabel);
