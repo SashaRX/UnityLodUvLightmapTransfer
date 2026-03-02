@@ -136,6 +136,38 @@ namespace LightmapUvTool
             if (srcUv0.Length == 0 || srcUv2.Length == 0)
             { UvtLog.Error("[GroupedTransfer] Source missing UV0/UV2"); return result; }
 
+            // ── Normalize source UV0 winding ──
+            // NormalizeShellWinding in repack worked on a local copy, so
+            // sourceMesh.uv still has original mirrored shells. Flip them
+            // here to match the UV0 space that xatlas used for UV2.
+            {
+                var srcShellsTemp = UvShellExtractor.Extract(srcUv0, srcTris);
+                int sFlipped = 0;
+                foreach (var shell in srcShellsTemp)
+                {
+                    float sa = ComputeSignedArea(srcTris, srcUv0, shell.faceIndices);
+                    if (sa >= 0) continue;
+                    float minU = float.MaxValue, maxU = float.MinValue;
+                    foreach (int vi in shell.vertexIndices)
+                    {
+                        if (vi < srcUv0.Length)
+                        {
+                            if (srcUv0[vi].x < minU) minU = srcUv0[vi].x;
+                            if (srcUv0[vi].x > maxU) maxU = srcUv0[vi].x;
+                        }
+                    }
+                    float twoCenter = minU + maxU;
+                    foreach (int vi in shell.vertexIndices)
+                    {
+                        if (vi < srcUv0.Length)
+                            srcUv0[vi] = new Vector2(twoCenter - srcUv0[vi].x, srcUv0[vi].y);
+                    }
+                    sFlipped++;
+                }
+                if (sFlipped > 0)
+                    UvtLog.Info($"[GroupedTransfer] '{sourceMesh.name}': normalized {sFlipped} mirrored source UV0 shell(s)");
+            }
+
             // Target data
             var tVerts = targetMesh.vertices;
             var tNormals = targetMesh.normals;
@@ -147,9 +179,7 @@ namespace LightmapUvTool
             { UvtLog.Error("[GroupedTransfer] Target missing UV0"); return result; }
 
             // ── Normalize target UV0 winding to match source ──
-            // Source UV0 was flipped by NormalizeShellWinding before repack.
-            // Target UV0 still has original mirrored shells. Flip them here
-            // so UV0 lookup operates in the same winding space.
+            // Same flip as source above, so both UV0 spaces are identical.
             {
                 var tgtTrisTemp = targetMesh.triangles;
                 var tgtShellsTemp = UvShellExtractor.Extract(tUv0, tgtTrisTemp);
