@@ -180,7 +180,7 @@ namespace LightmapUvTool
             var uv0List = new List<Vector2>();
             var uv2List = new List<Vector2>();
             sourceMesh.GetUVs(0, uv0List);
-            sourceMesh.GetUVs(2, uv2List);
+            sourceMesh.GetUVs(1, uv2List);
             if (uv0List.Count == 0 || uv2List.Count == 0)
             {
                 UvtLog.Error("[GroupedTransfer] Source mesh missing UV0 or UV2");
@@ -246,7 +246,7 @@ namespace LightmapUvTool
             var srcVerts = sourceMesh.vertices;
             var srcTris = sourceMesh.triangles;
             var srcUv0List = new List<Vector2>(); sourceMesh.GetUVs(0, srcUv0List);
-            var srcUv2List = new List<Vector2>(); sourceMesh.GetUVs(2, srcUv2List);
+            var srcUv2List = new List<Vector2>(); sourceMesh.GetUVs(1, srcUv2List);
             var srcUv0 = srcUv0List.ToArray();
             var srcUv2 = srcUv2List.ToArray();
 

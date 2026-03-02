@@ -12,9 +12,9 @@ namespace LightmapUvTool
     {
         /// <summary>
         /// Build full source analysis from LOD0 mesh.
-        /// uvChannel: 0=UV0, 2=UV2 (default — the repacked lightmap channel)
+        /// uvChannel: 0=UV0, 1=UV1/mesh.uv2 (default — Unity lightmap channel)
         /// </summary>
-        public static SourceMeshData Analyze(Mesh mesh, int uvChannel = 2)
+        public static SourceMeshData Analyze(Mesh mesh, int uvChannel = 1)
         {
             var data = new SourceMeshData();
             data.mesh = mesh;
@@ -152,7 +152,7 @@ namespace LightmapUvTool
         /// <summary>
         /// Initialize a TargetTransferState for a target LOD mesh.
         /// </summary>
-        public static TargetTransferState PrepareTarget(Mesh mesh, int targetUvChannel = 2)
+        public static TargetTransferState PrepareTarget(Mesh mesh, int targetUvChannel = 1)
         {
             var state = new TargetTransferState();
             state.mesh = mesh;

@@ -57,7 +57,7 @@ namespace LightmapUvTool
         bool canvasPanning;
         Rect lastCanvasRect;
         RenderTexture canvasRT;
-        int  pvChannel = 2;
+        int  pvChannel = 1;
         int  pvLod     = 0;
         bool showWire = true, showBorder;
         float fillAlpha = 0.25f;
@@ -277,7 +277,7 @@ namespace LightmapUvTool
                     if (mf == null || mf.sharedMesh == null) continue;
                     var fbm = mf.sharedMesh;
                     var uv2Check = new List<Vector2>();
-                    fbm.GetUVs(2, uv2Check);
+                    fbm.GetUVs(1, uv2Check);
                     meshEntries.Add(new MeshEntry {
                         lodIndex = li, renderer = r, meshFilter = mf,
                         originalMesh = fbm,
@@ -444,8 +444,8 @@ namespace LightmapUvTool
             // ── Pipeline Settings ──
             EditorGUILayout.Space(6);
             H("Pipeline Settings");
-            pipeSettings.sourceUvChannel = EditorGUILayout.IntPopup("Source UV", pipeSettings.sourceUvChannel, new[]{"UV0","UV2"}, new[]{0,2});
-            pipeSettings.targetUvChannel = EditorGUILayout.IntPopup("Target UV", pipeSettings.targetUvChannel, new[]{"UV0","UV2"}, new[]{0,2});
+            pipeSettings.sourceUvChannel = EditorGUILayout.IntPopup("Source UV", pipeSettings.sourceUvChannel, new[]{"UV0","UV2"}, new[]{0,1});
+            pipeSettings.targetUvChannel = EditorGUILayout.IntPopup("Target UV", pipeSettings.targetUvChannel, new[]{"UV0","UV2"}, new[]{0,1});
 
             foldProjection = EditorGUILayout.Foldout(foldProjection, "Projection", true);
             if (foldProjection)
@@ -717,7 +717,7 @@ namespace LightmapUvTool
                 GUI.backgroundColor = new Color(.85f,.75f,.95f);
                 int ci = pvChannel == 0 ? 0 : 1;
                 ci = GUILayout.Toolbar(ci, new[]{"UV0","UV2"}, EditorStyles.toolbarButton, GUILayout.Width(80));
-                pvChannel = ci == 0 ? 0 : 2;
+                pvChannel = ci == 0 ? 0 : 1;
                 GUI.backgroundColor = bg;
             }
 
@@ -1192,8 +1192,8 @@ namespace LightmapUvTool
 
         Mesh DMesh(MeshEntry e)
         {
-            if (e.lodIndex == sourceLodIndex && e.repackedMesh != null && pvChannel == 2) return e.repackedMesh;
-            if (e.lodIndex != sourceLodIndex && e.transferredMesh != null && pvChannel == 2) return e.transferredMesh;
+            if (e.lodIndex == sourceLodIndex && e.repackedMesh != null && pvChannel == 1) return e.repackedMesh;
+            if (e.lodIndex != sourceLodIndex && e.transferredMesh != null && pvChannel == 1) return e.transferredMesh;
             return e.originalMesh;
         }
 
@@ -1299,7 +1299,7 @@ namespace LightmapUvTool
                 ExecTransferAll();
 
                 tab = Tab.Transfer;
-                pvChannel = 2;
+                pvChannel = 1;
                 fillMode = FillMode.Validation;
                 // Switch to first target LOD for preview
                 for (int i = 0; i < LodN; i++)
@@ -1495,7 +1495,7 @@ namespace LightmapUvTool
                         if (fallback != null)
                         {
                             var testUv2 = new List<Vector2>();
-                            fallback.GetUVs(2, testUv2);
+                            fallback.GetUVs(1, testUv2);
                             if (testUv2.Count > 0) uvMesh = fallback;
                         }
                     }
@@ -1512,7 +1512,7 @@ namespace LightmapUvTool
                     var mf = r.GetComponent<MeshFilter>();
                     if (mf == null || mf.sharedMesh == null) continue;
                     var testUv2 = new List<Vector2>();
-                    mf.sharedMesh.GetUVs(2, testUv2);
+                    mf.sharedMesh.GetUVs(1, testUv2);
                     if (testUv2.Count > 0)
                         entries.Add((r, null)); // null = keep current mesh, just swap material
                 }
@@ -1550,7 +1550,7 @@ namespace LightmapUvTool
                     if (fallback != null)
                     {
                         var testUv2 = new List<Vector2>();
-                        fallback.GetUVs(2, testUv2);
+                        fallback.GetUVs(1, testUv2);
                         if (testUv2.Count > 0) uvMesh = fallback;
                     }
                 }

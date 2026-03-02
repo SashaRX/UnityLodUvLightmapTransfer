@@ -112,7 +112,7 @@ namespace LightmapUvTool
                 return null;
             }
             var uvOut = new List<Vector2>();
-            tmp.GetUVs(2, uvOut);
+            tmp.GetUVs(1, uvOut);
             Object.DestroyImmediate(tmp);
             return uvOut.ToArray();
         }
@@ -235,8 +235,8 @@ namespace LightmapUvTool
                 if (opts.borderPadding > 0 && result.atlasWidth > 0)
                     ApplyBorderInset(uv2, opts.borderPadding, result.atlasWidth, result.atlasHeight);
 
-                // ── Apply UV2 (channel 2 — matches SourceMeshAnalyzer.GetUVs(2)) ──
-                mesh.SetUVs(2, uv2);
+                // ── Apply UV2 (channel 1 — Unity lightmap channel, mesh.uv2) ──
+                mesh.SetUVs(1, uv2);
                 result.ok = true;
 
                 // ── Stats ──
@@ -416,7 +416,7 @@ namespace LightmapUvTool
                         ApplyBorderInset(uv2, opts.borderPadding, atlasW, atlasH);
 
                     // Apply UV2
-                    mesh.SetUVs(2, uv2);
+                    mesh.SetUVs(1, uv2);
                     results[m].ok = true;
                 }
             }
@@ -438,7 +438,7 @@ namespace LightmapUvTool
             if (borderPaddingPx <= 0 || atlasSize == 0) return;
 
             var uv2List = new List<Vector2>();
-            mesh.GetUVs(2, uv2List);
+            mesh.GetUVs(1, uv2List);
             if (uv2List.Count == 0) return;
 
             float inset = (float)borderPaddingPx / atlasSize;
@@ -455,7 +455,7 @@ namespace LightmapUvTool
             for (int i = 0; i < uv2.Length; i++)
                 uv2[i] = uv2[i] * scale + new Vector2(inset, inset);
 
-            mesh.SetUVs(2, uv2);
+            mesh.SetUVs(1, uv2);
         }
 
         public static Vector2[] ApplyBorderInset(Vector2[] uv2, int borderPaddingPx, uint atlasSize)

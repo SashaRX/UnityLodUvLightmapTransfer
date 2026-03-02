@@ -32,6 +32,14 @@ namespace LightmapUvTool
                 modelImporter.isReadable = true;
                 UvtLog.Info($"[UV2 Preprocess] Enabled Read/Write on '{assetPath}' for UV2 injection");
             }
+
+            // Disable Unity's built-in lightmap UV generation so it doesn't
+            // overwrite our custom UV2 during reimport.
+            if (modelImporter.generateSecondaryUVs)
+            {
+                modelImporter.generateSecondaryUVs = false;
+                UvtLog.Info($"[UV2 Preprocess] Disabled generateSecondaryUVs on '{assetPath}' — using custom UV2 from sidecar");
+            }
         }
 
         void OnPostprocessModel(GameObject root)
@@ -138,7 +146,8 @@ namespace LightmapUvTool
             bool didRemap;
             var uv2 = RemapUv2IfNeeded(entry, mesh, out didRemap);
             stats.remapped = didRemap;
-            mesh.SetUVs(2, uv2);
+            // Channel 1 = mesh.uv2 = Unity's lightmap UV channel
+            mesh.SetUVs(1, uv2);
             return true;
         }
 

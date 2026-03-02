@@ -32,8 +32,8 @@ namespace LightmapUvTool
 
             public static PipelineSettings Default => new PipelineSettings
             {
-                sourceUvChannel = 2,
-                targetUvChannel = 2,
+                sourceUvChannel = 1,
+                targetUvChannel = 1,
                 maxProjectionDistance = 0.5f,
                 maxNormalAngle = 80f,
                 filterBySubmesh = true,
