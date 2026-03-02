@@ -455,28 +455,113 @@ namespace LightmapUvTool
 
                 if (isMergedShell)
                 {
-                    // ── Merged shell: UV0 multi-shell interpolation ──
-                    // Search ALL source triangles via UV0 nearest, interpolate UV2.
-                    // Interpolation is bounded by source UV2 triangles — no extrapolation.
-                    var uv2_merged = new Dictionary<int, Vector2>();
-                    foreach (int vi in tShell.vertexIndices)
+                    // ── Merged shell: 3D-guided per-vertex source shell assignment ──
+                    // When LOD merges N tiling instances (identical UV0, different UV2/3D)
+                    // into one shell, UV0 alone can't disambiguate which source instance
+                    // owns each target vertex. Use 3D proximity to assign vertices to
+                    // the correct source shell, then UV0-interpolate from that shell.
+
+                    // Find candidate source shells with overlapping UV0 bounds
+                    var candidates = new List<int>();
+                    for (int si = 0; si < srcShells.Count; si++)
                     {
-                        if (vi >= tUv0.Length) continue;
-                        Vector2 tUv = tUv0[vi];
-                        float bestDSq2 = float.MaxValue;
-                        int bestF2 = -1; float bestU2 = 0, bestV2 = 0, bestW2 = 0;
-                        for (int f = 0; f < srcTriCount; f++)
-                        {
-                            float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                                out float u, out float v, out float w);
-                            if (dSq < bestDSq2) { bestDSq2 = dSq; bestF2 = f; bestU2 = u; bestV2 = v; bestW2 = w; }
-                            if (bestDSq2 < 1e-8f) break;
-                        }
-                        if (bestF2 >= 0)
-                            uv2_merged[vi] = triUv2A[bestF2] * bestU2 + triUv2B[bestF2] * bestV2 + triUv2C[bestF2] * bestW2;
+                        float ovlp = Uv0BboxOverlap(tShell.boundsMin, tShell.boundsMax,
+                            srcShells[si].boundsMin, srcShells[si].boundsMax);
+                        if (ovlp > 0.25f) candidates.Add(si);
                     }
+
+                    // Ensure chosen source is in the list
+                    if (!candidates.Contains(chosenSrc))
+                        candidates.Insert(0, chosenSrc);
+
+                    var uv2_merged = new Dictionary<int, Vector2>();
+
+                    if (candidates.Count <= 1)
+                    {
+                        // Single candidate — fall through to UV0 interpolation from it
+                        var singleFaces = srcShells[chosenSrc].faceIndices;
+                        foreach (int vi in tShell.vertexIndices)
+                        {
+                            if (vi >= tUv0.Length) continue;
+                            Vector2 tUv = tUv0[vi];
+                            float bestDSq2 = float.MaxValue;
+                            int bestF2 = -1; float bestU2 = 0, bestV2 = 0, bestW2 = 0;
+                            for (int fi = 0; fi < singleFaces.Count; fi++)
+                            {
+                                int f = singleFaces[fi];
+                                float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                                    out float uu, out float vv, out float ww);
+                                if (dSq < bestDSq2) { bestDSq2 = dSq; bestF2 = f; bestU2 = uu; bestV2 = vv; bestW2 = ww; }
+                                if (bestDSq2 < 1e-8f) break;
+                            }
+                            if (bestF2 >= 0)
+                                uv2_merged[vi] = triUv2A[bestF2] * bestU2 + triUv2B[bestF2] * bestV2 + triUv2C[bestF2] * bestW2;
+                        }
+                    }
+                    else
+                    {
+                        // Multiple candidates — 3D-guided disambiguation
+                        foreach (int vi in tShell.vertexIndices)
+                        {
+                            if (vi >= tVerts.Length || vi >= tUv0.Length) continue;
+                            Vector3 tPos = tVerts[vi];
+
+                            // Step 1: Find closest source shell by 3D surface distance
+                            int bestSrc = chosenSrc;
+                            float bestDist3D = float.MaxValue;
+
+                            for (int ci = 0; ci < candidates.Count; ci++)
+                            {
+                                int si = candidates[ci];
+                                var sFaces = srcShells[si].faceIndices;
+
+                                // Quick AABB reject
+                                Vector3 clamped = Vector3.Max(srcAABBMin[si], Vector3.Min(srcAABBMax[si], tPos));
+                                float aabbDistSq = (tPos - clamped).sqrMagnitude;
+                                if (aabbDistSq > bestDist3D * 4f) continue;
+
+                                float shellBest = float.MaxValue;
+                                for (int fi = 0; fi < sFaces.Count; fi++)
+                                {
+                                    int f = sFaces[fi];
+                                    float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
+                                        out _, out _, out _);
+                                    if (dSq < shellBest) shellBest = dSq;
+                                    if (shellBest < 1e-8f) break;
+                                }
+                                if (shellBest < bestDist3D)
+                                {
+                                    bestDist3D = shellBest;
+                                    bestSrc = si;
+                                }
+                            }
+
+                            // Step 2: UV0 interpolation from the assigned source shell
+                            var assignedFaces = srcShells[bestSrc].faceIndices;
+                            Vector2 tUv = tUv0[vi];
+                            float bestDSq2 = float.MaxValue;
+                            int bestF2 = -1; float bestU2 = 0, bestV2 = 0, bestW2 = 0;
+
+                            for (int fi = 0; fi < assignedFaces.Count; fi++)
+                            {
+                                int f = assignedFaces[fi];
+                                float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                                    out float uu, out float vv, out float ww);
+                                if (dSq < bestDSq2) { bestDSq2 = dSq; bestF2 = f; bestU2 = uu; bestV2 = vv; bestW2 = ww; }
+                                if (bestDSq2 < 1e-8f) break;
+                            }
+
+                            if (bestF2 >= 0)
+                                uv2_merged[vi] = triUv2A[bestF2] * bestU2 + triUv2B[bestF2] * bestV2 + triUv2C[bestF2] * bestW2;
+                        }
+                    }
+
                     chosenUv2 = uv2_merged;
                     shellsMerged++;
+
+                    UvtLog.Info($"[GroupedTransfer] Merged shell #{tsi}: " +
+                        $"{tShell.vertexIndices.Count} verts, {candidates.Count} candidate src shells, " +
+                        $"mode={(candidates.Count > 1 ? "3D-guided" : "single-src")}");
                 }
                 else
                 {
@@ -678,6 +763,25 @@ namespace LightmapUvTool
               float d = (p - (b + bc * t)).sqrMagnitude;
               if (d < best) { best = d; u = 0f; v = 1f - t; w = t; } }
             return best;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  UV0 bounding box overlap ratio (for merged shell candidate search)
+        //  Returns ratio of overlap area to smaller bbox area
+        // ═══════════════════════════════════════════════════════════
+
+        static float Uv0BboxOverlap(Vector2 aMin, Vector2 aMax, Vector2 bMin, Vector2 bMax)
+        {
+            float oMinX = Mathf.Max(aMin.x, bMin.x);
+            float oMinY = Mathf.Max(aMin.y, bMin.y);
+            float oMaxX = Mathf.Min(aMax.x, bMax.x);
+            float oMaxY = Mathf.Min(aMax.y, bMax.y);
+            if (oMaxX <= oMinX || oMaxY <= oMinY) return 0f;
+            float overlapArea = (oMaxX - oMinX) * (oMaxY - oMinY);
+            float areaA = Mathf.Max(0f, (aMax.x - aMin.x) * (aMax.y - aMin.y));
+            float areaB = Mathf.Max(0f, (bMax.x - bMin.x) * (bMax.y - bMin.y));
+            float smaller = Mathf.Min(areaA, areaB);
+            return smaller > 0f ? overlapArea / smaller : 0f;
         }
 
         static float SignedArea2D(Vector2 a, Vector2 b, Vector2 c)
