@@ -167,12 +167,11 @@ namespace LightmapUvTool
             {
                 int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
 
-                // Inverted: UV0 and UV2 have opposite winding
-                if (Mathf.Abs(windingUv0[f]) > 1e-10f && Mathf.Abs(windingUv2[f]) > 1e-10f)
-                {
-                    if (Mathf.Sign(windingUv0[f]) != Mathf.Sign(windingUv2[f]))
-                        report.perTriangle[f] |= TriIssue.Inverted;
-                }
+                // Inverted: UV2 has negative winding (bad for lightmaps).
+                // Note: UV0 may intentionally have negative winding (mirrored shells
+                // for texture tiling), so we check UV2 sign alone, not vs UV0.
+                if (Mathf.Abs(windingUv2[f]) > 1e-10f && windingUv2[f] < 0f)
+                    report.perTriangle[f] |= TriIssue.Inverted;
 
                 // Zero area UV2
                 if (areaUv2[f] < 1e-10f && areaUv0[f] > 1e-10f)
