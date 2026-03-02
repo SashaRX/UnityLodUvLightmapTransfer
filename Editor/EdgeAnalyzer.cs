@@ -59,8 +59,8 @@ namespace LightmapUvTool
         //  Analyze: full edge classification for a mesh
         // ═══════════════════════════════════════════════════════════
 
-        public static EdgeReport Analyze(Mesh mesh, float hardEdgeAngleDeg = 1f,
-            out Dictionary<long, EdgeInfo> edges)
+        public static EdgeReport Analyze(Mesh mesh,
+            out Dictionary<long, EdgeInfo> edges, float hardEdgeAngleDeg = 1f)
         {
             var verts   = mesh.vertices;
             var normals = mesh.normals;
@@ -182,7 +182,7 @@ namespace LightmapUvTool
             Mesh mesh, float angleThresholdDeg = 1f)
         {
             var result = new HashSet<int>();
-            Analyze(mesh, angleThresholdDeg, out var edges);
+            Analyze(mesh, out var edges, angleThresholdDeg);
 
             var tris = mesh.triangles;
             var posGroup = BuildPositionGroups(mesh.vertices, mesh.vertexCount);
@@ -215,7 +215,7 @@ namespace LightmapUvTool
         public static HashSet<int> FindBorderVertices(Mesh mesh)
         {
             var result = new HashSet<int>();
-            Analyze(mesh, 1f, out var edges);
+            Analyze(mesh, out var edges);
 
             var tris = mesh.triangles;
             var posGroup = BuildPositionGroups(mesh.vertices, mesh.vertexCount);
