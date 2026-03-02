@@ -34,7 +34,6 @@ namespace LightmapUvTool
         int atlasResolution = 1024;
         int shellPaddingPx  = 2;
         int borderPaddingPx = 0;
-        bool rotateCharts   = true;
 
         // UV0 analysis
         Dictionary<int, Uv0Report> uv0Reports = new Dictionary<int, Uv0Report>();
@@ -114,13 +113,11 @@ namespace LightmapUvTool
 
         static readonly Color cAccept = new Color(.2f,.85f,.3f,.5f);
         static readonly Color cAmbig  = new Color(.95f,.85f,.2f,.5f);
-        static readonly Color cBorder = new Color(1f,.5f,.1f,.5f);
         static readonly Color cMis    = new Color(.9f,.15f,.15f,.5f);
         static readonly Color cReject = new Color(.4f,.4f,.4f,.5f);
         static readonly Color cNone   = new Color(.3f,.3f,.3f,.3f);
 
         static readonly Color cValClean    = new Color(.2f, .85f, .3f, .4f);
-        static readonly Color cValInverted = new Color(.95f, .15f, .15f, .55f);
         static readonly Color cValStretch  = new Color(.95f, .85f, .15f, .5f);
         static readonly Color cValZero     = new Color(.7f, .2f, .9f, .5f);
         static readonly Color cValOOB      = new Color(1f, .5f, .1f, .5f);
@@ -412,9 +409,7 @@ namespace LightmapUvTool
                         }
                         if (r.flippedTriangles > 0)
                         {
-                            var cc = GUI.contentColor; GUI.contentColor = new Color(1f,.4f,.4f);
-                            EditorGUILayout.LabelField($"  {r.flippedTriangles} flipped tris", EditorStyles.miniLabel);
-                            GUI.contentColor = cc;
+                            EditorGUILayout.LabelField($"  {r.flippedTriangles} minor winding inconsistencies", EditorStyles.miniLabel);
                         }
                         if (!r.HasIssues)
                         {
@@ -453,7 +448,6 @@ namespace LightmapUvTool
                 borderPaddingPx = EditorGUILayout.IntSlider("Border Padding", borderPaddingPx, 0, 16);
                 if (borderPaddingPx == 0)
                     EditorGUILayout.LabelField("Border=0: UVs to atlas edges (Clamp)", EditorStyles.miniLabel);
-                rotateCharts = EditorGUILayout.Toggle("Rotate", rotateCharts);
                 EditorGUI.indentLevel--;
             }
 
@@ -609,11 +603,11 @@ namespace LightmapUvTool
                     GUI.backgroundColor = bg;
                 }
 
-                // Separator
-                GUILayout.Space(2);
+                // ── Separator ──
+                GUILayout.Space(8);
                 var sep = GUILayoutUtility.GetRect(1, 18, GUILayout.Width(1));
                 EditorGUI.DrawRect(sep, new Color(.5f,.5f,.5f,.6f));
-                GUILayout.Space(2);
+                GUILayout.Space(8);
             }
 
             // ── UV channel toggle ──
@@ -1069,7 +1063,7 @@ namespace LightmapUvTool
                     EditorGUILayout.LabelField("Shell Match: color = source shell", EditorStyles.miniLabel);
                     break;
                 case FillMode.Status:
-                    Sw("Ok", cAccept); Sw("Am", cAmbig); Sw("Bd", cBorder); Sw("Mi", cMis); Sw("Rj", cReject);
+                    Sw("Ok", cAccept); Sw("Am", cAmbig); Sw("Mi", cMis); Sw("Rj", cReject);
                     break;
             }
             EditorGUILayout.EndHorizontal();

@@ -142,7 +142,7 @@ namespace LightmapUvTool
             result.shellCount = shells.Count;
             result.overlapGroupCount = overlapGroups.Count;
 
-            // UV0 winding is already normalized by ExecWeldUv0.
+            // UV0 winding normalized by ExecWeldUv0.
             result.flippedShells = 0;
 
             // ── Flatten UV0 ──
@@ -305,7 +305,7 @@ namespace LightmapUvTool
                 results[m].overlapGroupCount  = overlapGroups.Count;
             }
 
-            // UV0 winding is already normalized by ExecWeldUv0 — no flip here.
+            // UV0 winding normalized by ExecWeldUv0.
             for (int m = 0; m < meshCount; m++)
                 results[m].flippedShells = 0;
 

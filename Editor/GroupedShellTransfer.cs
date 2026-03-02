@@ -39,7 +39,6 @@ namespace LightmapUvTool
             public Vector2[] uv2;
             public int shellsMatched;
             public int shellsUnmatched;
-            public int shellsMirrored;
             public int verticesTransferred;
             public int verticesTotal;
 
@@ -136,9 +135,7 @@ namespace LightmapUvTool
             if (srcUv0.Length == 0 || srcUv2.Length == 0)
             { UvtLog.Error("[GroupedTransfer] Source missing UV0/UV2"); return result; }
 
-            // Source UV0 is already normalized (flipped mirrored shells) by
-            // ExecWeldUv0 which flips all meshes once after weld.
-            // No re-derivation needed here.
+            // Source UV0 winding normalized by ExecWeldUv0.
 
             // Target data
             var tVerts = targetMesh.vertices;
@@ -393,9 +390,6 @@ namespace LightmapUvTool
 
             result.verticesTransferred = transferred;
             result.shellsMatched = shellsMatched;
-
-            // UV0 winding normalized globally by ExecWeldUv0 — no post-transfer flip needed.
-            result.shellsMirrored = 0;
 
             // UV2 bounds check
             int oob = 0;

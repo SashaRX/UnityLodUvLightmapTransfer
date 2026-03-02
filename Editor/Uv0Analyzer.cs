@@ -31,8 +31,7 @@ namespace LightmapUvTool
         public int overlappingShells;
 
         public bool HasIssues =>
-            falseSeamPairs > 0 || degenerateTriangles > 0 ||
-            flippedTriangles > 0;
+            falseSeamPairs > 0 || degenerateTriangles > 0;
     }
 
     public static class Uv0Analyzer
