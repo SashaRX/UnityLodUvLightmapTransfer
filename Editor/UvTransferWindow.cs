@@ -62,6 +62,11 @@ namespace LightmapUvTool
         bool showWire = true, showBorder;
         float fillAlpha = 0.25f;
 
+        // Selection tracking — UV2 reset for arbitrary selected model
+        string selectedSidecarPath;
+        string selectedFbxPath;
+        string selectedResetLabel;
+
         // Sidebar foldouts
         bool foldProjection = true;
         bool foldBorderRepair = false;
@@ -164,7 +169,48 @@ namespace LightmapUvTool
                 var lg = go.GetComponentInParent<LODGroup>();
                 if (lg != null && lg != lodGroup) { lodGroup = lg; Refresh(); }
             }
+            UpdateSelectedSidecar();
             Repaint();
+        }
+
+        /// <summary>
+        /// Check if the currently selected object has a UV2 sidecar asset.
+        /// Works for any model, not just the loaded LODGroup.
+        /// </summary>
+        void UpdateSelectedSidecar()
+        {
+            selectedSidecarPath = null;
+            selectedFbxPath = null;
+            selectedResetLabel = null;
+
+            if (!CheckerTexturePreview.IsActive) return;
+
+            var go = Selection.activeGameObject;
+            if (go == null) return;
+
+            // Collect unique FBX paths from all MeshFilters on the selected object and children
+            var fbxPaths = new HashSet<string>();
+            var filters = go.GetComponentsInChildren<MeshFilter>();
+            foreach (var mf in filters)
+            {
+                if (mf.sharedMesh == null) continue;
+                string path = AssetDatabase.GetAssetPath(mf.sharedMesh);
+                if (!string.IsNullOrEmpty(path) && path.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                    fbxPaths.Add(path);
+            }
+
+            // Find the first FBX that has a sidecar
+            foreach (string fbx in fbxPaths)
+            {
+                string sidecar = Uv2DataAsset.GetSidecarPath(fbx);
+                if (AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecar) != null)
+                {
+                    selectedFbxPath = fbx;
+                    selectedSidecarPath = sidecar;
+                    selectedResetLabel = System.IO.Path.GetFileNameWithoutExtension(fbx);
+                    return;
+                }
+            }
         }
 
         // ════════════════════════════════════════════════════════════
@@ -653,8 +699,21 @@ namespace LightmapUvTool
                 GUI.backgroundColor = bg2;
             }
 
-            // ── Log level ──
+            // ── Right side ──
             GUILayout.FlexibleSpace();
+
+            // ── Reset UV2 for selected model (visible when checker active + sidecar found) ──
+            if (selectedSidecarPath != null)
+            {
+                var bg3 = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(.95f, .35f, .3f);
+                if (GUILayout.Button("Reset UV2: " + selectedResetLabel, EditorStyles.toolbarButton, GUILayout.Width(140)))
+                    ResetSelectedUv2();
+                GUI.backgroundColor = bg3;
+                GUILayout.Space(6);
+            }
+
+            // ── Log level ──
             EditorGUILayout.LabelField("Log:", EditorStyles.miniLabel, GUILayout.Width(24));
             var lvl = (UvtLog.Level)EditorGUILayout.EnumPopup(UvtLog.Current, EditorStyles.toolbarPopup, GUILayout.Width(64));
             if (lvl != UvtLog.Current) UvtLog.Current = lvl;
@@ -1346,7 +1405,15 @@ namespace LightmapUvTool
 
         void ToggleChecker()
         {
-            if (CheckerTexturePreview.IsActive) { CheckerTexturePreview.Restore(); Repaint(); return; }
+            if (CheckerTexturePreview.IsActive)
+            {
+                CheckerTexturePreview.Restore();
+                selectedSidecarPath = null;
+                selectedFbxPath = null;
+                selectedResetLabel = null;
+                Repaint();
+                return;
+            }
 
             var entries = new List<(Renderer renderer, Mesh meshWithUv2)>();
             foreach (var e in meshEntries)
@@ -1372,6 +1439,7 @@ namespace LightmapUvTool
                 return;
             }
             CheckerTexturePreview.Apply(entries);
+            UpdateSelectedSidecar();
             Repaint();
         }
 
@@ -1473,6 +1541,43 @@ namespace LightmapUvTool
             srcCache.Clear();
             shellTransformCache.Clear();
             UvtLog.Info("[Reset] All working copies restored to FBX originals");
+            Repaint();
+        }
+
+        /// <summary>
+        /// Reset UV2 for the currently selected model (detected via toolbar).
+        /// Independent from the loaded LODGroup — works on any selected object.
+        /// </summary>
+        void ResetSelectedUv2()
+        {
+            if (string.IsNullOrEmpty(selectedSidecarPath) || string.IsNullOrEmpty(selectedFbxPath))
+                return;
+
+            if (!EditorUtility.DisplayDialog("Reset UV2",
+                $"Delete UV2 sidecar for '{selectedResetLabel}'?\nFBX will be reimported without UV2.",
+                "Delete", "Cancel"))
+                return;
+
+            if (AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(selectedSidecarPath) != null)
+                AssetDatabase.DeleteAsset(selectedSidecarPath);
+
+            AssetDatabase.ImportAsset(selectedFbxPath, ImportAssetOptions.ForceUpdate);
+            AssetDatabase.Refresh();
+            UvtLog.Info($"[Reset] Deleted sidecar for '{selectedResetLabel}', reimported FBX");
+
+            // Update checker if it's still active
+            if (CheckerTexturePreview.IsActive)
+            {
+                CheckerTexturePreview.Restore();
+                ToggleChecker(); // re-apply to reflect removed UV2
+            }
+
+            // Refresh loaded LODGroup if it references the same FBX
+            bool touchesLoaded = meshEntries.Any(e =>
+                e.fbxMesh != null && AssetDatabase.GetAssetPath(e.fbxMesh) == selectedFbxPath);
+            if (touchesLoaded) Refresh();
+
+            UpdateSelectedSidecar();
             Repaint();
         }
 
