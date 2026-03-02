@@ -118,9 +118,18 @@ namespace LightmapUvTool
 
             if (entry.uv2.Length != mesh.vertexCount)
             {
-                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': vertex count mismatch " +
-                                $"(mesh={mesh.vertexCount}, uv2={entry.uv2.Length}). Skipped.");
-                return false;
+                // Vertex counts differ (meshopt may produce slightly different results
+                // on fresh FBX reimport vs editor transfer session).
+                // Do NOT skip — proceed to RemapUv2IfNeeded which matches by 3D position.
+                // Only warn when no position data is available (legacy sidecar, no remap possible).
+                if (entry.vertPositions == null || entry.vertPositions.Length == 0)
+                {
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': vertex count mismatch " +
+                                    $"(mesh={mesh.vertexCount}, uv2={entry.uv2.Length}), no position data — Skipped.");
+                    return false;
+                }
+                UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': vertex count mismatch " +
+                                $"(mesh={mesh.vertexCount}, uv2={entry.uv2.Length}) — will remap by position.");
             }
 
             stats.finalVerts = mesh.vertexCount;
