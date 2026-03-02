@@ -540,8 +540,7 @@ namespace LightmapUvTool
                             var vr = e.validationReport;
                             if (vr != null)
                             {
-                                Bar("Clean", vr.cleanCount, vr.totalTriangles, cValClean);
-                                if (vr.invertedCount > 0) Bar("Inv", vr.invertedCount, vr.totalTriangles, cValInverted);
+                                Bar("Clean", vr.cleanCount + vr.invertedCount, vr.totalTriangles, cValClean);
                                 if (vr.stretchedCount > 0) Bar("Str", vr.stretchedCount, vr.totalTriangles, cValStretch);
                                 if (vr.zeroAreaCount > 0) Bar("0A", vr.zeroAreaCount, vr.totalTriangles, cValZero);
                                 if (vr.oobCount > 0) Bar("OB", vr.oobCount, vr.totalTriangles, cValOOB);
@@ -1020,8 +1019,7 @@ namespace LightmapUvTool
                 if (!TOk(uv, uN, a0, a1, a2)) continue;
                 var fl = (f < perTri.Length) ? perTri[f] : TransferValidator.TriIssue.None;
                 Color nc;
-                if      ((fl & TransferValidator.TriIssue.Inverted) != 0)  nc = cValInverted;
-                else if ((fl & TransferValidator.TriIssue.ZeroArea) != 0)  nc = cValZero;
+                if      ((fl & TransferValidator.TriIssue.ZeroArea) != 0)  nc = cValZero;
                 else if ((fl & TransferValidator.TriIssue.Stretched) != 0) nc = cValStretch;
                 else if ((fl & TransferValidator.TriIssue.Overlap) != 0)   nc = cValOverlap;
                 else if ((fl & TransferValidator.TriIssue.OutOfBounds) != 0) nc = cValOOB;
@@ -1065,7 +1063,7 @@ namespace LightmapUvTool
             switch (fillMode)
             {
                 case FillMode.Validation:
-                    Sw("✓", cValClean); Sw("Inv", cValInverted); Sw("Str", cValStretch); Sw("0A", cValZero); Sw("OB", cValOOB); Sw("Ov", cValOverlap);
+                    Sw("✓", cValClean); Sw("Str", cValStretch); Sw("0A", cValZero); Sw("OB", cValOOB); Sw("Ov", cValOverlap);
                     break;
                 case FillMode.ShellMatch:
                     EditorGUILayout.LabelField("Shell Match: color = source shell", EditorStyles.miniLabel);
