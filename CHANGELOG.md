@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.73] - 2026-03-02
+
+### Changed — Similarity transform per-shell (primary transfer method)
+- **Transfer now uses per-shell similarity transform as primary method.**
+  xatlas repack preserves shell internal structure (only changes placement),
+  so UV0→UV2 per shell is a pure similarity transform (a, b, tx, ty).
+  Applying the same transform to all target vertices in a shell preserves
+  it as an atomic unit, preventing cross-shell UV2 contamination.
+- Per-vertex barycentric interpolation is now fallback only, used when
+  CountShellIssues shows transform produced more inverted/zero-area triangles.
+- Merged shells: per-vertex source shell assignment via UV0 nearest triangle,
+  then apply that source shell's transform (not per-vertex interpolation).
+- Mirrored shell detection: compare signed areas of UV0 vs UV2 to auto-select
+  mirrored similarity transform variant.
+- Added diagnostic logging: xform/interp/merged counts per mesh.
+- New TransferResult fields: shellsTransform, shellsInterpolation, shellsMerged.
+
 ## [0.7.6] - 2026-03-01
 
 ### Added — Reset Working Copies button
