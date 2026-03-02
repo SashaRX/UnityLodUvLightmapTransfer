@@ -100,7 +100,7 @@ namespace LightmapUvTool
         //  Constants & Palette
         // ════════════════════════════════════════════════════════════
 
-        const float UV_LO = -0.5f, UV_HI = 1.5f;
+        const float UV_LO = -4f, UV_HI = 5f;
         const int BATCH = 800, MAX_TRI = 12000;
 
         static readonly Color[] pal = {
