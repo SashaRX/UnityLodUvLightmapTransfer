@@ -500,43 +500,93 @@ namespace LightmapUvTool
                     }
                     else
                     {
-                        // Multiple candidates — 3D-guided disambiguation
+                        // Multiple candidates — Cage raycast disambiguation (Marmoset-style)
+                        // Cast ray along vertex normal in both directions; closest hit
+                        // determines which source shell owns the vertex. Fallback to
+                        // closest-point 3D if ray misses all candidates.
+
+                        // Auto cage distance: fraction of source mesh AABB diagonal
+                        Vector3 srcBoundsMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                        Vector3 srcBoundsMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+                        for (int ci = 0; ci < candidates.Count; ci++)
+                        {
+                            srcBoundsMin = Vector3.Min(srcBoundsMin, srcAABBMin[candidates[ci]]);
+                            srcBoundsMax = Vector3.Max(srcBoundsMax, srcAABBMax[candidates[ci]]);
+                        }
+                        float cageDist = (srcBoundsMax - srcBoundsMin).magnitude * 0.5f;
+
+                        bool hasNormals = tNormals != null && tNormals.Length == tVerts.Length;
+                        int rayHits = 0, closestFallbacks = 0;
+
                         foreach (int vi in tShell.vertexIndices)
                         {
                             if (vi >= tVerts.Length || vi >= tUv0.Length) continue;
                             Vector3 tPos = tVerts[vi];
+                            Vector3 tNrm = hasNormals ? tNormals[vi] : Vector3.up;
 
-                            // Step 1: Find closest source shell by 3D surface distance
-                            int bestSrc = chosenSrc;
-                            float bestDist3D = float.MaxValue;
+                            // ── Step 1: Cage raycast along normal (± direction) ──
+                            int bestSrc = -1;
+                            float bestAbsT = cageDist;
 
                             for (int ci = 0; ci < candidates.Count; ci++)
                             {
                                 int si = candidates[ci];
                                 var sFaces = srcShells[si].faceIndices;
 
-                                // Quick AABB reject
-                                Vector3 clamped = Vector3.Max(srcAABBMin[si], Vector3.Min(srcAABBMax[si], tPos));
-                                float aabbDistSq = (tPos - clamped).sqrMagnitude;
-                                if (aabbDistSq > bestDist3D * 4f) continue;
-
-                                float shellBest = float.MaxValue;
                                 for (int fi = 0; fi < sFaces.Count; fi++)
                                 {
                                     int f = sFaces[fi];
-                                    float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
-                                        out _, out _, out _);
-                                    if (dSq < shellBest) shellBest = dSq;
-                                    if (shellBest < 1e-8f) break;
-                                }
-                                if (shellBest < bestDist3D)
-                                {
-                                    bestDist3D = shellBest;
-                                    bestSrc = si;
+                                    if (RayTriIntersect(tPos, tNrm,
+                                        triPosA[f], triPosB[f], triPosC[f],
+                                        out float hitT, out _, out _, out _))
+                                    {
+                                        float absT = Mathf.Abs(hitT);
+                                        if (absT < bestAbsT)
+                                        {
+                                            bestAbsT = absT;
+                                            bestSrc = si;
+                                        }
+                                    }
                                 }
                             }
 
-                            // Step 2: UV0 interpolation from the assigned source shell
+                            // ── Step 1b: Fallback to closest-point 3D if ray missed ──
+                            if (bestSrc < 0)
+                            {
+                                float bestDist3D = float.MaxValue;
+                                for (int ci = 0; ci < candidates.Count; ci++)
+                                {
+                                    int si = candidates[ci];
+                                    var sFaces = srcShells[si].faceIndices;
+
+                                    Vector3 clamped = Vector3.Max(srcAABBMin[si],
+                                        Vector3.Min(srcAABBMax[si], tPos));
+                                    float aabbDistSq = (tPos - clamped).sqrMagnitude;
+                                    if (aabbDistSq > bestDist3D * 4f) continue;
+
+                                    for (int fi = 0; fi < sFaces.Count; fi++)
+                                    {
+                                        int f = sFaces[fi];
+                                        float dSq = PointToTri3D(tPos,
+                                            triPosA[f], triPosB[f], triPosC[f],
+                                            out _, out _, out _);
+                                        if (dSq < bestDist3D)
+                                        {
+                                            bestDist3D = dSq;
+                                            bestSrc = si;
+                                        }
+                                    }
+                                }
+                                closestFallbacks++;
+                            }
+                            else
+                            {
+                                rayHits++;
+                            }
+
+                            if (bestSrc < 0) bestSrc = chosenSrc;
+
+                            // ── Step 2: UV0 interpolation from assigned source shell ──
                             var assignedFaces = srcShells[bestSrc].faceIndices;
                             Vector2 tUv = tUv0[vi];
                             float bestDSq2 = float.MaxValue;
@@ -554,6 +604,9 @@ namespace LightmapUvTool
                             if (bestF2 >= 0)
                                 uv2_merged[vi] = triUv2A[bestF2] * bestU2 + triUv2B[bestF2] * bestV2 + triUv2C[bestF2] * bestW2;
                         }
+
+                        UvtLog.Info($"[GroupedTransfer] Merged cage raycast: " +
+                            $"ray={rayHits} fallback={closestFallbacks} cage={cageDist:F3}");
                     }
 
                     chosenUv2 = uv2_merged;
@@ -763,6 +816,41 @@ namespace LightmapUvTool
               float d = (p - (b + bc * t)).sqrMagnitude;
               if (d < best) { best = d; u = 0f; v = 1f - t; w = t; } }
             return best;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Ray-Triangle intersection (Möller–Trumbore)
+        //  Returns true if ray hits triangle, with t = distance along ray.
+        //  Also outputs barycentric (u,v,w) for interpolation.
+        // ═══════════════════════════════════════════════════════════
+
+        static bool RayTriIntersect(Vector3 rayOrigin, Vector3 rayDir,
+            Vector3 a, Vector3 b, Vector3 c,
+            out float t, out float u, out float v, out float w)
+        {
+            t = 0; u = 0; v = 0; w = 0;
+            const float kEpsilon = 1e-7f;
+
+            Vector3 e1 = b - a, e2 = c - a;
+            Vector3 h = Vector3.Cross(rayDir, e2);
+            float det = Vector3.Dot(e1, h);
+
+            if (det > -kEpsilon && det < kEpsilon) return false; // parallel
+
+            float invDet = 1f / det;
+            Vector3 s = rayOrigin - a;
+            float baryV = Vector3.Dot(s, h) * invDet;
+            if (baryV < 0f || baryV > 1f) return false;
+
+            Vector3 q = Vector3.Cross(s, e1);
+            float baryW = Vector3.Dot(rayDir, q) * invDet;
+            if (baryW < 0f || baryV + baryW > 1f) return false;
+
+            t = Vector3.Dot(e2, q) * invDet;
+            u = 1f - baryV - baryW;
+            v = baryV;
+            w = baryW;
+            return true;
         }
 
         // ═══════════════════════════════════════════════════════════
