@@ -71,6 +71,8 @@ namespace LightmapUvTool
             // ─── Diagnostics ───
             public int[] vertexToSourceShell;
             public int[] targetShellToSourceShell;
+            public int[] targetShellMethod;  // 0=interp, 1=xform, 2=merged
+            public int[] faceToTargetShell;  // face index → target UV0 shell index
             public Vector3[] targetShellCentroids;
             public float[] targetShellMatchDistSqr;
         }
@@ -307,6 +309,14 @@ namespace LightmapUvTool
                 foreach (int f in srcShells[si].faceIndices)
                     faceToSrcShell[f] = si;
 
+            // Build face → target shell lookup (for overlap diagnostics)
+            int tgtTriCount = tgtTris.Length / 3;
+            result.faceToTargetShell = new int[tgtTriCount];
+            for (int i = 0; i < tgtTriCount; i++) result.faceToTargetShell[i] = -1;
+            for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+                foreach (int f in tgtShells[tsi].faceIndices)
+                    result.faceToTargetShell[f] = tsi;
+
             // ── Phase 1b: Precompute similarity transform per source shell ──
             var srcTransforms = new SimilarityTransform[srcShells.Count];
             for (int si = 0; si < srcShells.Count; si++)
@@ -352,11 +362,13 @@ namespace LightmapUvTool
             int shellsTransform = 0, shellsInterpolation = 0, shellsMerged = 0;
 
             result.targetShellToSourceShell = new int[tgtShells.Count];
+            result.targetShellMethod = new int[tgtShells.Count]; // 0=interp, 1=xform, 2=merged
             result.targetShellCentroids = new Vector3[tgtShells.Count];
             result.targetShellMatchDistSqr = new float[tgtShells.Count];
             for (int i = 0; i < tgtShells.Count; i++)
             {
                 result.targetShellToSourceShell[i] = -1;
+                result.targetShellMethod[i] = -1;
                 result.targetShellMatchDistSqr[i] = float.MaxValue;
             }
 
@@ -535,6 +547,7 @@ namespace LightmapUvTool
 
                     chosenUv2 = uv2_merged;
                     shellsMerged++;
+                    result.targetShellMethod[tsi] = 2; // merged
                     result.consistencyCorrected += localConsistencyFixes;
                 }
                 else
@@ -583,11 +596,13 @@ namespace LightmapUvTool
                     {
                         chosenUv2 = uv2_transform;
                         shellsTransform++;
+                        result.targetShellMethod[tsi] = 1; // xform
                     }
                     else
                     {
                         chosenUv2 = uv2_interp;
                         shellsInterpolation++;
+                        result.targetShellMethod[tsi] = 0; // interp
                     }
                 }
 

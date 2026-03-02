@@ -1417,7 +1417,7 @@ namespace LightmapUvTool
                     te.shellTransferResult = tr;
 
                     te.validationReport = TransferValidator.Validate(tM, tr.uv2, tr);
-                    TransferValidator.DetectUv2Overlaps(tM, tr.uv2, te.validationReport);
+                    TransferValidator.DetectUv2Overlaps(tM, tr.uv2, te.validationReport, tr);
                 }
                 hasTransfer = tgtE.Any(e => e.transferredMesh != null);
             }

@@ -1,0 +1,7 @@
+v0.9.95 — overlap diagnostic: per-shell method + source tracking
+
+- TransferResult: add targetShellMethod[] (0=interp,1=xform,2=merged)
+- TransferResult: add faceToTargetShell[] for overlap cross-reference
+- DetectUv2Overlaps: classify each overlapping pair by transfer method,
+  source shell (same-src vs diff-src), log first 10 pairs in detail
+- Breakdown log: interp-only / xform-involved / merged-involved counts

@@ -270,8 +270,11 @@ namespace LightmapUvTool
         //  then does SAT triangle-triangle test for actual overlaps.
         // ═══════════════════════════════════════════════════════════
 
+        static readonly string[] kMethodNames = { "interp", "xform", "merged", "?" };
+
         public static void DetectUv2Overlaps(Mesh targetMesh, Vector2[] uv2,
-            ValidationReport report)
+            ValidationReport report,
+            GroupedShellTransfer.TransferResult transferResult = null)
         {
             if (uv2 == null || uv2.Length == 0) return;
             var tris = targetMesh.triangles;
@@ -281,10 +284,57 @@ namespace LightmapUvTool
             var shells = UvShellExtractor.Extract(uv2, tris);
             if (shells.Count < 2) return;
 
+            // ── Pre-build: UV2 shell → dominant target shell + source shell + method ──
+            int[] uv2ShellToTargetShell = null;
+            int[] uv2ShellToSourceShell = null;
+            int[] uv2ShellMethod = null;
+
+            if (transferResult?.faceToTargetShell != null &&
+                transferResult?.targetShellToSourceShell != null &&
+                transferResult?.targetShellMethod != null)
+            {
+                uv2ShellToTargetShell = new int[shells.Count];
+                uv2ShellToSourceShell = new int[shells.Count];
+                uv2ShellMethod = new int[shells.Count];
+
+                for (int si = 0; si < shells.Count; si++)
+                {
+                    // Find dominant target shell for this UV2 shell
+                    var tgtShellCounts = new Dictionary<int, int>();
+                    foreach (int f in shells[si].faceIndices)
+                    {
+                        if (f < transferResult.faceToTargetShell.Length)
+                        {
+                            int ts = transferResult.faceToTargetShell[f];
+                            if (ts >= 0)
+                            {
+                                tgtShellCounts.TryGetValue(ts, out int cnt);
+                                tgtShellCounts[ts] = cnt + 1;
+                            }
+                        }
+                    }
+
+                    int bestTs = -1, bestCnt = 0;
+                    foreach (var kv in tgtShellCounts)
+                        if (kv.Value > bestCnt) { bestTs = kv.Key; bestCnt = kv.Value; }
+
+                    uv2ShellToTargetShell[si] = bestTs;
+                    uv2ShellToSourceShell[si] = (bestTs >= 0 && bestTs < transferResult.targetShellToSourceShell.Length)
+                        ? transferResult.targetShellToSourceShell[bestTs] : -1;
+                    uv2ShellMethod[si] = (bestTs >= 0 && bestTs < transferResult.targetShellMethod.Length)
+                        ? transferResult.targetShellMethod[bestTs] : 3;
+                }
+            }
+
             // AABB overlap candidate pairs
             int pairsChecked = 0;
             int overlapPairs = 0;
             var overlapTris = new HashSet<int>();
+
+            // Diagnostic accumulators
+            int ovlpInterp = 0, ovlpXform = 0, ovlpMerged = 0;
+            int ovlpSameSrc = 0, ovlpDiffSrc = 0;
+            var overlapDetails = new List<string>();
 
             for (int i = 0; i < shells.Count; i++)
             {
@@ -295,6 +345,7 @@ namespace LightmapUvTool
 
                     // SAT triangle-triangle test between shells
                     bool pairHasOverlap = false;
+                    int pairOverlapCount = 0;
                     var facesI = shells[i].faceIndices;
                     var facesJ = shells[j].faceIndices;
 
@@ -325,11 +376,44 @@ namespace LightmapUvTool
                                 overlapTris.Add(fI);
                                 overlapTris.Add(fJ);
                                 pairHasOverlap = true;
+                                pairOverlapCount++;
                             }
                         }
                     }
 
-                    if (pairHasOverlap) overlapPairs++;
+                    if (pairHasOverlap)
+                    {
+                        overlapPairs++;
+
+                        // ── Diagnostic: classify this overlap pair ──
+                        if (uv2ShellMethod != null)
+                        {
+                            int mI = uv2ShellMethod[i], mJ = uv2ShellMethod[j];
+                            int srcI = uv2ShellToSourceShell[i], srcJ = uv2ShellToSourceShell[j];
+                            int tsI = uv2ShellToTargetShell[i], tsJ = uv2ShellToTargetShell[j];
+
+                            bool sameSrc = srcI >= 0 && srcI == srcJ;
+                            if (sameSrc) ovlpSameSrc++; else ovlpDiffSrc++;
+
+                            // Count method involvement
+                            if (mI == 1 || mJ == 1) ovlpXform++;
+                            else if (mI == 2 || mJ == 2) ovlpMerged++;
+                            else ovlpInterp++;
+
+                            string mNameI = kMethodNames[Mathf.Clamp(mI, 0, 3)];
+                            string mNameJ = kMethodNames[Mathf.Clamp(mJ, 0, 3)];
+
+                            // Log first 10 pairs in detail
+                            if (overlapDetails.Count < 10)
+                            {
+                                overlapDetails.Add(
+                                    $"  uv2sh[{i}]({mNameI},src{srcI},tgt{tsI},{facesI.Count}f) " +
+                                    $"vs uv2sh[{j}]({mNameJ},src{srcJ},tgt{tsJ},{facesJ.Count}f): " +
+                                    $"{pairOverlapCount} tri-pairs, " +
+                                    (sameSrc ? "SAME-SRC" : "diff-src"));
+                            }
+                        }
+                    }
                 }
             }
 
@@ -345,8 +429,23 @@ namespace LightmapUvTool
             }
 
             if (overlapPairs > 0)
+            {
                 UvtLog.Warn($"[Validator] UV2 overlap: {overlapPairs} shell pairs, " +
                     $"{overlapTris.Count} triangles affected");
+
+                // Log diagnostic breakdown
+                if (uv2ShellMethod != null)
+                {
+                    UvtLog.Warn($"[Validator] Overlap breakdown: " +
+                        $"interp-only:{ovlpInterp} xform-involved:{ovlpXform} " +
+                        $"merged-involved:{ovlpMerged} | " +
+                        $"same-src:{ovlpSameSrc} diff-src:{ovlpDiffSrc}");
+                    foreach (var detail in overlapDetails)
+                        UvtLog.Warn($"[Validator]{detail}");
+                    if (overlapPairs > overlapDetails.Count)
+                        UvtLog.Warn($"[Validator]  ... and {overlapPairs - overlapDetails.Count} more pairs");
+                }
+            }
         }
 
         // ─── AABB overlap test ───
