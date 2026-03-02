@@ -1441,8 +1441,6 @@ namespace LightmapUvTool
         /// </summary>
         void ReapplyCheckerToSelection()
         {
-            CheckerTexturePreview.Restore();
-
             var go = Selection.activeGameObject;
             if (go == null) return;
 
@@ -1489,7 +1487,11 @@ namespace LightmapUvTool
             }
 
             if (entries.Count > 0)
+            {
+                CheckerTexturePreview.Restore();
                 CheckerTexturePreview.Apply(entries);
+            }
+            // If no UV2 found on new selection — checker stays on previous object
         }
 
         void ToggleChecker()
