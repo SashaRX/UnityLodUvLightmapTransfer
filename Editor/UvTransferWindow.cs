@@ -102,6 +102,26 @@ namespace LightmapUvTool
             public GroupedShellTransfer.TransferResult shellTransferResult;
             public TransferValidator.ValidationReport validationReport;
             public bool hasExistingUv2; // cached: FBX mesh already has UV2 (post-Apply)
+            /// <summary>
+            /// Name with LOD/COL suffixes stripped — used to isolate source↔target
+            /// matching when multiple sub-mesh groups share the same LODGroup.
+            /// E.g. "InnerDoor_A_01_Base_LOD0" → "InnerDoor_A_01_Base"
+            /// </summary>
+            public string meshGroupKey;
+        }
+
+        /// <summary>
+        /// Strip trailing LOD/COL suffixes to get a stable group key.
+        /// Handles: _LOD0..9, _LOD0..LOD99, _COL, _COLL, _Collision (case-insensitive).
+        /// </summary>
+        static string ExtractGroupKey(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name;
+            return System.Text.RegularExpressions.Regex.Replace(
+                name,
+                @"[_\-\s]+(LOD\d+|COL\w*|Collision)$",
+                "",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         }
 
         // ════════════════════════════════════════════════════════════
@@ -262,7 +282,8 @@ namespace LightmapUvTool
                         lodIndex = li, renderer = r, meshFilter = mf,
                         originalMesh = fbm,
                         fbxMesh = fbm,
-                        hasExistingUv2 = uv2Check.Count > 0 });
+                        hasExistingUv2 = uv2Check.Count > 0,
+                        meshGroupKey = ExtractGroupKey(r.name) });
                 }
             }
             UpdateSelectedSidecar();
@@ -1362,7 +1383,14 @@ namespace LightmapUvTool
             {
                 for (int ti = 0; ti < tgtE.Count; ti++)
                 {
-                    var te = tgtE[ti]; var se = ti < srcE.Count ? srcE[ti] : srcE[0];
+                    var te = tgtE[ti];
+                    // Match source by group key first (isolates InnerDoor_A_01 from InnerDoor_A_02
+                    // when they share the same LODGroup). Fall back to index if key is missing.
+                    MeshEntry se = null;
+                    if (!string.IsNullOrEmpty(te.meshGroupKey))
+                        se = srcE.FirstOrDefault(s => s.meshGroupKey == te.meshGroupKey);
+                    if (se == null)
+                        se = ti < srcE.Count ? srcE[ti] : srcE[0];
                     Mesh sM = se.repackedMesh ?? se.originalMesh; Mesh tM = te.originalMesh;
                     if (sM == null || tM == null) continue;
                     EditorUtility.DisplayProgressBar("Transfer", "LOD" + tLod + ": " + te.renderer.name, .1f + .8f * ti / tgtE.Count);
