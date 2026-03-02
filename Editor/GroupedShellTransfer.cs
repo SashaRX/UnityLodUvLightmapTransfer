@@ -481,7 +481,7 @@ namespace LightmapUvTool
                     //
                     // Skip flipped/degenerate UV0 triangles (negative/zero area) to prevent
                     // them winning the UV0 search and corrupting UV2 output.
-                    const float kUv0TieTolerance = 1e-4f; // candidates within this UV0 dist^2 of best
+                    const float kUv0TieTolerance = 1e-10f; // only exact UV0 matches compete (tiling copies share identical UV0)
                     var uv2_merged = new Dictionary<int, Vector2>();
                     foreach (int vi in tShell.vertexIndices)
                     {
@@ -511,9 +511,9 @@ namespace LightmapUvTool
                                 out float u, out float v, out float w);
                             if (dUv > threshold) continue;
 
-                            // 3D centroid of source triangle as proxy for its instance position
-                            Vector3 srcCenter = (triPosA[f] + triPosB[f] + triPosC[f]) / 3f;
-                            float d3Sq = (tPos - srcCenter).sqrMagnitude;
+                            // Use interpolated 3D position (not centroid) for accurate instance disambiguation
+                            Vector3 interp3D = triPosA[f] * u + triPosB[f] * v + triPosC[f] * w;
+                            float d3Sq = (tPos - interp3D).sqrMagnitude;
                             if (d3Sq < best3DSq)
                             {
                                 best3DSq = d3Sq;
