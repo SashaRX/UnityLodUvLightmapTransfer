@@ -1033,7 +1033,7 @@ namespace LightmapUvTool
             {
                 case TriangleStatus.Accepted: return cAccept;
                 case TriangleStatus.Ambiguous: return cAmbig;
-                case TriangleStatus.BorderRisk: return cBorder;
+                case TriangleStatus.BorderRisk: return new Color(1f,.5f,.1f,.5f);
                 case TriangleStatus.UnavoidableMismatch: return cMis;
                 case TriangleStatus.Rejected: return cReject;
                 default: return cNone;
