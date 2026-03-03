@@ -685,6 +685,12 @@ namespace LightmapUvTool
                                 if (vr.oobCount > 0) Bar("OB", vr.oobCount, vr.totalTriangles, cValOOB);
                                 if (vr.texelDensityBadCount > 0) Bar("Txl", vr.texelDensityBadCount, vr.totalTriangles, cValTexel);
                                 if (vr.overlapShellPairs > 0) Bar("Ov", vr.overlapTriangleCount, vr.totalTriangles, cValOverlap);
+                                if (vr.overlapSameSrcPairs > 0)
+                                {
+                                    var r2 = GUILayoutUtility.GetRect(GUIContent.none, EditorStyles.miniLabel, GUILayout.Height(14));
+                                    EditorGUI.LabelField(r2, $"Ov(same-src): {vr.overlapSameSrcTriCount} ({vr.overlapSameSrcPairs} pairs, ok)",
+                                        EditorStyles.miniLabel);
+                                }
                             }
                         }
                         else if (e.report.HasValue)
