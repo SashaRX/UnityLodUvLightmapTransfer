@@ -844,6 +844,8 @@ namespace LightmapUvTool
             // When multiple non-merged target shells claim the same source shell
             // (common with overlapping/tiling UV0), keep the best match and
             // reassign others to different source shells at the same 3D location.
+            // Hoisted: used by Phase 3 overlap guard for merged shells
+            var claimed = new HashSet<int>();
             {
                 // Build reverse map: source → list of non-merged target claimants
                 var srcClaimants = new Dictionary<int, List<(int tsi, float avg3D)>>();
@@ -860,7 +862,6 @@ namespace LightmapUvTool
                 }
 
                 // Identify conflicts and build claimed set
-                var claimed = new HashSet<int>();
                 var needsRematch = new List<int>();
                 int dedupConflicts = 0;
 
@@ -997,10 +998,11 @@ namespace LightmapUvTool
                     int bestMergedConsistencyFixes = 0;
                     bool bestWasConstrained = false;
 
-                    // For 3D-fallback targets (dedup conflicts), skip constrained pass
-                    // and go directly to all-source with 3D-primary projection.
+                    // For 3D-fallback targets (dedup conflicts), use constrained search
+                    // with 3D-primary decision to keep UV2 within the assigned source
+                    // shell's UV2 bounds, preventing cross-source overlap.
                     bool force3D = tgtForce3DFallback[tsi];
-                    for (int pass = force3D ? 1 : 0; pass < 2; pass++)
+                    for (int pass = 0; pass < (force3D ? 1 : 2); pass++)
                     {
                         bool constrained;
                         if (pass == 0)
@@ -1123,6 +1125,31 @@ namespace LightmapUvTool
                         }
 
                         int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidate);
+
+                        // Guard: reject all-source candidate if its UV2 AABB overlaps
+                        // with a claimed source shell's UV2 region (prevents cross-source overlap)
+                        if (!constrained && candidate.Count > 0 && issues < int.MaxValue)
+                        {
+                            Vector2 candMin = new Vector2(float.MaxValue, float.MaxValue);
+                            Vector2 candMax = new Vector2(float.MinValue, float.MinValue);
+                            foreach (var kv in candidate)
+                            {
+                                candMin = Vector2.Min(candMin, kv.Value);
+                                candMax = Vector2.Max(candMax, kv.Value);
+                            }
+                            for (int si = 0; si < srcShells.Count; si++)
+                            {
+                                if (si == chosenSrc) continue;
+                                if (!claimed.Contains(si)) continue;
+                                if (candMin.x < srcUv2Max[si].x && candMax.x > srcUv2Min[si].x &&
+                                    candMin.y < srcUv2Max[si].y && candMax.y > srcUv2Min[si].y)
+                                {
+                                    issues = int.MaxValue;
+                                    break;
+                                }
+                            }
+                        }
+
                         // Prefer all-source on tie when both have issues:
                         // UV0 flipped winding causes false positives in CountShellIssues,
                         // so equal non-zero scores mean all-source (wider search) is safer.
