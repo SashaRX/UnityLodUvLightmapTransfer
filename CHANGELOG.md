@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.11.1] - 2026-03-03
+
+### Fixed — Same-source UV2 overlaps via 3D-primary merged mode
+- **Dedup conflict resolution** (`GroupedShellTransfer.cs`): when multiple
+  target shells claim the same source and no unique alternative exists
+  (all would force merged mode), previous logic reverted to the overlapping
+  source — causing identical UV2 positions and lightmap seams. Now forces
+  conflicting shells into a new **"3D-primary" merged mode** that:
+  - Skips the constrained pass (which would reproduce the overlap)
+  - Uses all-source search with 3D projection as the primary method
+  - 3D projection naturally maps each target to its spatially nearest
+    source geometry, giving unique UV2 regions without overlap
+- Eliminates same-source xform-involved overlaps reported by the validator
+  (e.g. `uv2sh[93](xform,src104) vs uv2sh[99](xform,src104): SAME-SRC`).
+- New log labels: `merged+3D` during dedup, `3D-primary` in per-shell
+  diagnostics.
+
 ## [0.11.0] - 2026-03-03
 
 ### Added — Multi-criteria source shell rescoring for merged shells

@@ -741,6 +741,7 @@ namespace LightmapUvTool
 
             var tgtChosenAvg3D = new float[tgtShells.Count];
             var tgtIsMerged = new bool[tgtShells.Count];
+            var tgtForce3DFallback = new bool[tgtShells.Count];
 
             // Precompute per-target-shell average face normal + total UV0 area
             var tgtAvgNormal = new Vector3[tgtShells.Count];
@@ -890,12 +891,16 @@ namespace LightmapUvTool
                                     shellUv0Bvh[newSrc], kUv0BadThreshold);
 
                                 // If reassignment would make a non-merged shell become merged,
-                                // revert to original source — overlap is better than lost UV2.
+                                // force 3D-primary merged mode instead of reverting to
+                                // overlapping source. 3D projection naturally separates
+                                // targets at different 3D positions, avoiding same-source
+                                // UV2 overlap that causes lightmap seams.
                                 if (newIsMerged && !tgtIsMerged[tsi] && oldSrc >= 0)
                                 {
-                                    UvtLog.Info($"[GroupedTransfer] Dedup: t{tsi} reverted to src{oldSrc} " +
-                                        $"(new src{newSrc} would force merged)");
-                                    // Keep old assignment, just re-claim old source
+                                    UvtLog.Info($"[GroupedTransfer] Dedup: t{tsi} → merged+3D " +
+                                        $"(src{oldSrc}, new src{newSrc} would force merged)");
+                                    tgtIsMerged[tsi] = true;
+                                    tgtForce3DFallback[tsi] = true;
                                     claimed.Add(oldSrc);
                                 }
                                 else
@@ -973,7 +978,10 @@ namespace LightmapUvTool
                     int bestMergedConsistencyFixes = 0;
                     bool bestWasConstrained = false;
 
-                    for (int pass = 0; pass < 2; pass++)
+                    // For 3D-fallback targets (dedup conflicts), skip constrained pass
+                    // and go directly to all-source with 3D-primary projection.
+                    bool force3D = tgtForce3DFallback[tsi];
+                    for (int pass = force3D ? 1 : 0; pass < 2; pass++)
                     {
                         bool constrained;
                         if (pass == 0)
@@ -982,9 +990,12 @@ namespace LightmapUvTool
                         }
                         else
                         {
-                            if (srcFacesChosen == null) break; // pass 0 was already all-source
-                            if (bestMergedIssues == 0) break;  // constrained was clean
-                            constrained = false;               // try all-source
+                            if (!force3D)
+                            {
+                                if (srcFacesChosen == null) break; // pass 0 was already all-source
+                                if (bestMergedIssues == 0) break;  // constrained was clean
+                            }
+                            constrained = false;               // all-source
                         }
 
                         var candidate = new Dictionary<int, Vector2>();
@@ -1057,7 +1068,18 @@ namespace LightmapUvTool
                                 ? triUv2A[bestF3D] * bestU_3d + triUv2B[bestF3D] * bestV_3d + triUv2C[bestF3D] * bestW_3d
                                 : Vector2.zero;
 
-                            if (bestFUv0 >= 0 && bestF3D >= 0)
+                            if (force3D && bestF3D >= 0)
+                            {
+                                // 3D-primary: always prefer 3D projection to avoid
+                                // same-source UV2 overlap with dedup siblings.
+                                candidate[vi] = uv2From3D;
+                                if (bestFUv0 >= 0)
+                                {
+                                    float delta = (uv2FromUv0 - uv2From3D).magnitude;
+                                    if (delta > kConsistencyThresh) localFixes++;
+                                }
+                            }
+                            else if (bestFUv0 >= 0 && bestF3D >= 0)
                             {
                                 float delta = (uv2FromUv0 - uv2From3D).magnitude;
                                 if (bestDSqUv0 > kUv0DistantThresh && delta > kConsistencyThresh)
@@ -1100,8 +1122,10 @@ namespace LightmapUvTool
                     shellsMerged++;
                     result.targetShellMethod[tsi] = 2; // merged
                     result.consistencyCorrected += bestMergedConsistencyFixes;
+                    string mergedLabel = force3D ? "3D-primary"
+                        : (bestWasConstrained ? "src-constrained" : "all-source");
                     UvtLog.Info($"[GroupedTransfer]   t{tsi} merged({tShell.faceIndices.Count}f): " +
-                        $"{(bestWasConstrained ? "src-constrained" : "all-source")} ({bestMergedIssues} issues)");
+                        $"{mergedLabel} ({bestMergedIssues} issues)");
                 }
                 else
                 {
