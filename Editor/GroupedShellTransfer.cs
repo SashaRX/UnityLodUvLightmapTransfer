@@ -1196,6 +1196,82 @@ namespace LightmapUvTool
                         }
                     }
 
+                    // ── Pass 2: UV0-only constrained fallback for broken force3D ──
+                    // When 3D projection fails on thin wrapping geometry (belt, strap),
+                    // UV0 interpolation constrained to the source shell gives UV2 that
+                    // matches the source LOD0 layout. Same-source overlap is correct
+                    // for tiling geometry — both shells sample the same lightmap texels.
+                    if (force3D && bestMergedIssues > tShell.faceIndices.Count / 2
+                        && chosenSrc >= 0 && srcFacesChosen != null)
+                    {
+                        var candidateUv0 = new Dictionary<int, Vector2>();
+                        int localFixesUv0 = 0;
+
+                        // Use source shell's UV0 BVH for lookup
+                        TriangleBvh2D uv0Bvh = shellUv0Bvh[chosenSrc];
+
+                        foreach (int vi in tShell.vertexIndices)
+                        {
+                            if (vi >= tUv0.Length) continue;
+                            Vector2 tUv = tUv0[vi];
+
+                            int bestF = -1;
+                            float bestU = 0, bestV = 0, bestW = 0;
+                            float bestDSq = float.MaxValue;
+
+                            // Normal filtering for thin geometry disambiguation
+                            Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
+                                ? tNormals[vi] : Vector3.up;
+
+                            // BVH lookup in source shell's UV0 space
+                            if (uv0Bvh != null)
+                            {
+                                var hit = tNrm.sqrMagnitude > 0.5f
+                                    ? uv0Bvh.FindNearestNormalFiltered(tUv, tNrm, triNormal, kBackfaceDot)
+                                    : uv0Bvh.FindNearest(tUv);
+                                bestF = hit.faceIndex;
+                                bestU = hit.u; bestV = hit.v; bestW = hit.w;
+                                bestDSq = hit.distSq;
+                            }
+                            else
+                            {
+                                // Linear fallback over source faces
+                                for (int fi = 0; fi < srcFacesChosen.Count; fi++)
+                                {
+                                    int f = srcFacesChosen[fi];
+                                    float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                                        out float u, out float v, out float w);
+                                    if (dSq < bestDSq)
+                                    { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
+                                    if (bestDSq < 1e-8f) break;
+                                }
+                            }
+
+                            if (bestF >= 0)
+                            {
+                                // UV0 interpolation → UV2 (NO 3D override)
+                                candidateUv0[vi] = triUv2A[bestF] * bestU
+                                                 + triUv2B[bestF] * bestV
+                                                 + triUv2C[bestF] * bestW;
+                            }
+                        }
+
+                        int issuesUv0 = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateUv0);
+
+                        // Accept if better than 3D result. NO overlap guard — same-source
+                        // overlap is correct for tiling geometry.
+                        if (issuesUv0 < bestMergedIssues)
+                        {
+                            bestMergedIssues = issuesUv0;
+                            bestMergedUv2 = candidateUv0;
+                            bestMergedConsistencyFixes = localFixesUv0;
+                            bestWasConstrained = true;
+
+                            UvtLog.Info($"[GroupedTransfer]   t{tsi}: UV0-interp fallback " +
+                                $"({issuesUv0} issues, was 3D-primary)");
+                        }
+                    }
+
                     // Record force3D shell's UV2 AABB so later force3D siblings avoid it
                     if (force3D && bestMergedUv2 != null && bestMergedUv2.Count > 0)
                     {
