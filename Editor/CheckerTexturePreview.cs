@@ -153,6 +153,8 @@ namespace LightmapUvTool
             };
 
             int cellPx = resolution / gridSize;
+            const int fineCellsPerCell = 8;
+            int fineCellPx = Mathf.Max(1, cellPx / fineCellsPerCell);
             var pixels = new Color32[resolution * resolution];
 
             // Fill cells
@@ -162,16 +164,24 @@ namespace LightmapUvTool
                 {
                     int idx = (cy * gridSize + cx) % cellColors.Length;
                     bool dark = (cx + cy) % 2 == 0;
-                    Color baseCol = cellColors[idx];
-                    if (dark) baseCol *= 0.7f;
+                    Color baseCol = cellColors[idx] * 0.78f;
+                    if (dark) baseCol *= 0.86f;
                     baseCol.a = 1f;
-
-                    Color32 c32 = baseCol;
                     int x0 = cx * cellPx, y0 = cy * cellPx;
 
                     for (int py = y0; py < y0 + cellPx && py < resolution; py++)
+                    {
                         for (int px = x0; px < x0 + cellPx && px < resolution; px++)
-                            pixels[py * resolution + px] = c32;
+                        {
+                            int localX = (px - x0) / fineCellPx;
+                            int localY = (py - y0) / fineCellPx;
+                            bool fineDark = ((localX + localY) & 1) == 0;
+                            float fineMul = fineDark ? 0.9f : 1.06f;
+                            Color c = baseCol * fineMul;
+                            c.a = 1f;
+                            pixels[py * resolution + px] = (Color32)c;
+                        }
+                    }
 
                     // Cell border (1px dark line)
                     Color32 border = new Color32(20, 20, 20, 255);
