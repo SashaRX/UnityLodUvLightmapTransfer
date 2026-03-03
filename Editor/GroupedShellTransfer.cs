@@ -3,7 +3,8 @@
 // Algorithm: "Shell-First Matching with Interpolation Primary"
 // Phase 1: Extract UV0 shells from source and target
 // Phase 1b: Precompute per-source-shell similarity transform (UV0→UV2)
-// Phase 2: Match each target shell → best source shell by 3D centroid
+// Phase 2a: Match each target shell → best source shell by 3D centroid
+// Phase 2b: Deduplicate — resolve same-source conflicts (one-to-one matching)
 // Phase 3: Per-vertex UV0 interpolation (primary, bounded by source UV2).
 //          Similarity transform is fallback only when interpolation has
 //          strictly more inverted/zero-area triangles.
@@ -75,6 +76,7 @@ namespace LightmapUvTool
             public int[] faceToTargetShell;  // face index → target UV0 shell index
             public Vector3[] targetShellCentroids;
             public float[] targetShellMatchDistSqr;
+            public int dedupConflicts;       // shells reassigned by dedup
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -231,11 +233,108 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
+        //  FindBestSourceShell — match a target shell to the best
+        //  source shell by 3D vertex-to-surface distance.
+        //  Optionally excludes already-claimed source shells (dedup).
+        // ═══════════════════════════════════════════════════════════
+
+        static void FindBestSourceShell(
+            UvShellExtractor.ShellInfo tShell,
+            Vector3[] tVerts,
+            List<UvShellExtractor.ShellInfo> srcShells,
+            Vector3[] srcCentroid3D,
+            Vector3[] triPosA, Vector3[] triPosB, Vector3[] triPosC,
+            Vector3 tCentroid,
+            int maxRetries, float goodDistSq,
+            HashSet<int> excludeSources,
+            out int chosenSrc, out float chosenDistSq, out float chosenAvg3D)
+        {
+            chosenSrc = -1;
+            chosenDistSq = float.MaxValue;
+            chosenAvg3D = float.MaxValue;
+
+            // Rank source shells by 3D centroid distance
+            var ranked = new List<(int si, float distSq)>();
+            for (int si = 0; si < srcShells.Count; si++)
+            {
+                if (excludeSources != null && excludeSources.Contains(si)) continue;
+                float d = (tCentroid - srcCentroid3D[si]).sqrMagnitude;
+                ranked.Add((si, d));
+            }
+            ranked.Sort((a, b) => a.distSq.CompareTo(b.distSq));
+
+            int tries = Mathf.Min(maxRetries, ranked.Count);
+            for (int attempt = 0; attempt < tries; attempt++)
+            {
+                int si = ranked[attempt].si;
+                var srcFaces = srcShells[si].faceIndices;
+
+                float totalDistSq = 0; int sampled = 0;
+                foreach (int vi in tShell.vertexIndices)
+                {
+                    if (vi >= tVerts.Length) continue;
+                    Vector3 tPos = tVerts[vi];
+                    float bestDSq = float.MaxValue;
+                    for (int fi = 0; fi < srcFaces.Count; fi++)
+                    {
+                        int f = srcFaces[fi];
+                        float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
+                            out _, out _, out _);
+                        if (dSq < bestDSq) bestDSq = dSq;
+                    }
+                    totalDistSq += bestDSq;
+                    sampled++;
+                }
+
+                float avgDist = sampled > 0 ? totalDistSq / sampled : float.MaxValue;
+                if (avgDist < chosenAvg3D)
+                {
+                    chosenSrc = si;
+                    chosenDistSq = ranked[attempt].distSq;
+                    chosenAvg3D = avgDist;
+                }
+                if (chosenAvg3D < goodDistSq) break;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  DetectMergedShell — check if a target shell's UV0 coverage
+        //  is too poor for the matched source shell (>30% verts bad).
+        // ═══════════════════════════════════════════════════════════
+
+        static bool DetectMergedShell(
+            UvShellExtractor.ShellInfo tShell, Vector2[] tUv0,
+            List<int> srcFaces,
+            Vector2[] triUv0A, Vector2[] triUv0B, Vector2[] triUv0C)
+        {
+            const float kUv0BadThreshold = 0.01f;
+            int uv0BadCount = 0;
+            foreach (int vi in tShell.vertexIndices)
+            {
+                if (vi >= tUv0.Length) continue;
+                Vector2 tUv = tUv0[vi];
+                float bestDSq = float.MaxValue;
+                for (int fi = 0; fi < srcFaces.Count; fi++)
+                {
+                    int f = srcFaces[fi];
+                    float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                        out _, out _, out _);
+                    if (dSq < bestDSq) bestDSq = dSq;
+                    if (bestDSq < 1e-8f) break;
+                }
+                if (bestDSq > kUv0BadThreshold) uv0BadCount++;
+            }
+            int sv = tShell.vertexIndices.Count;
+            return sv > 0 && (float)uv0BadCount / sv > 0.3f;
+        }
+
+        // ═══════════════════════════════════════════════════════════
         //  Transfer: Shell-first matching, interpolation primary
         //
         //  Phase 1:  Extract UV0 shells from source & target
         //  Phase 1b: Precompute similarity transform per source shell
-        //  Phase 2:  Match each target shell → source shell by 3D centroid
+        //  Phase 2a: Match each target shell → source shell by 3D centroid
+        //  Phase 2b: Deduplicate — one-to-one source assignment
         //  Phase 3:  Per-vertex UV0 interpolation (primary, bounded).
         //            Similarity transform only if it produces strictly
         //            fewer inverted/zero-area triangles.
@@ -356,20 +455,21 @@ namespace LightmapUvTool
                 srcAABBMax[si] = bMax;
             }
 
-            // ── Phase 2 & 3: Match shells + transfer ──
-            int transferred = 0;
-            int shellsMatched = 0;
-            int shellsTransform = 0, shellsInterpolation = 0, shellsMerged = 0;
-
+            // ── Phase 2a: Match each target shell → best source shell ──
             result.targetShellToSourceShell = new int[tgtShells.Count];
             result.targetShellMethod = new int[tgtShells.Count]; // 0=interp, 1=xform, 2=merged
             result.targetShellCentroids = new Vector3[tgtShells.Count];
             result.targetShellMatchDistSqr = new float[tgtShells.Count];
+
+            var tgtChosenAvg3D = new float[tgtShells.Count];
+            var tgtIsMerged = new bool[tgtShells.Count];
+
             for (int i = 0; i < tgtShells.Count; i++)
             {
                 result.targetShellToSourceShell[i] = -1;
                 result.targetShellMethod[i] = -1;
                 result.targetShellMatchDistSqr[i] = float.MaxValue;
+                tgtChosenAvg3D[i] = float.MaxValue;
             }
 
             const float kGoodDistSq = 0.001f;
@@ -388,95 +488,135 @@ namespace LightmapUvTool
                 if (tN > 0) tCentroid /= tN;
                 result.targetShellCentroids[tsi] = tCentroid;
 
-                // Rank source shells by 3D centroid distance
-                var ranked = new List<(int si, float distSq)>();
-                for (int si = 0; si < srcShells.Count; si++)
-                {
-                    float d = (tCentroid - srcCentroid3D[si]).sqrMagnitude;
-                    ranked.Add((si, d));
-                }
-                ranked.Sort((a, b) => a.distSq.CompareTo(b.distSq));
-
                 // Find best source shell
-                int chosenSrc = -1;
-                float chosenDistSq = float.MaxValue;
-                float chosenAvg3D = float.MaxValue;
-
-                int tries = Mathf.Min(kMaxRetries, ranked.Count);
-                for (int attempt = 0; attempt < tries; attempt++)
-                {
-                    int si = ranked[attempt].si;
-                    var srcFaces = srcShells[si].faceIndices;
-
-                    float totalDistSq = 0; int sampled = 0;
-                    foreach (int vi in tShell.vertexIndices)
-                    {
-                        if (vi >= tVerts.Length) continue;
-                        Vector3 tPos = tVerts[vi];
-                        float bestDSq = float.MaxValue;
-                        for (int fi = 0; fi < srcFaces.Count; fi++)
-                        {
-                            int f = srcFaces[fi];
-                            float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
-                                out _, out _, out _);
-                            if (dSq < bestDSq) bestDSq = dSq;
-                        }
-                        totalDistSq += bestDSq;
-                        sampled++;
-                    }
-
-                    float avgDist = sampled > 0 ? totalDistSq / sampled : float.MaxValue;
-                    if (avgDist < chosenAvg3D)
-                    {
-                        chosenSrc = si;
-                        chosenDistSq = ranked[attempt].distSq;
-                        chosenAvg3D = avgDist;
-                    }
-                    if (chosenAvg3D < kGoodDistSq) break;
-                }
+                FindBestSourceShell(tShell, tVerts, srcShells, srcCentroid3D,
+                    triPosA, triPosB, triPosC, tCentroid,
+                    kMaxRetries, kGoodDistSq, null,
+                    out int chosenSrc, out float chosenDistSq, out float chosenAvg3D);
 
                 if (chosenSrc < 0) continue;
-                shellsMatched++;
 
                 result.targetShellToSourceShell[tsi] = chosenSrc;
                 result.targetShellMatchDistSqr[tsi] = chosenDistSq;
+                tgtChosenAvg3D[tsi] = chosenAvg3D;
 
-                var srcFacesChosen = srcShells[chosenSrc].faceIndices;
+                // Detect merged shell via UV0 coverage
+                tgtIsMerged[tsi] = DetectMergedShell(tShell, tUv0,
+                    srcShells[chosenSrc].faceIndices, triUv0A, triUv0B, triUv0C);
+            }
 
-                // ── Detect merged shell via UV0 coverage ──
-                int uv0BadCount = 0;
-                const float kUv0BadThreshold = 0.01f;
-                foreach (int vi in tShell.vertexIndices)
+            // ── Phase 2b: Deduplicate — resolve same-source conflicts ──
+            // When multiple non-merged target shells claim the same source shell
+            // (common with overlapping/tiling UV0), keep the best match and
+            // reassign others to different source shells at the same 3D location.
+            {
+                // Build reverse map: source → list of non-merged target claimants
+                var srcClaimants = new Dictionary<int, List<(int tsi, float avg3D)>>();
+                for (int tsi = 0; tsi < tgtShells.Count; tsi++)
                 {
-                    if (vi >= tUv0.Length) continue;
-                    Vector2 tUv = tUv0[vi];
-                    float bestDSq = float.MaxValue;
-                    for (int fi = 0; fi < srcFacesChosen.Count; fi++)
+                    int src = result.targetShellToSourceShell[tsi];
+                    if (src < 0 || tgtIsMerged[tsi]) continue; // skip unmatched & merged
+                    if (!srcClaimants.TryGetValue(src, out var list))
                     {
-                        int f = srcFacesChosen[fi];
-                        float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                            out _, out _, out _);
-                        if (dSq < bestDSq) bestDSq = dSq;
-                        if (bestDSq < 1e-8f) break;
+                        list = new List<(int, float)>();
+                        srcClaimants[src] = list;
                     }
-                    if (bestDSq > kUv0BadThreshold) uv0BadCount++;
+                    list.Add((tsi, tgtChosenAvg3D[tsi]));
                 }
-                int tShellVerts = tShell.vertexIndices.Count;
-                bool isMergedShell = tShellVerts > 0 && (float)uv0BadCount / tShellVerts > 0.3f;
+
+                // Identify conflicts and build claimed set
+                var claimed = new HashSet<int>();
+                var needsRematch = new List<int>();
+                int dedupConflicts = 0;
+
+                foreach (var kv in srcClaimants)
+                {
+                    claimed.Add(kv.Key); // source is claimed regardless
+                    if (kv.Value.Count <= 1) continue;
+
+                    // Multiple non-merged targets claim same source — keep best
+                    kv.Value.Sort((a, b) => a.avg3D.CompareTo(b.avg3D));
+                    for (int i = 1; i < kv.Value.Count; i++)
+                    {
+                        needsRematch.Add(kv.Value[i].tsi);
+                        dedupConflicts++;
+                    }
+                }
+
+                // Re-match evicted targets with exclusion of already-claimed sources
+                if (needsRematch.Count > 0)
+                {
+                    // Iterative: each rematch claims a new source
+                    for (int iteration = 0; iteration < 3 && needsRematch.Count > 0; iteration++)
+                    {
+                        var stillNeedsRematch = new List<int>();
+
+                        foreach (int tsi in needsRematch)
+                        {
+                            var tShell = tgtShells[tsi];
+
+                            FindBestSourceShell(tShell, tVerts, srcShells, srcCentroid3D,
+                                triPosA, triPosB, triPosC, result.targetShellCentroids[tsi],
+                                kMaxRetries * 3, kGoodDistSq, claimed,
+                                out int newSrc, out float newDistSq, out float newAvg3D);
+
+                            if (newSrc >= 0)
+                            {
+                                result.targetShellToSourceShell[tsi] = newSrc;
+                                result.targetShellMatchDistSqr[tsi] = newDistSq;
+                                tgtChosenAvg3D[tsi] = newAvg3D;
+                                claimed.Add(newSrc);
+
+                                // Re-check merged status with new source
+                                tgtIsMerged[tsi] = DetectMergedShell(tShell, tUv0,
+                                    srcShells[newSrc].faceIndices, triUv0A, triUv0B, triUv0C);
+                            }
+                            else
+                            {
+                                stillNeedsRematch.Add(tsi);
+                            }
+                        }
+
+                        needsRematch = stillNeedsRematch;
+                    }
+
+                    // Any remaining unmatched — force to merged mode
+                    foreach (int tsi in needsRematch)
+                    {
+                        tgtIsMerged[tsi] = true;
+                    }
+
+                    result.dedupConflicts = dedupConflicts;
+                    if (dedupConflicts > 0)
+                        UvtLog.Info($"[GroupedTransfer] Dedup: {dedupConflicts} same-source conflicts, " +
+                            $"{needsRematch.Count} forced merged");
+                }
+            }
+
+            // ── Phase 3: Transfer UV2 using final source assignments ──
+            int transferred = 0;
+            int shellsMatched = 0;
+            int shellsTransform = 0, shellsInterpolation = 0, shellsMerged = 0;
+
+            for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+            {
+                var tShell = tgtShells[tsi];
+                int chosenSrc = result.targetShellToSourceShell[tsi];
+
+                // Skip unmatched non-merged shells
+                if (chosenSrc < 0 && !tgtIsMerged[tsi]) continue;
+
+                shellsMatched++;
+                var srcFacesChosen = chosenSrc >= 0 ? srcShells[chosenSrc].faceIndices : null;
 
                 Dictionary<int, Vector2> chosenUv2;
 
-                if (isMergedShell)
+                if (tgtIsMerged[tsi])
                 {
                     // ── Merged shell: UV0 multi-shell interpolation + 3D consistency check ──
-                    // Primary: search ALL source triangles via UV0 nearest.
-                    // Secondary: 3D surface projection with normal filter (backface rejection).
-                    // If both agree (UV2 delta < threshold) → use UV0 result (more stable).
-                    // If they disagree → still prefer UV0 (bounded by source UV2 triangles).
-                    // But if UV0 hit is distant (bad coverage) and 3D hit is good → use 3D.
-                    const float kConsistencyThresh = 0.02f; // UV2-space delta
-                    const float kUv0DistantThresh = 0.05f;  // UV0-space sqr distance for "bad" hit
-                    const float kBackfaceDot = 0.3f;        // normal dot threshold for 3D hits
+                    const float kConsistencyThresh = 0.02f;
+                    const float kUv0DistantThresh = 0.05f;
+                    const float kBackfaceDot = 0.3f;
                     int localConsistencyFixes = 0;
 
                     var uv2_merged = new Dictionary<int, Vector2>();
@@ -504,9 +644,7 @@ namespace LightmapUvTool
                         int bestF3D = -1; float bestU_3d = 0, bestV_3d = 0, bestW_3d = 0;
                         for (int f = 0; f < srcTriCount; f++)
                         {
-                            // Backface rejection: skip if source normal opposes target normal
                             if (Vector3.Dot(triNormal[f], tNrm) < kBackfaceDot) continue;
-
                             float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
                                 out float u, out float v, out float w);
                             if (dSq < bestDSq3D) { bestDSq3D = dSq; bestF3D = f; bestU_3d = u; bestV_3d = v; bestW_3d = w; }
@@ -523,7 +661,6 @@ namespace LightmapUvTool
                         if (bestFUv0 >= 0 && bestF3D >= 0)
                         {
                             float delta = (uv2FromUv0 - uv2From3D).magnitude;
-                            // UV0 hit is distant (bad coverage) but 3D hit is close → prefer 3D
                             if (bestDSqUv0 > kUv0DistantThresh && delta > kConsistencyThresh)
                             {
                                 uv2_merged[vi] = uv2From3D;
@@ -531,7 +668,7 @@ namespace LightmapUvTool
                             }
                             else
                             {
-                                uv2_merged[vi] = uv2FromUv0; // UV0 primary (bounded)
+                                uv2_merged[vi] = uv2FromUv0;
                             }
                         }
                         else if (bestFUv0 >= 0)
@@ -560,7 +697,6 @@ namespace LightmapUvTool
 
                     if (xf.valid)
                     {
-                        // Candidate A: similarity transform
                         uv2_transform = new Dictionary<int, Vector2>();
                         foreach (int vi in tShell.vertexIndices)
                         {
@@ -570,7 +706,7 @@ namespace LightmapUvTool
                         issuesTransform = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_transform);
                     }
 
-                    // Candidate B: per-vertex UV0 interpolation (existing method)
+                    // Candidate B: per-vertex UV0 interpolation
                     var uv2_interp = new Dictionary<int, Vector2>();
                     foreach (int vi in tShell.vertexIndices)
                     {
@@ -590,8 +726,6 @@ namespace LightmapUvTool
                     }
                     int issuesInterp = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_interp);
 
-                    // Pick winner: interpolation is primary (bounded, no extrapolation).
-                    // Transform wins ONLY if it has strictly fewer issues than interpolation.
                     if (uv2_transform != null && issuesTransform < issuesInterp)
                     {
                         chosenUv2 = uv2_transform;
@@ -607,10 +741,11 @@ namespace LightmapUvTool
                 }
 
                 // Write chosen UV2
+                int srcForLog = chosenSrc >= 0 ? chosenSrc : -1;
                 foreach (var kv in chosenUv2)
                 {
                     result.uv2[kv.Key] = kv.Value;
-                    result.vertexToSourceShell[kv.Key] = chosenSrc;
+                    result.vertexToSourceShell[kv.Key] = srcForLog;
                     transferred++;
                 }
             }
@@ -625,6 +760,9 @@ namespace LightmapUvTool
                 $"{tgtShells.Count} target → {shellsMatched} matched " +
                 $"(xform:{shellsTransform} interp:{shellsInterpolation} merged:{shellsMerged}), " +
                 $"{transferred}/{vertCount} verts" +
+                (result.dedupConflicts > 0
+                    ? $" (dedup:{result.dedupConflicts})"
+                    : "") +
                 (result.consistencyCorrected > 0
                     ? $" (consistency-corrected:{result.consistencyCorrected})"
                     : ""));
