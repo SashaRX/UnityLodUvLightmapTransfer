@@ -642,11 +642,42 @@ namespace LightmapUvTool
                 if (tgtIsMerged[tsi])
                 {
                     // ── Merged shell: try source-constrained first, fall back to all-source ──
-                    // Tiling merged: constrained gives 0 issues → stays within one UV2 island.
-                    // Genuine merged: constrained gives issues → fallback to all-source search.
                     const float kConsistencyThresh = 0.02f;
                     const float kUv0DistantThresh = 0.05f;
                     const float kBackfaceDot = 0.3f;
+
+                    // ── UV0 bbox coverage: classify tiling vs genuine merged ──
+                    // Tiling: source UV0 bbox covers most of target UV0 bbox (same pattern).
+                    // Genuine: target spans multiple source shells → low coverage.
+                    float uv0Coverage = 0f;
+                    if (srcFacesChosen != null && tShell.vertexIndices.Count > 0)
+                    {
+                        // Target UV0 bbox
+                        Vector2 tMin = new Vector2(float.MaxValue, float.MaxValue);
+                        Vector2 tMax = new Vector2(float.MinValue, float.MinValue);
+                        foreach (int vi in tShell.vertexIndices)
+                        {
+                            if (vi >= tUv0.Length) continue;
+                            Vector2 uv = tUv0[vi];
+                            tMin = Vector2.Min(tMin, uv); tMax = Vector2.Max(tMax, uv);
+                        }
+                        // Source UV0 bbox (from matched shell faces)
+                        Vector2 sMin = new Vector2(float.MaxValue, float.MaxValue);
+                        Vector2 sMax = new Vector2(float.MinValue, float.MinValue);
+                        foreach (int f in srcFacesChosen)
+                        {
+                            sMin = Vector2.Min(sMin, Vector2.Min(triUv0A[f], Vector2.Min(triUv0B[f], triUv0C[f])));
+                            sMax = Vector2.Max(sMax, Vector2.Max(triUv0A[f], Vector2.Max(triUv0B[f], triUv0C[f])));
+                        }
+                        float tArea = (tMax.x - tMin.x) * (tMax.y - tMin.y);
+                        if (tArea > 1e-10f)
+                        {
+                            // Intersection bbox
+                            float ix = Mathf.Max(0, Mathf.Min(tMax.x, sMax.x) - Mathf.Max(tMin.x, sMin.x));
+                            float iy = Mathf.Max(0, Mathf.Min(tMax.y, sMax.y) - Mathf.Max(tMin.y, sMin.y));
+                            uv0Coverage = (ix * iy) / tArea;
+                        }
+                    }
 
                     Dictionary<int, Vector2> bestMergedUv2 = null;
                     int bestMergedIssues = int.MaxValue;
@@ -736,11 +767,23 @@ namespace LightmapUvTool
                         }
 
                         int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidate);
-                        // Prefer all-source on tie when both have issues:
-                        // UV0 flipped winding causes false positives in CountShellIssues,
-                        // so equal non-zero scores mean all-source (wider search) is safer.
-                        bool better = (issues < bestMergedIssues) ||
-                            (issues == bestMergedIssues && !constrained && bestWasConstrained && issues > 0);
+                        // Tie-break using UV0 bbox coverage when both paths have issues:
+                        // High coverage (>70%) = tiling merged → prefer constrained.
+                        // Low coverage = genuine merged → prefer all-source.
+                        bool better;
+                        if (issues < bestMergedIssues)
+                        {
+                            better = true;
+                        }
+                        else if (issues == bestMergedIssues && issues > 0 && constrained != bestWasConstrained)
+                        {
+                            bool preferConstrained = uv0Coverage > 0.7f;
+                            better = (constrained == preferConstrained);
+                        }
+                        else
+                        {
+                            better = false;
+                        }
                         if (better)
                         {
                             bestMergedIssues = issues;
@@ -755,7 +798,7 @@ namespace LightmapUvTool
                     result.targetShellMethod[tsi] = 2; // merged
                     result.consistencyCorrected += bestMergedConsistencyFixes;
                     UvtLog.Info($"[GroupedTransfer]   t{tsi} merged({tShell.faceIndices.Count}f): " +
-                        $"{(bestWasConstrained ? "src-constrained" : "all-source")} ({bestMergedIssues} issues)");
+                        $"{(bestWasConstrained ? "src-constrained" : "all-source")} ({bestMergedIssues} issues, cov={uv0Coverage:F2})");
                 }
                 else
                 {
