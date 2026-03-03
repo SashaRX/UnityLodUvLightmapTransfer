@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.13.7] - 2026-03-03
+
+### Fixed — UV0-interp fallback for broken force3D on thin wrapping geometry
+- **Pass 2 UV0-only constrained fallback** (`GroupedShellTransfer.cs`): when both
+  force3D passes (all-source and constrained) produce high issues (>50% of face
+  count), a third pass runs UV0 interpolation constrained to the assigned source
+  shell without the force3D override. On thin wrapping geometry (belts, straps,
+  bands that wrap around a box), 3D projection maps vertices to scattered edge
+  faces of the source, producing 100% face issues and garbage UV2 topology. UV0
+  interpolation finds the correct source triangle in UV0 space and produces UV2
+  matching the source LOD0 layout.
+- **No overlap guard on Pass 2**: same-source overlap from UV0 interpolation is
+  geometrically correct for tiling/symmetric geometry — both shells sample the
+  same lightmap texels. The overlap guard is skipped to avoid rejecting valid
+  candidates.
+- **Conservative threshold**: >50% face issues triggers the fallback. Normal
+  force3D shells get 0–2 issues; broken belt shells get 100%. Only
+  catastrophically broken projections trigger the fallback.
+- **Log label**: `UV0-interp fallback` distinguishes from `3D-primary` and
+  `src-constrained` in diagnostics.
+
 ## [0.13.0] - 2026-03-03
 
 ### Changed — SymmetrySplit source-only default + sidecar metadata + validation improvement
