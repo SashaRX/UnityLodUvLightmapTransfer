@@ -95,6 +95,7 @@ namespace LightmapUvTool
             public bool include = true;
             public bool wasWelded;
             public bool wasEdgeWelded;
+            public bool wasSymmetrySplit;
             public Mesh repackedMesh;
             public Mesh transferredMesh;
             public TargetTransferState transferState;
@@ -1278,11 +1279,13 @@ namespace LightmapUvTool
             foreach (var e in meshEntries)
             {
                 if (!e.include || e.originalMesh == null) continue;
+                e.wasSymmetrySplit = false;
                 var mesh = e.originalMesh;
                 var uv0 = mesh.uv;
                 if (uv0 == null || uv0.Length == 0) continue;
                 var shells = UvShellExtractor.Extract(uv0, mesh.triangles);
                 int n = SymmetrySplitShells.Split(mesh, shells);
+                if (n > 0) e.wasSymmetrySplit = true;
                 totalSplit += n;
             }
             if (totalSplit > 0)
@@ -1604,6 +1607,7 @@ namespace LightmapUvTool
             public string name;
             public Vector2[] uv2;
             public bool welded, edgeWelded;
+            public bool symmetrySplit;
             public Vector3[] positions;
             public Vector2[] uv0;
             // Deterministic replay (variant B)
@@ -1618,6 +1622,7 @@ namespace LightmapUvTool
             public int targetUvChannel;
             public bool stepMeshopt;
             public bool stepEdgeWeld;
+            public bool stepSymmetrySplit;
             public bool stepRepack;
             public bool stepTransfer;
             public bool hasReplayData;
@@ -1658,6 +1663,7 @@ namespace LightmapUvTool
                     uv2 = uv2List.ToArray(),
                     welded = e.wasWelded,
                     edgeWelded = e.wasEdgeWelded,
+                    symmetrySplit = e.wasSymmetrySplit,
                     positions = positions,
                     uv0 = uv0List.ToArray(),
                     // Schema & provenance
@@ -1667,12 +1673,13 @@ namespace LightmapUvTool
                     targetUvChannel = pipeSettings.targetUvChannel,
                     stepMeshopt = e.wasWelded,
                     stepEdgeWeld = e.wasEdgeWelded,
+                    stepSymmetrySplit = e.wasSymmetrySplit,
                     stepRepack = (e.lodIndex == sourceLodIndex),
                     stepTransfer = (e.lodIndex != sourceLodIndex),
                 };
 
-                // Build deterministic replay data when mesh was optimized
-                if ((e.wasWelded || e.wasEdgeWelded) && e.fbxMesh != null)
+                // Build deterministic replay data when topology-affecting steps were applied
+                if ((e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit) && e.fbxMesh != null)
                 {
                     // optimizedMesh = the mesh after MeshOptimizer + UvEdgeWeld
                     // For source LOD: repackedMesh has UV2 written on top of optimized geometry
@@ -1686,13 +1693,14 @@ namespace LightmapUvTool
                     sidecar.hasReplayData = (sidecar.vertexRemap != null);
 
                     UvtLog.Verbose($"[Apply] '{meshName}': remap {e.fbxMesh.vertexCount}→{optimizedMesh.vertexCount} " +
-                                  $"({sidecar.optimizedTriangles.Length / 3} tris, {optimizedMesh.subMeshCount} submeshes)");
+                                  $"({sidecar.optimizedTriangles.Length / 3} tris, {optimizedMesh.subMeshCount} submeshes), " +
+                                  $"replaySteps=meshopt:{e.wasWelded}, edgeWeld:{e.wasEdgeWelded}, symmetrySplit:{e.wasSymmetrySplit}");
                 }
 
                 // Replay-mandatory warning: modified mesh without replay data
-                if ((e.wasWelded || e.wasEdgeWelded) && sidecar.vertexRemap == null)
+                if ((e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit) && sidecar.vertexRemap == null)
                 {
-                    UvtLog.Warn($"[Apply] '{meshName}': mesh was modified (welded/edgeWelded) but no replay data — " +
+                    UvtLog.Warn($"[Apply] '{meshName}': mesh was modified (welded={e.wasWelded}, edgeWelded={e.wasEdgeWelded}, symmetrySplit={e.wasSymmetrySplit}) but no replay data — " +
                                 "reimport will use non-deterministic legacy path!");
                 }
 
@@ -1722,13 +1730,13 @@ namespace LightmapUvTool
 
                     foreach (var entry in kv.Value)
                     {
-                        data.Set(entry.name, entry.uv2, entry.welded, entry.edgeWelded,
+                        data.Set(entry.name, entry.uv2, entry.welded, entry.edgeWelded, entry.symmetrySplit,
                                  entry.positions, entry.uv0,
                                  entry.vertexRemap, entry.optimizedVertexCount,
                                  entry.optimizedTriangles, entry.submeshTriangleCounts,
                                  entry.schemaVersion, entry.toolVersion,
                                  entry.sourceFingerprint, entry.targetUvChannel,
-                                 entry.stepMeshopt, entry.stepEdgeWeld,
+                                 entry.stepMeshopt, entry.stepEdgeWeld, entry.stepSymmetrySplit,
                                  entry.stepRepack, entry.stepTransfer,
                                  entry.hasReplayData);
                         totalMeshes++;
@@ -1876,6 +1884,8 @@ namespace LightmapUvTool
                 e.transferredMesh = null;
                 e.shellTransferResult = null;
                 e.wasWelded = false;
+                e.wasEdgeWelded = false;
+                e.wasSymmetrySplit = false;
                 e.report = null;
             }
             hasRepack = hasTransfer = false;
