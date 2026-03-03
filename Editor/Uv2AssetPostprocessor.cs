@@ -17,9 +17,15 @@ namespace LightmapUvTool
 
         struct ApplyStats
         {
-            public int fbxVerts;      // vertex count from fresh FBX import
-            public int finalVerts;    // vertex count after meshopt + weld
-            public bool remapped;     // true if position remap was used
+            public int fbxVerts;              // vertex count from fresh FBX import
+            public int finalVerts;            // vertex count after meshopt + weld
+            public bool remapped;             // true if position remap was used
+            public bool replayUsed;           // true if deterministic replay was used
+            public bool legacyUsed;           // true if legacy path was used
+            public int unmatchedVerts;        // vertices with zero UV2 after remap
+            public int nearestFallbackCount;  // nearest-unused fallback count
+            public int nearestAnyReuseCount;  // nearest-ANY reuse fallback count
+            public bool stale;                // fingerprint mismatch detected
         }
 
         void OnPreprocessModel()
@@ -59,7 +65,8 @@ namespace LightmapUvTool
             var skinned = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             int applied = 0;
             int totalFbxVerts = 0, totalFinalVerts = 0;
-            int remapCount = 0;
+            int remapCount = 0, replayCount = 0, legacyCount = 0;
+            int staleCount = 0, totalFallback = 0;
 
             foreach (var mf in filters)
             {
@@ -71,7 +78,12 @@ namespace LightmapUvTool
                     totalFbxVerts += s.fbxVerts;
                     totalFinalVerts += s.finalVerts;
                     if (s.remapped) remapCount++;
-                    UvtLog.Verbose($"[UV2 Postprocess] mesh '{mesh.name}': {s.fbxVerts}→{s.finalVerts} verts, remapped={s.remapped}");
+                    if (s.replayUsed) replayCount++;
+                    if (s.legacyUsed) legacyCount++;
+                    if (s.stale) staleCount++;
+                    totalFallback += s.nearestFallbackCount + s.nearestAnyReuseCount;
+                    UvtLog.Verbose($"[UV2 Postprocess] mesh '{mesh.name}': {s.fbxVerts}→{s.finalVerts} verts, " +
+                                   $"remapped={s.remapped}, replay={s.replayUsed}, legacy={s.legacyUsed}");
                 }
             }
 
@@ -79,15 +91,27 @@ namespace LightmapUvTool
             {
                 var mesh = smr.sharedMesh;
                 if (mesh == null) continue;
-                if (ApplyEntryToMesh(data, mesh, out var s)) { applied++; totalFbxVerts += s.fbxVerts; totalFinalVerts += s.finalVerts; if (s.remapped) remapCount++; }
+                if (ApplyEntryToMesh(data, mesh, out var s))
+                {
+                    applied++;
+                    totalFbxVerts += s.fbxVerts;
+                    totalFinalVerts += s.finalVerts;
+                    if (s.remapped) remapCount++;
+                    if (s.replayUsed) replayCount++;
+                    if (s.legacyUsed) legacyCount++;
+                    if (s.stale) staleCount++;
+                    totalFallback += s.nearestFallbackCount + s.nearestAnyReuseCount;
+                }
             }
 
             if (applied > 0)
             {
                 int saved = totalFbxVerts - totalFinalVerts;
                 float pct = totalFbxVerts > 0 ? saved * 100f / totalFbxVerts : 0f;
-                string remap = remapCount > 0 ? $", {remapCount} remapped" : "";
-                UvtLog.Info($"[UV2 Postprocess] '{modelPath}': {applied} mesh(es), {totalFbxVerts}→{totalFinalVerts} verts (−{saved}, −{pct:F1}%{remap})");
+                UvtLog.Info($"[UV2 Postprocess] '{modelPath}': {applied} mesh(es), " +
+                            $"{totalFbxVerts}→{totalFinalVerts} verts (−{saved}, −{pct:F1}%) | " +
+                            $"replay={replayCount} legacy={legacyCount} remap={remapCount} " +
+                            $"stale={staleCount} fallback={totalFallback}");
             }
         }
 
@@ -95,10 +119,31 @@ namespace LightmapUvTool
         static bool ApplyEntryToMesh(Uv2DataAsset data, Mesh mesh, out ApplyStats stats)
         {
             stats = default;
-            var entry = data.Find(mesh.name);
+
+            // Use robust lookup: try exact name, then fingerprint fallback
+            var currentFp = MeshFingerprint.Compute(mesh);
+            var entry = data.FindRobust(mesh.name, currentFp);
             if (entry == null || entry.uv2 == null) return false;
 
             stats.fbxVerts = mesh.vertexCount;
+
+            // ── Schema version check ──
+            if (entry.schemaVersion > Uv2DataAsset.CurrentSchemaVersion)
+                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': sidecar schema v{entry.schemaVersion} > " +
+                            $"current v{Uv2DataAsset.CurrentSchemaVersion}. Consider updating the tool.");
+
+            // ── Fingerprint validation ──
+            if (entry.sourceFingerprint != null)
+            {
+                if (!entry.sourceFingerprint.Matches(currentFp))
+                {
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': FBX geometry changed since sidecar was created " +
+                                $"(verts: {entry.sourceFingerprint.vertexCount}→{currentFp.vertexCount}, " +
+                                $"tris: {entry.sourceFingerprint.triangleCount}→{currentFp.triangleCount}). " +
+                                "Sidecar may be stale.");
+                    stats.stale = true;
+                }
+            }
 
             // ── Deterministic replay path (variant B) ──
             // If sidecar has a stored vertexRemap, replay the optimization
@@ -118,6 +163,7 @@ namespace LightmapUvTool
                     {
                         stats.finalVerts = mesh.vertexCount;
                         stats.remapped = false;
+                        stats.replayUsed = true;
                         // UV2 count now matches — assign directly
                         mesh.SetUVs(1, entry.uv2);
                         return true;
@@ -127,6 +173,16 @@ namespace LightmapUvTool
             }
 
             // ── Legacy path (no replay data in sidecar) ──
+            stats.legacyUsed = true;
+
+            // Warn if mesh was modified but has no replay data
+            if (entry.welded || entry.edgeWelded)
+            {
+                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': mesh was modified " +
+                            $"(welded={entry.welded}, edgeWelded={entry.edgeWelded}) but no replay data — " +
+                            "using non-deterministic legacy path.");
+            }
+
             if (entry.welded)
             {
                 MeshOptimizer.Optimize(mesh);
@@ -172,8 +228,12 @@ namespace LightmapUvTool
             stats.finalVerts = mesh.vertexCount;
 
             bool didRemap;
-            var uv2 = RemapUv2IfNeeded(entry, mesh, out didRemap);
+            int nearestFallback, nearestAnyReuse, unmatched;
+            var uv2 = RemapUv2IfNeeded(entry, mesh, out didRemap, out nearestFallback, out nearestAnyReuse, out unmatched);
             stats.remapped = didRemap;
+            stats.nearestFallbackCount = nearestFallback;
+            stats.nearestAnyReuseCount = nearestAnyReuse;
+            stats.unmatchedVerts = unmatched;
             mesh.SetUVs(1, uv2);
             return true;
         }
@@ -193,14 +253,57 @@ namespace LightmapUvTool
             if (optCount <= 0 || entry.optimizedTriangles == null || entry.submeshTriangleCounts == null)
                 return false;
 
-            // Validate remap bounds
+            // ── Hard validation ──
+            // Check UV2 length matches optimized vertex count
+            if (entry.uv2.Length != optCount)
+            {
+                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': uv2.Length ({entry.uv2.Length}) != " +
+                            $"optimizedVertexCount ({optCount}) — replay aborted.");
+                return false;
+            }
+
+            // Check sum of submesh tri counts matches optimizedTriangles length
+            int totalTriIndices = 0;
+            foreach (int c in entry.submeshTriangleCounts) totalTriIndices += c;
+            if (totalTriIndices != entry.optimizedTriangles.Length)
+            {
+                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': sum(submeshTriCounts)={totalTriIndices} != " +
+                            $"optimizedTriangles.Length={entry.optimizedTriangles.Length} — replay aborted.");
+                return false;
+            }
+
+            // Validate remap bounds and check for negative indices in triangles
             for (int i = 0; i < rawCount; i++)
             {
-                if (remap[i] >= optCount)
+                if (remap[i] < -1) // -1 is valid (removed vertex), anything less is corruption
                 {
-                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': remap[{i}]={remap[i]} >= optCount={optCount}");
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': remap[{i}]={remap[i]} is invalid — replay aborted.");
                     return false;
                 }
+                if (remap[i] >= optCount)
+                {
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': remap[{i}]={remap[i]} >= optCount={optCount} — replay aborted.");
+                    return false;
+                }
+            }
+
+            // Validate triangle indices: no negative, no out-of-range
+            int maxIdx = -1;
+            for (int i = 0; i < entry.optimizedTriangles.Length; i++)
+            {
+                int idx = entry.optimizedTriangles[i];
+                if (idx < 0)
+                {
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': negative triangle index at [{i}] — replay aborted.");
+                    return false;
+                }
+                if (idx > maxIdx) maxIdx = idx;
+            }
+            if (maxIdx >= optCount)
+            {
+                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': max triangle index {maxIdx} >= " +
+                            $"optimizedVertexCount {optCount} — replay aborted.");
+                return false;
             }
 
             // ── Read all channels from raw FBX mesh ──
@@ -312,9 +415,14 @@ namespace LightmapUvTool
         /// workflow and the postprocessor (different starting vertex count/order from FBX reimport).
         /// This remaps UV2 by matching vertex positions so the correct UV2 reaches each vertex.
         /// </summary>
-        static Vector2[] RemapUv2IfNeeded(MeshUv2Entry entry, Mesh mesh, out bool didRemap)
+        static Vector2[] RemapUv2IfNeeded(MeshUv2Entry entry, Mesh mesh, out bool didRemap,
+                                           out int nearestFallbackCount, out int nearestAnyReuseCount,
+                                           out int unmatchedCount)
         {
             didRemap = false;
+            nearestFallbackCount = 0;
+            nearestAnyReuseCount = 0;
+            unmatchedCount = 0;
 
             // No position data stored — backward compat, use UV2 as-is
             if (entry.vertPositions == null || entry.vertPositions.Length != entry.uv2.Length)
@@ -450,6 +558,7 @@ namespace LightmapUvTool
                         unusedSidecar.RemoveAt(bestListIdx);
                         matched++;
                         fallbackMatched++;
+                        nearestFallbackCount++;
                         continue;
                     }
 
@@ -469,15 +578,22 @@ namespace LightmapUvTool
                         result[mi] = entry.uv2[bestIdx];
                         matched++;
                         fallbackMatched++;
+                        nearestAnyReuseCount++;
                     }
                 }
 
-                if (fallbackMatched > 0)
-                    UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': {fallbackMatched} vertices matched by nearest-neighbor fallback");
+                if (nearestFallbackCount > 0)
+                    UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': {nearestFallbackCount} vertices matched by nearest-unused fallback");
 
+                if (nearestAnyReuseCount > 0)
+                {
+                    string severity = nearestAnyReuseCount > 5 ? "Sidecar may be invalid." : "Acceptable.";
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {nearestAnyReuseCount} vertices used nearest-ANY fallback (reuse). {severity}");
+                }
             }
 
             didRemap = true;
+            unmatchedCount = count - matched;
 
             if (matched < count)
                 UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': position remap {matched}/{count} " +

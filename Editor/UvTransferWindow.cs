@@ -664,6 +664,8 @@ namespace LightmapUvTool
                 ColorBtn(new Color(.3f,.85f,.4f), "Apply UV2 to FBX", 26, ApplyUv2ToFbx);
                 EditorGUILayout.Space(2);
                 ColorBtn(new Color(.9f,.3f,.3f), "Reset UV2 (delete sidecar)", 20, ResetUv2FromFbx);
+                EditorGUILayout.Space(2);
+                ColorBtn(new Color(.5f,.15f,.15f), "Reset Pipeline State", 20, ResetPipelineState);
 
                 EditorGUILayout.Space(4);
                 H("Legacy Save");
@@ -1609,6 +1611,16 @@ namespace LightmapUvTool
             public int optimizedVertexCount;
             public int[] optimizedTriangles;
             public int[] submeshTriangleCounts;
+            // Schema & provenance (v0.12.0+)
+            public int schemaVersion;
+            public string toolVersion;
+            public MeshFingerprint sourceFingerprint;
+            public int targetUvChannel;
+            public bool stepMeshopt;
+            public bool stepEdgeWeld;
+            public bool stepRepack;
+            public bool stepTransfer;
+            public bool hasReplayData;
         }
 
         void ApplyUv2ToFbx()
@@ -1647,7 +1659,16 @@ namespace LightmapUvTool
                     welded = e.wasWelded,
                     edgeWelded = e.wasEdgeWelded,
                     positions = positions,
-                    uv0 = uv0List.ToArray()
+                    uv0 = uv0List.ToArray(),
+                    // Schema & provenance
+                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
+                    toolVersion = Uv2DataAsset.ToolVersionStr,
+                    sourceFingerprint = e.fbxMesh != null ? MeshFingerprint.Compute(e.fbxMesh) : null,
+                    targetUvChannel = pipeSettings.targetUvChannel,
+                    stepMeshopt = e.wasWelded,
+                    stepEdgeWeld = e.wasEdgeWelded,
+                    stepRepack = (e.lodIndex == sourceLodIndex),
+                    stepTransfer = (e.lodIndex != sourceLodIndex),
                 };
 
                 // Build deterministic replay data when mesh was optimized
@@ -1662,9 +1683,17 @@ namespace LightmapUvTool
                     sidecar.vertexRemap = BuildVertexRemap(e.fbxMesh, optimizedMesh);
                     sidecar.optimizedVertexCount = optimizedMesh.vertexCount;
                     BuildTriangleData(optimizedMesh, out sidecar.optimizedTriangles, out sidecar.submeshTriangleCounts);
+                    sidecar.hasReplayData = (sidecar.vertexRemap != null);
 
                     UvtLog.Verbose($"[Apply] '{meshName}': remap {e.fbxMesh.vertexCount}→{optimizedMesh.vertexCount} " +
                                   $"({sidecar.optimizedTriangles.Length / 3} tris, {optimizedMesh.subMeshCount} submeshes)");
+                }
+
+                // Replay-mandatory warning: modified mesh without replay data
+                if ((e.wasWelded || e.wasEdgeWelded) && sidecar.vertexRemap == null)
+                {
+                    UvtLog.Warn($"[Apply] '{meshName}': mesh was modified (welded/edgeWelded) but no replay data — " +
+                                "reimport will use non-deterministic legacy path!");
                 }
 
                 fbxGroups[fbxPath].Add(sidecar);
@@ -1696,7 +1725,12 @@ namespace LightmapUvTool
                         data.Set(entry.name, entry.uv2, entry.welded, entry.edgeWelded,
                                  entry.positions, entry.uv0,
                                  entry.vertexRemap, entry.optimizedVertexCount,
-                                 entry.optimizedTriangles, entry.submeshTriangleCounts);
+                                 entry.optimizedTriangles, entry.submeshTriangleCounts,
+                                 entry.schemaVersion, entry.toolVersion,
+                                 entry.sourceFingerprint, entry.targetUvChannel,
+                                 entry.stepMeshopt, entry.stepEdgeWeld,
+                                 entry.stepRepack, entry.stepTransfer,
+                                 entry.hasReplayData);
                         totalMeshes++;
                     }
 
@@ -1887,6 +1921,55 @@ namespace LightmapUvTool
             if (touchesLoaded) Refresh();
 
             UpdateSelectedSidecar();
+            Repaint();
+        }
+
+        /// <summary>
+        /// Full pipeline state reset: delete all sidecars, reset working copies,
+        /// clear caches, restore checker textures. The nuclear option.
+        /// </summary>
+        void ResetPipelineState()
+        {
+            if (lodGroup == null) return;
+
+            if (!EditorUtility.DisplayDialog("Reset Pipeline State",
+                "This will:\n• Delete all UV2 sidecars\n• Reset working copies\n• Clear caches\n• Restore checker textures\n\nThis cannot be undone.",
+                "Reset Everything", "Cancel"))
+                return;
+
+            // Collect all FBX paths
+            var fbxPaths = new HashSet<string>();
+            foreach (var e in meshEntries)
+            {
+                Mesh m = e.fbxMesh ?? e.originalMesh;
+                if (m == null) continue;
+                string p = AssetDatabase.GetAssetPath(m);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                    fbxPaths.Add(p);
+            }
+
+            // Delete sidecars + reimport
+            int deleted = 0;
+            foreach (string fbxPath in fbxPaths)
+            {
+                string sp = Uv2DataAsset.GetSidecarPath(fbxPath);
+                if (AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sp) != null)
+                {
+                    AssetDatabase.DeleteAsset(sp);
+                    deleted++;
+                }
+                AssetDatabase.ImportAsset(fbxPath, ImportAssetOptions.ForceUpdate);
+            }
+
+            // Reset working copies
+            ResetWorkingCopies();
+
+            // Clear checker
+            if (checkerEnabled) { CheckerTexturePreview.Restore(); checkerEnabled = false; }
+
+            AssetDatabase.Refresh();
+            UvtLog.Info($"[Reset] Full pipeline state reset: {deleted} sidecar(s) deleted, {fbxPaths.Count} FBX reimported");
+            Refresh();
             Repaint();
         }
 
