@@ -44,15 +44,6 @@ namespace LightmapUvTool
                 modelImporter.generateSecondaryUV = false;
                 UvtLog.Info($"[UV2 Preprocess] Disabled generateSecondaryUV on '{assetPath}' (sidecar provides UV2)");
             }
-
-            // ReplayOptimization calls mesh.Clear() then Set* — after Clear(), Unity checks
-            // isReadable even during import. Force it on so the postprocessor can rebuild the mesh.
-            // ApplyUv2ToFbx will disable it again after import to free CPU RAM.
-            if (!modelImporter.isReadable)
-            {
-                modelImporter.isReadable = true;
-                UvtLog.Verbose($"[UV2 Preprocess] Enabled Read/Write on '{assetPath}' (required for replay)");
-            }
         }
 
         void OnPostprocessModel(GameObject root)
@@ -405,7 +396,14 @@ namespace LightmapUvTool
             }
 
             // ── Rebuild mesh ──
-            mesh.Clear();
+            // IMPORTANT: Do NOT use mesh.Clear() here. During OnPostprocessModel, Unity
+            // allows mesh modifications regardless of isReadable. However, Clear() resets
+            // the mesh's internal import context, causing subsequent Set* calls to check
+            // isReadable and fail when it's false. Instead, we strip triangles first
+            // (so indices don't reference beyond the new vertex count), then overwrite
+            // all vertex data in-place.
+            mesh.subMeshCount = 1;
+            mesh.triangles = new int[0];
 
             mesh.SetVertices(optPos);
             if (optNormals != null) mesh.SetNormals(optNormals);
