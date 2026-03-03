@@ -642,44 +642,11 @@ namespace LightmapUvTool
                 if (tgtIsMerged[tsi])
                 {
                     // ── Merged shell: try source-constrained first, fall back to all-source ──
+                    // Tiling merged: constrained gives 0 issues → stays within one UV2 island.
+                    // Genuine merged: constrained gives issues → fallback to all-source search.
                     const float kConsistencyThresh = 0.02f;
                     const float kUv0DistantThresh = 0.05f;
                     const float kBackfaceDot = 0.3f;
-
-                    // ── Source shell vote: classify tiling vs genuine merged ──
-                    // 3D-project target verts → nearest source face → source shell ID.
-                    // Tiling: dominant shell gets ≥50% votes → prefer constrained.
-                    // Genuine: no dominant shell → prefer all-source.
-                    var srcShellVotes = new Dictionary<int, int>();
-                    int totalVotes = 0;
-                    foreach (int vi in tShell.vertexIndices)
-                    {
-                        if (vi >= tVerts.Length) continue;
-                        Vector3 tPos = tVerts[vi];
-                        Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
-                            ? tNormals[vi] : Vector3.up;
-                        float bestDSq = float.MaxValue;
-                        int bestF = -1;
-                        for (int f = 0; f < srcTriCount; f++)
-                        {
-                            if (Vector3.Dot(triNormal[f], tNrm) < 0.3f) continue;
-                            float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
-                                out _, out _, out _);
-                            if (dSq < bestDSq) { bestDSq = dSq; bestF = f; }
-                        }
-                        if (bestF >= 0)
-                        {
-                            int sid = faceToSrcShell[bestF];
-                            srcShellVotes.TryGetValue(sid, out int cnt);
-                            srcShellVotes[sid] = cnt + 1;
-                            totalVotes++;
-                        }
-                    }
-                    int uniqueSrcShells = srcShellVotes.Count;
-                    int maxVotes = 0;
-                    foreach (var kv in srcShellVotes)
-                        if (kv.Value > maxVotes) maxVotes = kv.Value;
-                    bool dominantShell = totalVotes > 0 && maxVotes * 2 >= totalVotes; // ≥50%
 
                     Dictionary<int, Vector2> bestMergedUv2 = null;
                     int bestMergedIssues = int.MaxValue;
@@ -769,23 +736,11 @@ namespace LightmapUvTool
                         }
 
                         int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidate);
-                        // Tie-break using source shell count when both paths have issues.
-                        bool better;
-                        if (issues < bestMergedIssues)
-                        {
-                            better = true;
-                        }
-                        else if (issues == bestMergedIssues && issues > 0 && constrained != bestWasConstrained)
-                        {
-                            // Dominant shell (≥50% votes) = tiling → constrained
-                            // No dominant = genuine merged → all-source
-                            bool preferConstrained = dominantShell;
-                            better = (constrained == preferConstrained);
-                        }
-                        else
-                        {
-                            better = false;
-                        }
+                        // Prefer all-source on tie when both have issues:
+                        // UV0 flipped winding causes false positives in CountShellIssues,
+                        // so equal non-zero scores mean all-source (wider search) is safer.
+                        bool better = (issues < bestMergedIssues) ||
+                            (issues == bestMergedIssues && !constrained && bestWasConstrained && issues > 0);
                         if (better)
                         {
                             bestMergedIssues = issues;
@@ -800,7 +755,7 @@ namespace LightmapUvTool
                     result.targetShellMethod[tsi] = 2; // merged
                     result.consistencyCorrected += bestMergedConsistencyFixes;
                     UvtLog.Info($"[GroupedTransfer]   t{tsi} merged({tShell.faceIndices.Count}f): " +
-                        $"{(bestWasConstrained ? "src-constrained" : "all-source")} ({bestMergedIssues} issues, srcShells={uniqueSrcShells})");
+                        $"{(bestWasConstrained ? "src-constrained" : "all-source")} ({bestMergedIssues} issues)");
                 }
                 else
                 {
