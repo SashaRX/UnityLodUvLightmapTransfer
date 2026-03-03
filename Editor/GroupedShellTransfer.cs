@@ -646,38 +646,29 @@ namespace LightmapUvTool
                     const float kUv0DistantThresh = 0.05f;
                     const float kBackfaceDot = 0.3f;
 
-                    // ── UV0 bbox coverage: classify tiling vs genuine merged ──
-                    // Tiling: source UV0 bbox covers most of target UV0 bbox (same pattern).
-                    // Genuine: target spans multiple source shells → low coverage.
-                    float uv0Coverage = 0f;
-                    if (srcFacesChosen != null && tShell.vertexIndices.Count > 0)
+                    // ── Source shell count: classify tiling vs genuine merged ──
+                    // 3D-project target verts → nearest source face → source shell ID.
+                    // Tiling: all verts map to 1 source shell → prefer constrained.
+                    // Genuine: verts span multiple source shells → prefer all-source.
+                    var hitSrcShells = new HashSet<int>();
+                    foreach (int vi in tShell.vertexIndices)
                     {
-                        // Target UV0 bbox
-                        Vector2 tMin = new Vector2(float.MaxValue, float.MaxValue);
-                        Vector2 tMax = new Vector2(float.MinValue, float.MinValue);
-                        foreach (int vi in tShell.vertexIndices)
+                        if (vi >= tVerts.Length) continue;
+                        Vector3 tPos = tVerts[vi];
+                        Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
+                            ? tNormals[vi] : Vector3.up;
+                        float bestDSq = float.MaxValue;
+                        int bestF = -1;
+                        for (int f = 0; f < srcTriCount; f++)
                         {
-                            if (vi >= tUv0.Length) continue;
-                            Vector2 uv = tUv0[vi];
-                            tMin = Vector2.Min(tMin, uv); tMax = Vector2.Max(tMax, uv);
+                            if (Vector3.Dot(triNormal[f], tNrm) < 0.3f) continue;
+                            float dSq = PointToTri3D(tPos, triPosA[f], triPosB[f], triPosC[f],
+                                out _, out _, out _);
+                            if (dSq < bestDSq) { bestDSq = dSq; bestF = f; }
                         }
-                        // Source UV0 bbox (from matched shell faces)
-                        Vector2 sMin = new Vector2(float.MaxValue, float.MaxValue);
-                        Vector2 sMax = new Vector2(float.MinValue, float.MinValue);
-                        foreach (int f in srcFacesChosen)
-                        {
-                            sMin = Vector2.Min(sMin, Vector2.Min(triUv0A[f], Vector2.Min(triUv0B[f], triUv0C[f])));
-                            sMax = Vector2.Max(sMax, Vector2.Max(triUv0A[f], Vector2.Max(triUv0B[f], triUv0C[f])));
-                        }
-                        float tArea = (tMax.x - tMin.x) * (tMax.y - tMin.y);
-                        if (tArea > 1e-10f)
-                        {
-                            // Intersection bbox
-                            float ix = Mathf.Max(0, Mathf.Min(tMax.x, sMax.x) - Mathf.Max(tMin.x, sMin.x));
-                            float iy = Mathf.Max(0, Mathf.Min(tMax.y, sMax.y) - Mathf.Max(tMin.y, sMin.y));
-                            uv0Coverage = (ix * iy) / tArea;
-                        }
+                        if (bestF >= 0) hitSrcShells.Add(faceToSrcShell[bestF]);
                     }
+                    int uniqueSrcShells = hitSrcShells.Count;
 
                     Dictionary<int, Vector2> bestMergedUv2 = null;
                     int bestMergedIssues = int.MaxValue;
@@ -767,9 +758,7 @@ namespace LightmapUvTool
                         }
 
                         int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidate);
-                        // Tie-break using UV0 bbox coverage when both paths have issues:
-                        // High coverage (>70%) = tiling merged → prefer constrained.
-                        // Low coverage = genuine merged → prefer all-source.
+                        // Tie-break using source shell count when both paths have issues.
                         bool better;
                         if (issues < bestMergedIssues)
                         {
@@ -777,7 +766,9 @@ namespace LightmapUvTool
                         }
                         else if (issues == bestMergedIssues && issues > 0 && constrained != bestWasConstrained)
                         {
-                            bool preferConstrained = uv0Coverage > 0.7f;
+                            // 1 source shell = tiling (same geometry, tiled UV0) → constrained
+                            // >1 source shells = genuine merged (LOD merged geometry) → all-source
+                            bool preferConstrained = uniqueSrcShells <= 1;
                             better = (constrained == preferConstrained);
                         }
                         else
@@ -798,7 +789,7 @@ namespace LightmapUvTool
                     result.targetShellMethod[tsi] = 2; // merged
                     result.consistencyCorrected += bestMergedConsistencyFixes;
                     UvtLog.Info($"[GroupedTransfer]   t{tsi} merged({tShell.faceIndices.Count}f): " +
-                        $"{(bestWasConstrained ? "src-constrained" : "all-source")} ({bestMergedIssues} issues, cov={uv0Coverage:F2})");
+                        $"{(bestWasConstrained ? "src-constrained" : "all-source")} ({bestMergedIssues} issues, srcShells={uniqueSrcShells})");
                 }
                 else
                 {
