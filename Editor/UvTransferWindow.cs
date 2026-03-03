@@ -1861,12 +1861,13 @@ namespace LightmapUvTool
                     EditorUtility.SetDirty(data);
                     AssetDatabase.SaveAssets();
 
-                    // Note: We no longer disable Read/Write here. ReplayOptimization calls
-                    // mesh.Clear() then Set* — after Clear(), Unity checks isReadable even
-                    // during import, so the mesh must remain readable for the postprocessor
-                    // to rebuild it. The user can disable Read/Write manually after applying.
-
+                    // ReplayOptimization needs isReadable=true (mesh.Clear() + Set*),
+                    // so OnPreprocessModel forces it on. After import completes, we free
+                    // CPU mesh RAM by uploading to GPU with makeNoLongerReadable=true.
                     AssetDatabase.ImportAsset(fbxPath, ImportAssetOptions.ForceUpdate);
+
+                    // Free CPU-side mesh data (same effect as isReadable=false for RAM).
+                    FreeMeshCpuData(fbxPath);
                 }
             }
             catch (Exception ex) { UvtLog.Error("[Apply] " + ex); }
@@ -1876,6 +1877,35 @@ namespace LightmapUvTool
             CleanupWorkingMeshes();
             Refresh();
             Repaint();
+        }
+
+        /// <summary>
+        /// Upload mesh data to GPU and release CPU-side copy to free RAM.
+        /// Same memory effect as isReadable=false, but doesn't break reimport.
+        /// </summary>
+        static void FreeMeshCpuData(string fbxPath)
+        {
+            var go = AssetDatabase.LoadAssetAtPath<GameObject>(fbxPath);
+            if (go == null) return;
+            int freed = 0;
+            foreach (var mf in go.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (mf.sharedMesh != null)
+                {
+                    mf.sharedMesh.UploadMeshData(true);
+                    freed++;
+                }
+            }
+            foreach (var smr in go.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (smr.sharedMesh != null)
+                {
+                    smr.sharedMesh.UploadMeshData(true);
+                    freed++;
+                }
+            }
+            if (freed > 0)
+                UvtLog.Verbose($"[Apply] Freed CPU mesh data for {freed} mesh(es) in '{fbxPath}'");
         }
 
         /// <summary>
