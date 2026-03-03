@@ -825,6 +825,16 @@ namespace LightmapUvTool
                     shellUv0Bvh[chosenSrc], kUv0BadThreshold);
             }
 
+            // ── Phase 2a-sym: Detect symmetry siblings in source ──
+            // After SymmetrySplit, sibling shells have identical UV0 but different 3D/UV2.
+            // DetectMergedShell misses these because UV0 coverage is 100% against either half.
+            // Force merged+3D for target shells that span both halves of a symmetry pair.
+            DetectSymmetryMergedShells(
+                srcShells, srcCentroid3D, srcUv2Min, srcUv2Max,
+                tgtShells, tVerts,
+                result.targetShellToSourceShell,
+                tgtIsMerged, tgtForce3DFallback, result.targetShellCentroids);
+
             // ── Phase 2a+: Rescore merged shells with multi-criteria matching ──
             RescoreMergedShells(
                 tgtShells, srcShells,
