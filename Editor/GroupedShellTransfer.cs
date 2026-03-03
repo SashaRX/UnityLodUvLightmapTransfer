@@ -971,6 +971,9 @@ namespace LightmapUvTool
             int shellsMatched = 0;
             int shellsTransform = 0, shellsInterpolation = 0, shellsMerged = 0;
 
+            // Track UV2 AABBs of placed force3D shells to prevent mutual overlap
+            var force3DUsedRegions = new List<(Vector2 min, Vector2 max)>();
+
             for (int tsi = 0; tsi < tgtShells.Count; tsi++)
             {
                 var tShell = tgtShells[tsi];
@@ -998,25 +1001,40 @@ namespace LightmapUvTool
                     int bestMergedConsistencyFixes = 0;
                     bool bestWasConstrained = false;
 
-                    // For 3D-fallback targets (dedup conflicts), use constrained search
-                    // with 3D-primary decision to keep UV2 within the assigned source
-                    // shell's UV2 bounds, preventing cross-source overlap.
+                    // force3D: try all-source first (to find UV2 space in a different
+                    // source region), fall back to constrained if overlap guard rejects.
+                    // Normal merged: constrained first, all-source fallback (unchanged).
                     bool force3D = tgtForce3DFallback[tsi];
-                    for (int pass = 0; pass < (force3D ? 1 : 2); pass++)
+                    for (int pass = 0; pass < 2; pass++)
                     {
                         bool constrained;
-                        if (pass == 0)
+                        if (force3D)
                         {
-                            constrained = (srcFacesChosen != null);
+                            // pass 0 = all-source, pass 1 = constrained fallback
+                            if (pass == 0)
+                            {
+                                constrained = false;           // all-source first
+                            }
+                            else
+                            {
+                                if (bestMergedIssues == 0) break;  // all-source was clean
+                                constrained = (srcFacesChosen != null);
+                                if (!constrained) break;       // no constrained faces
+                            }
                         }
                         else
                         {
-                            if (!force3D)
+                            // Normal merged: pass 0 = constrained, pass 1 = all-source
+                            if (pass == 0)
+                            {
+                                constrained = (srcFacesChosen != null);
+                            }
+                            else
                             {
                                 if (srcFacesChosen == null) break; // pass 0 was already all-source
                                 if (bestMergedIssues == 0) break;  // constrained was clean
+                                constrained = false;               // all-source
                             }
-                            constrained = false;               // all-source
                         }
 
                         var candidate = new Dictionary<int, Vector2>();
@@ -1126,8 +1144,9 @@ namespace LightmapUvTool
 
                         int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidate);
 
-                        // Guard: reject all-source candidate if its UV2 AABB overlaps
-                        // with a claimed source shell's UV2 region (prevents cross-source overlap)
+                        // Guard: reject candidate if its UV2 AABB overlaps with a claimed
+                        // source shell's UV2 region. For force3D, also check the assigned
+                        // source (occupied by interp winner) and force3D sibling regions.
                         if (!constrained && candidate.Count > 0 && issues < int.MaxValue)
                         {
                             Vector2 candMin = new Vector2(float.MaxValue, float.MaxValue);
@@ -1139,13 +1158,26 @@ namespace LightmapUvTool
                             }
                             for (int si = 0; si < srcShells.Count; si++)
                             {
-                                if (si == chosenSrc) continue;
+                                if (si == chosenSrc && !force3D) continue; // force3D: check own source too
                                 if (!claimed.Contains(si)) continue;
                                 if (candMin.x < srcUv2Max[si].x && candMax.x > srcUv2Min[si].x &&
                                     candMin.y < srcUv2Max[si].y && candMax.y > srcUv2Min[si].y)
                                 {
                                     issues = int.MaxValue;
                                     break;
+                                }
+                            }
+                            // Check against UV2 regions used by previously placed force3D siblings
+                            if (force3D && issues < int.MaxValue)
+                            {
+                                foreach (var region in force3DUsedRegions)
+                                {
+                                    if (candMin.x < region.max.x && candMax.x > region.min.x &&
+                                        candMin.y < region.max.y && candMax.y > region.min.y)
+                                    {
+                                        issues = int.MaxValue;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1162,6 +1194,19 @@ namespace LightmapUvTool
                             bestMergedConsistencyFixes = localFixes;
                             bestWasConstrained = constrained;
                         }
+                    }
+
+                    // Record force3D shell's UV2 AABB so later force3D siblings avoid it
+                    if (force3D && bestMergedUv2 != null && bestMergedUv2.Count > 0)
+                    {
+                        Vector2 fMin = new Vector2(float.MaxValue, float.MaxValue);
+                        Vector2 fMax = new Vector2(float.MinValue, float.MinValue);
+                        foreach (var kv in bestMergedUv2)
+                        {
+                            fMin = Vector2.Min(fMin, kv.Value);
+                            fMax = Vector2.Max(fMax, kv.Value);
+                        }
+                        force3DUsedRegions.Add((fMin, fMax));
                     }
 
                     chosenUv2 = bestMergedUv2;
