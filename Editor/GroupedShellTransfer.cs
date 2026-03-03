@@ -358,6 +358,158 @@ namespace LightmapUvTool
         }
 
         // ═══════════════════════════════════════════════════════════
+        //  UV0 coverage fraction — same logic as DetectMergedShell
+        //  but returns a continuous [0,1] value instead of bool.
+        // ═══════════════════════════════════════════════════════════
+
+        static float ComputeUv0CoverageFraction(
+            UvShell tShell, Vector2[] tUv0,
+            List<int> srcFaces,
+            Vector2[] triUv0A, Vector2[] triUv0B, Vector2[] triUv0C,
+            TriangleBvh2D shellBvh, float uv0BadThreshold)
+        {
+            int goodCount = 0;
+            int total = 0;
+            foreach (int vi in tShell.vertexIndices)
+            {
+                if (vi >= tUv0.Length) continue;
+                total++;
+                Vector2 tUv = tUv0[vi];
+
+                float bestDSq;
+                if (shellBvh != null)
+                {
+                    var hit = shellBvh.FindNearest(tUv);
+                    bestDSq = hit.faceIndex >= 0 ? hit.distSq : float.MaxValue;
+                }
+                else
+                {
+                    bestDSq = float.MaxValue;
+                    for (int fi = 0; fi < srcFaces.Count; fi++)
+                    {
+                        int f = srcFaces[fi];
+                        float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                            out _, out _, out _);
+                        if (dSq < bestDSq) bestDSq = dSq;
+                        if (bestDSq < 1e-8f) break;
+                    }
+                }
+                if (bestDSq <= uv0BadThreshold) goodCount++;
+            }
+            return total > 0 ? (float)goodCount / total : 0f;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  RescoreMergedShells — for shells marked as merged, try all
+        //  source shells with a multi-criteria score and un-merge if
+        //  a sufficiently good source is found.
+        // ═══════════════════════════════════════════════════════════
+
+        static void RescoreMergedShells(
+            List<UvShell> tgtShells,
+            List<UvShell> srcShells,
+            Vector3[] tVerts,
+            Vector2[] tUv0,
+            int[] tgtTris,
+            Vector2[] triUv0A, Vector2[] triUv0B, Vector2[] triUv0C,
+            TriangleBvh2D[] shellUv0Bvh,
+            Vector3[] srcCentroid3D,
+            Vector3[] srcAvgNormal,
+            float[] srcUv0Area,
+            Vector3[] tgtAvgNormal,
+            float[] tgtUv0Area,
+            float meshDiagonal,
+            float uv0BadThreshold,
+            bool[] tgtIsMerged,
+            int[] targetShellToSourceShell,
+            float[] targetShellMatchDistSqr,
+            float[] tgtChosenAvg3D,
+            Vector3[] targetShellCentroids)
+        {
+            const float wArea     = 0.20f;
+            const float wNormal   = 0.30f;
+            const float wDist     = 0.15f;
+            const float wCoverage = 0.35f;
+            const float kCoverageAcceptThreshold = 0.70f;
+
+            float diagSq = meshDiagonal * meshDiagonal;
+            if (diagSq < 1e-12f) diagSq = 1f;
+
+            int rescued = 0;
+
+            for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+            {
+                if (!tgtIsMerged[tsi]) continue;
+
+                var tShell = tgtShells[tsi];
+                Vector3 tCentroid = targetShellCentroids[tsi];
+                Vector3 tNrm = tgtAvgNormal[tsi];
+                float tArea = tgtUv0Area[tsi];
+
+                int bestSrc = -1;
+                float bestScore = -1f;
+                float bestCoverage = 0f;
+                float bestDistSq = float.MaxValue;
+
+                for (int si = 0; si < srcShells.Count; si++)
+                {
+                    // 1. UV0 area ratio: min/max, 1.0 = same footprint
+                    float sArea = srcUv0Area[si];
+                    float areaScore = (tArea > 1e-10f && sArea > 1e-10f)
+                        ? Mathf.Min(tArea, sArea) / Mathf.Max(tArea, sArea) : 0f;
+
+                    // 2. Normal agreement: remap dot [-1,1] → [0,1]
+                    float normalScore;
+                    if (tNrm.sqrMagnitude > 0.5f && srcAvgNormal[si].sqrMagnitude > 0.5f)
+                        normalScore = (Vector3.Dot(tNrm, srcAvgNormal[si]) + 1f) * 0.5f;
+                    else
+                        normalScore = 0.5f;
+
+                    // 3. 3D centroid distance (normalized by mesh diagonal)
+                    float centDistSq = (tCentroid - srcCentroid3D[si]).sqrMagnitude;
+                    float distScore = 1f - Mathf.Clamp01(centDistSq / diagSq);
+
+                    // 4. UV0 coverage fraction
+                    float coverage = ComputeUv0CoverageFraction(
+                        tShell, tUv0,
+                        srcShells[si].faceIndices,
+                        triUv0A, triUv0B, triUv0C,
+                        shellUv0Bvh[si], uv0BadThreshold);
+
+                    float score = wArea * areaScore
+                                + wNormal * normalScore
+                                + wDist * distScore
+                                + wCoverage * coverage;
+
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestSrc = si;
+                        bestCoverage = coverage;
+                        bestDistSq = centDistSq;
+                    }
+                }
+
+                if (bestSrc >= 0 && bestCoverage >= kCoverageAcceptThreshold)
+                {
+                    int oldSrc = targetShellToSourceShell[tsi];
+                    tgtIsMerged[tsi] = false;
+                    targetShellToSourceShell[tsi] = bestSrc;
+                    targetShellMatchDistSqr[tsi] = bestDistSq;
+                    tgtChosenAvg3D[tsi] = bestDistSq;
+                    rescued++;
+
+                    UvtLog.Info($"[GroupedTransfer] Rescore: t{tsi} rescued from merged " +
+                        $"(src{oldSrc}→src{bestSrc}, score={bestScore:F3}, " +
+                        $"coverage={bestCoverage:F3})");
+                }
+            }
+
+            if (rescued > 0)
+                UvtLog.Info($"[GroupedTransfer] Rescore: {rescued} shells rescued from merged");
+        }
+
+        // ═══════════════════════════════════════════════════════════
         //  Transfer: Shell-first matching, interpolation primary
         //
         //  Phase 1:  Extract UV0 shells from source & target
@@ -484,6 +636,24 @@ namespace LightmapUvTool
                 srcAABBMax[si] = bMax;
             }
 
+            // Precompute per-source-shell average face normal + total UV0 area
+            var srcAvgNormal = new Vector3[srcShells.Count];
+            var srcUv0Area = new float[srcShells.Count];
+            for (int si = 0; si < srcShells.Count; si++)
+            {
+                Vector3 nSum = Vector3.zero;
+                double areaSum = 0;
+                foreach (int f in srcShells[si].faceIndices)
+                {
+                    nSum += triNormal[f];
+                    float cross = (triUv0B[f].x - triUv0A[f].x) * (triUv0C[f].y - triUv0A[f].y)
+                                - (triUv0C[f].x - triUv0A[f].x) * (triUv0B[f].y - triUv0A[f].y);
+                    areaSum += Mathf.Abs(cross) * 0.5f;
+                }
+                srcAvgNormal[si] = nSum.sqrMagnitude > 1e-8f ? nSum.normalized : Vector3.up;
+                srcUv0Area[si] = (float)areaSum;
+            }
+
             // ── Mesh-scale metrics for adaptive thresholds ──
             Vector3 srcBoundsMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
             Vector3 srcBoundsMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
@@ -572,6 +742,29 @@ namespace LightmapUvTool
             var tgtChosenAvg3D = new float[tgtShells.Count];
             var tgtIsMerged = new bool[tgtShells.Count];
 
+            // Precompute per-target-shell average face normal + total UV0 area
+            var tgtAvgNormal = new Vector3[tgtShells.Count];
+            var tgtUv0Area = new float[tgtShells.Count];
+            for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+            {
+                Vector3 nSum = Vector3.zero;
+                double areaSum = 0;
+                foreach (int f in tgtShells[tsi].faceIndices)
+                {
+                    int i0 = tgtTris[f * 3], i1 = tgtTris[f * 3 + 1], i2 = tgtTris[f * 3 + 2];
+                    if (i0 >= tVerts.Length || i1 >= tVerts.Length || i2 >= tVerts.Length) continue;
+                    nSum += Vector3.Cross(tVerts[i1] - tVerts[i0], tVerts[i2] - tVerts[i0]).normalized;
+                    if (i0 < tUv0.Length && i1 < tUv0.Length && i2 < tUv0.Length)
+                    {
+                        float cross = (tUv0[i1].x - tUv0[i0].x) * (tUv0[i2].y - tUv0[i0].y)
+                                    - (tUv0[i2].x - tUv0[i0].x) * (tUv0[i1].y - tUv0[i0].y);
+                        areaSum += Mathf.Abs(cross) * 0.5f;
+                    }
+                }
+                tgtAvgNormal[tsi] = nSum.sqrMagnitude > 1e-8f ? nSum.normalized : Vector3.up;
+                tgtUv0Area[tsi] = (float)areaSum;
+            }
+
             for (int i = 0; i < tgtShells.Count; i++)
             {
                 result.targetShellToSourceShell[i] = -1;
@@ -611,6 +804,21 @@ namespace LightmapUvTool
                     srcShells[chosenSrc].faceIndices, triUv0A, triUv0B, triUv0C,
                     shellUv0Bvh[chosenSrc], kUv0BadThreshold);
             }
+
+            // ── Phase 2a+: Rescore merged shells with multi-criteria matching ──
+            RescoreMergedShells(
+                tgtShells, srcShells,
+                tVerts, tUv0, tgtTris,
+                triUv0A, triUv0B, triUv0C,
+                shellUv0Bvh, srcCentroid3D,
+                srcAvgNormal, srcUv0Area,
+                tgtAvgNormal, tgtUv0Area,
+                meshDiagonal, kUv0BadThreshold,
+                tgtIsMerged,
+                result.targetShellToSourceShell,
+                result.targetShellMatchDistSqr,
+                tgtChosenAvg3D,
+                result.targetShellCentroids);
 
             // ── Phase 2b: Deduplicate — resolve same-source conflicts ──
             // When multiple non-merged target shells claim the same source shell
