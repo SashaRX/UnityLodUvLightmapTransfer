@@ -28,6 +28,8 @@ namespace LightmapUvTool
 
         const int kMinFacesForPartition = 4;
         const int kGridResolution = 128;
+        const float kMinNormalMagnitudeSq = 1e-8f;
+        const float kMinNormalDotGapForReliableMatch = 0.05f;
 
         /// <summary>
         /// Partition source shells by detecting UV0 overlap and splitting via
@@ -144,7 +146,9 @@ namespace LightmapUvTool
 
         /// <summary>
         /// Find the best-matching source partition for a target shell.
-        /// Uses normal similarity when available (thin belts), falls back to 3D centroid.
+        /// Prefers normal similarity when target/partition normals are valid and
+        /// clearly distinguish partitions; otherwise falls back to 3D centroid distance.
+        /// Logs why normal-vs-centroid branch was selected for diagnostics.
         /// </summary>
         public static int MatchPartition(ShellPartitionResult srcPartition,
             Vector3 targetCentroid3D, Vector3 targetNormal)
@@ -154,24 +158,55 @@ namespace LightmapUvTool
 
             // Prefer normal-based matching when partition normals are available
             // and normals are sufficiently different between partitions
-            if (srcPartition.partitionNormal != null)
+            if (srcPartition.partitionNormal != null &&
+                srcPartition.partitionNormal.Length >= srcPartition.partitionCount)
             {
+                if (!IsValidNormal(targetNormal))
+                    return MatchByCentroid(srcPartition, targetCentroid3D, "invalid target normal");
+
+                Vector3 targetN = targetNormal.normalized;
                 int bestPart = 0;
                 float bestDot = -2f;
+                float secondDot = -2f;
+                int validNormals = 0;
+
                 for (int pi = 0; pi < srcPartition.partitionCount; pi++)
                 {
-                    float dot = Vector3.Dot(srcPartition.partitionNormal[pi], targetNormal);
+                    Vector3 partN = srcPartition.partitionNormal[pi];
+                    if (!IsValidNormal(partN))
+                        continue;
+
+                    validNormals++;
+                    float dot = Vector3.Dot(partN.normalized, targetN);
                     if (dot > bestDot)
                     {
+                        secondDot = bestDot;
                         bestDot = dot;
                         bestPart = pi;
                     }
+                    else if (dot > secondDot)
+                    {
+                        secondDot = dot;
+                    }
                 }
+
+                if (validNormals < 2)
+                    return MatchByCentroid(srcPartition, targetCentroid3D, $"only {validNormals} valid partition normal(s)");
+
+                float dotGap = bestDot - secondDot;
+                if (dotGap <= kMinNormalDotGapForReliableMatch)
+                    return MatchByCentroid(srcPartition, targetCentroid3D, $"normal ambiguity: gap={dotGap:F4} <= {kMinNormalDotGapForReliableMatch:F4}");
+
+                UvtLog.Verbose($"[SpatialPartitioner] MatchPartition: normal match, part={bestPart}, bestDot={bestDot:F4}, secondDot={secondDot:F4}, gap={dotGap:F4}");
                 return bestPart;
             }
 
-            // Fallback: 3D centroid distance
-            int bestPartC = 0;
+            return MatchByCentroid(srcPartition, targetCentroid3D, "partition normals unavailable");
+        }
+
+        static int MatchByCentroid(ShellPartitionResult srcPartition, Vector3 targetCentroid3D, string reason)
+        {
+            int bestPart = 0;
             float bestDistSq = float.MaxValue;
             for (int pi = 0; pi < srcPartition.partitionCount; pi++)
             {
@@ -179,10 +214,23 @@ namespace LightmapUvTool
                 if (dSq < bestDistSq)
                 {
                     bestDistSq = dSq;
-                    bestPartC = pi;
+                    bestPart = pi;
                 }
             }
-            return bestPartC;
+
+            UvtLog.Verbose($"[SpatialPartitioner] MatchPartition: centroid fallback ({reason}), part={bestPart}, distSq={bestDistSq:F6}");
+            return bestPart;
+        }
+
+        static bool IsFiniteVector(Vector3 v)
+        {
+            return !(float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z) ||
+                     float.IsInfinity(v.x) || float.IsInfinity(v.y) || float.IsInfinity(v.z));
+        }
+
+        static bool IsValidNormal(Vector3 n)
+        {
+            return IsFiniteVector(n) && n.sqrMagnitude > kMinNormalMagnitudeSq;
         }
 
         /// <summary>
