@@ -1071,8 +1071,14 @@ namespace LightmapUvTool
                         var faceMap = shellBvh3DFaceMap[si];
                         var srcNormals = shellBvh3DFaceNormals[si];
 
+                        // Partition info for this source shell
+                        var srcPR = srcPartitions[si];
+                        bool hasPart = srcPR.hasOverlap && srcPR.partitionCount > 1
+                            && partitionBvh[si] != null;
+
+                        // ── Candidate A: ray/nearest with partition filtering ──
                         var candidateRay = new Dictionary<int, Vector2>();
-                        int rayHits = 0, fallbacks = 0;
+                        int rayHits = 0;
 
                         foreach (int vi in tShell.vertexIndices)
                         {
@@ -1080,6 +1086,11 @@ namespace LightmapUvTool
                             Vector3 tPos = tVerts[vi];
                             Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
                                 ? tNormals[vi] : Vector3.up;
+
+                            // Per-vertex partition matching
+                            int vertexPid = -1;
+                            if (hasPart)
+                                vertexPid = SpatialPartitioner.MatchPartition(srcPR, tPos, tNrm);
 
                             int hitFace = -1;
                             Vector3 hitBary = Vector3.zero;
@@ -1091,9 +1102,21 @@ namespace LightmapUvTool
                                     tPos, tNrm.normalized, kRayMaxDist);
                                 if (rayHit.triangleIndex >= 0)
                                 {
-                                    hitFace = rayHit.triangleIndex;
-                                    hitBary = rayHit.barycentric;
-                                    rayHits++;
+                                    // Partition filter: reject hits from wrong partition
+                                    int gf = (rayHit.triangleIndex < faceMap.Length)
+                                        ? faceMap[rayHit.triangleIndex] : -1;
+                                    bool partOk = true;
+                                    if (vertexPid >= 0 && gf >= 0 &&
+                                        srcPR.facePartitionId.TryGetValue(gf, out int fp) &&
+                                        fp != vertexPid)
+                                        partOk = false;
+
+                                    if (partOk)
+                                    {
+                                        hitFace = rayHit.triangleIndex;
+                                        hitBary = rayHit.barycentric;
+                                        rayHits++;
+                                    }
                                 }
                             }
 
@@ -1104,9 +1127,36 @@ namespace LightmapUvTool
                                     tPos, tNrm, srcNormals, 0.3f);
                                 if (nearest.triangleIndex >= 0)
                                 {
-                                    hitFace = nearest.triangleIndex;
-                                    hitBary = nearest.barycentric;
-                                    fallbacks++;
+                                    int gf = (nearest.triangleIndex < faceMap.Length)
+                                        ? faceMap[nearest.triangleIndex] : -1;
+                                    bool partOk = true;
+                                    if (vertexPid >= 0 && gf >= 0 &&
+                                        srcPR.facePartitionId.TryGetValue(gf, out int fp2) &&
+                                        fp2 != vertexPid)
+                                        partOk = false;
+
+                                    if (partOk)
+                                    {
+                                        hitFace = nearest.triangleIndex;
+                                        hitBary = nearest.barycentric;
+                                    }
+                                }
+                            }
+
+                            // Partition-constrained UV0-interp fallback for rejected vertices
+                            if (hitFace < 0 && vertexPid >= 0 && vi < tUv0.Length)
+                            {
+                                var pBvh = partitionBvh[si][vertexPid];
+                                if (pBvh != null)
+                                {
+                                    var hit = pBvh.FindNearest(tUv0[vi]);
+                                    if (hit.faceIndex >= 0)
+                                    {
+                                        candidateRay[vi] = triUv2A[hit.faceIndex] * hit.u
+                                                         + triUv2B[hit.faceIndex] * hit.v
+                                                         + triUv2C[hit.faceIndex] * hit.w;
+                                        continue; // vertex done
+                                    }
                                 }
                             }
 
@@ -1119,47 +1169,94 @@ namespace LightmapUvTool
                             }
                         }
 
-                        int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateRay);
+                        int issuesRay = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateRay);
 
-                        // Pick source with most ray hits; break ties by fewer issues
-                        if (rayHits > bestRayHits
-                            || (rayHits == bestRayHits && issues < bestRayIssues))
+                        // Compare: fewer issues wins; ties broken by more coverage
+                        if (issuesRay < bestRayIssues
+                            || (issuesRay == bestRayIssues && candidateRay.Count > (bestRayUv2 != null ? bestRayUv2.Count : 0)))
                         {
                             bestRayUv2 = candidateRay;
-                            bestRayIssues = issues;
-                            bestRayHits = rayHits;
+                            bestRayIssues = issuesRay;
+                            bestRayHits = candidateRay.Count;
                             bestRaySrc = si;
+                        }
+
+                        // ── Candidate B: pure partition-constrained UV0-interp ──
+                        if (hasPart)
+                        {
+                            var candidatePart = new Dictionary<int, Vector2>();
+
+                            foreach (int vi in tShell.vertexIndices)
+                            {
+                                if (vi >= tUv0.Length || vi >= tVerts.Length) continue;
+                                Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
+                                    ? tNormals[vi] : Vector3.up;
+                                Vector3 tPos = tVerts[vi];
+
+                                int pid = SpatialPartitioner.MatchPartition(srcPR, tPos, tNrm);
+                                if (pid < 0 || partitionBvh[si][pid] == null) continue;
+
+                                var hit = partitionBvh[si][pid].FindNearest(tUv0[vi]);
+                                if (hit.faceIndex >= 0)
+                                {
+                                    candidatePart[vi] = triUv2A[hit.faceIndex] * hit.u
+                                                      + triUv2B[hit.faceIndex] * hit.v
+                                                      + triUv2C[hit.faceIndex] * hit.w;
+                                }
+                            }
+
+                            int issuesPart = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidatePart);
+
+                            if (issuesPart < bestRayIssues
+                                || (issuesPart == bestRayIssues && candidatePart.Count > (bestRayUv2 != null ? bestRayUv2.Count : 0)))
+                            {
+                                bestRayUv2 = candidatePart;
+                                bestRayIssues = issuesPart;
+                                bestRayHits = candidatePart.Count;
+                                bestRaySrc = si;
+                            }
                         }
                     }
 
                     if (bestRayUv2 != null && bestRayUv2.Count > 0)
                     {
+                        // Fall through to merged path if issues are too high —
+                        // the cascade there (strip param → partition BVH) may do better
+                        bool tooManyIssues = bestRayIssues > tShell.faceIndices.Count / 2;
+
                         UvtLog.Info($"[GroupedTransfer]   t{tsi}: overlap try-all ray " +
-                            $"(best src{bestRaySrc}, {bestRayHits} hits, " +
-                            $"{bestRayIssues} issues, tried {groupMembers.Count} shells)");
+                            $"(best src{bestRaySrc}, {bestRayHits} cov, " +
+                            $"{bestRayIssues} issues, tried {groupMembers.Count} shells" +
+                            (tooManyIssues ? " → fall-through" : "") + ")");
 
-                        foreach (var kv in bestRayUv2)
+                        if (!tooManyIssues)
                         {
-                            result.uv2[kv.Key] = kv.Value;
-                            result.vertexToSourceShell[kv.Key] = bestRaySrc;
-                            transferred++;
-                        }
-                        result.targetShellToSourceShell[tsi] = bestRaySrc;
-                        shellsMerged++;
-                        result.targetShellMethod[tsi] = 2;
-
-                        // Record UV2 AABB for cross-shell overlap prevention
-                        {
-                            Vector2 rMin = new Vector2(float.MaxValue, float.MaxValue);
-                            Vector2 rMax = new Vector2(float.MinValue, float.MinValue);
                             foreach (var kv in bestRayUv2)
                             {
-                                rMin = Vector2.Min(rMin, kv.Value);
-                                rMax = Vector2.Max(rMax, kv.Value);
+                                result.uv2[kv.Key] = kv.Value;
+                                result.vertexToSourceShell[kv.Key] = bestRaySrc;
+                                transferred++;
                             }
-                            placedShellUv2Regions.Add((rMin, rMax, bestRaySrc));
+                            result.targetShellToSourceShell[tsi] = bestRaySrc;
+                            shellsMerged++;
+                            result.targetShellMethod[tsi] = 2;
+
+                            // Record UV2 AABB for cross-shell overlap prevention
+                            {
+                                Vector2 rMin = new Vector2(float.MaxValue, float.MaxValue);
+                                Vector2 rMax = new Vector2(float.MinValue, float.MinValue);
+                                foreach (var kv in bestRayUv2)
+                                {
+                                    rMin = Vector2.Min(rMin, kv.Value);
+                                    rMax = Vector2.Max(rMax, kv.Value);
+                                }
+                                placedShellUv2Regions.Add((rMin, rMax, bestRaySrc));
+                            }
+                            continue;
                         }
-                        continue;
+                        // Fall through: update chosenSrc to best source from ray analysis
+                        chosenSrc = bestRaySrc;
+                        srcFacesChosen = srcShells[chosenSrc].faceIndices;
                     }
                 }
 
