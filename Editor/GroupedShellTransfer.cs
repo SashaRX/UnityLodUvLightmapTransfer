@@ -1034,6 +1034,10 @@ namespace LightmapUvTool
             // Track UV2 AABBs of placed force3D shells to prevent mutual overlap
             var force3DUsedRegions = new List<(Vector2 min, Vector2 max)>();
 
+            // Track UV2 AABBs of ALL placed shells to prevent cross-source UV2 overlap
+            // (merged shells from wrong source can wander into another source's UV2 region)
+            var placedShellUv2Regions = new List<(Vector2 min, Vector2 max, int srcShell)>();
+
             for (int tsi = 0; tsi < tgtShells.Count; tsi++)
             {
                 var tShell = tgtShells[tsi];
@@ -1143,6 +1147,18 @@ namespace LightmapUvTool
                         result.targetShellToSourceShell[tsi] = bestRaySrc;
                         shellsMerged++;
                         result.targetShellMethod[tsi] = 2;
+
+                        // Record UV2 AABB for cross-shell overlap prevention
+                        {
+                            Vector2 rMin = new Vector2(float.MaxValue, float.MaxValue);
+                            Vector2 rMax = new Vector2(float.MinValue, float.MinValue);
+                            foreach (var kv in bestRayUv2)
+                            {
+                                rMin = Vector2.Min(rMin, kv.Value);
+                                rMax = Vector2.Max(rMax, kv.Value);
+                            }
+                            placedShellUv2Regions.Add((rMin, rMax, bestRaySrc));
+                        }
                         continue;
                     }
                 }
@@ -1194,6 +1210,9 @@ namespace LightmapUvTool
                             {
                                 if (srcFacesChosen == null) break; // pass 0 was already all-source
                                 if (bestMergedIssues == 0) break;  // constrained was clean
+                                // Small/degenerate shells: stay constrained to avoid
+                                // wandering into wrong source's UV2 region
+                                if (tShell.faceIndices.Count <= 4) break;
                                 constrained = false;               // all-source
                             }
                         }
@@ -1376,6 +1395,21 @@ namespace LightmapUvTool
                             {
                                 foreach (var region in force3DUsedRegions)
                                 {
+                                    if (candMin.x < region.max.x && candMax.x > region.min.x &&
+                                        candMin.y < region.max.y && candMax.y > region.min.y)
+                                    {
+                                        issues = int.MaxValue;
+                                        break;
+                                    }
+                                }
+                            }
+                            // Check against UV2 regions placed by ALL previously transferred shells
+                            // Prevents merged shells from landing in another source's UV2 region
+                            if (issues < int.MaxValue)
+                            {
+                                foreach (var region in placedShellUv2Regions)
+                                {
+                                    if (region.srcShell >= 0 && region.srcShell == chosenSrc) continue;
                                     if (candMin.x < region.max.x && candMax.x > region.min.x &&
                                         candMin.y < region.max.y && candMax.y > region.min.y)
                                     {
@@ -1686,11 +1720,27 @@ namespace LightmapUvTool
 
                 // Write chosen UV2
                 int srcForLog = chosenSrc >= 0 ? chosenSrc : -1;
-                foreach (var kv in chosenUv2)
+                if (chosenUv2 != null)
                 {
-                    result.uv2[kv.Key] = kv.Value;
-                    result.vertexToSourceShell[kv.Key] = srcForLog;
-                    transferred++;
+                    foreach (var kv in chosenUv2)
+                    {
+                        result.uv2[kv.Key] = kv.Value;
+                        result.vertexToSourceShell[kv.Key] = srcForLog;
+                        transferred++;
+                    }
+
+                    // Record UV2 AABB for cross-shell overlap prevention
+                    if (chosenUv2.Count > 0)
+                    {
+                        Vector2 rMin = new Vector2(float.MaxValue, float.MaxValue);
+                        Vector2 rMax = new Vector2(float.MinValue, float.MinValue);
+                        foreach (var kv in chosenUv2)
+                        {
+                            rMin = Vector2.Min(rMin, kv.Value);
+                            rMax = Vector2.Max(rMax, kv.Value);
+                        }
+                        placedShellUv2Regions.Add((rMin, rMax, srcForLog));
+                    }
                 }
             }
 
