@@ -634,6 +634,41 @@ namespace LightmapUvTool
                 }
             }
 
+            // Per-partition similarity transforms for overlapping shells
+            // Each partition has a unique UV0→UV2 mapping, so we can compute
+            // a clean transform that preserves aspect ratios (unlike per-vertex interp).
+            var partitionXform = new SimilarityTransform[srcShells.Count][];
+            for (int si = 0; si < srcShells.Count; si++)
+            {
+                var pr = srcPartitions[si];
+                if (pr.hasOverlap && pr.partitionCount > 1)
+                {
+                    partitionXform[si] = new SimilarityTransform[pr.partitionCount];
+                    for (int pi = 0; pi < pr.partitionCount; pi++)
+                    {
+                        var partFaces = SpatialPartitioner.GetPartitionFaces(srcShells[si], pr, pi);
+                        if (partFaces.Length == 0) continue;
+                        var partVertSet = new HashSet<int>();
+                        foreach (int f in partFaces)
+                        {
+                            partVertSet.Add(srcTris[f * 3]);
+                            partVertSet.Add(srcTris[f * 3 + 1]);
+                            partVertSet.Add(srcTris[f * 3 + 2]);
+                        }
+                        var partVertArr = new int[partVertSet.Count];
+                        partVertSet.CopyTo(partVertArr);
+
+                        var partFaceList = new List<int>(partFaces);
+                        float saUv0p = ComputeSignedArea(srcTris, srcUv0, partFaceList);
+                        float saUv2p = ComputeSignedArea(srcTris, srcUv2, partFaceList);
+                        bool mirroredP = saUv0p * saUv2p < 0f;
+
+                        partitionXform[si][pi] = ComputeSimilarityTransform(
+                            srcUv0, srcUv2, partVertArr, mirroredP);
+                    }
+                }
+            }
+
             // ── Phase 1b: Precompute similarity transform per source shell ──
             var srcTransforms = new SimilarityTransform[srcShells.Count];
             for (int si = 0; si < srcShells.Count; si++)
@@ -1213,6 +1248,37 @@ namespace LightmapUvTool
                                 bestRayUv2 = candidatePart;
                                 bestRayIssues = issuesPart;
                                 bestRayHits = candidatePart.Count;
+                                bestRaySrc = si;
+                            }
+                        }
+
+                        // ── Candidate C: per-partition similarity transform ──
+                        // Preserves aspect ratios unlike per-vertex interpolation.
+                        if (hasPart && partitionXform[si] != null)
+                        {
+                            var candidateXf = new Dictionary<int, Vector2>();
+
+                            foreach (int vi in tShell.vertexIndices)
+                            {
+                                if (vi >= tUv0.Length || vi >= tVerts.Length) continue;
+                                Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
+                                    ? tNormals[vi] : Vector3.up;
+                                Vector3 tPos = tVerts[vi];
+
+                                int pid = SpatialPartitioner.MatchPartition(srcPR, tPos, tNrm);
+                                if (pid < 0 || !partitionXform[si][pid].valid) continue;
+
+                                candidateXf[vi] = partitionXform[si][pid].Apply(tUv0[vi]);
+                            }
+
+                            int issuesXf = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateXf);
+
+                            if (issuesXf < bestRayIssues
+                                || (issuesXf == bestRayIssues && candidateXf.Count > (bestRayUv2 != null ? bestRayUv2.Count : 0)))
+                            {
+                                bestRayUv2 = candidateXf;
+                                bestRayIssues = issuesXf;
+                                bestRayHits = candidateXf.Count;
                                 bestRaySrc = si;
                             }
                         }
