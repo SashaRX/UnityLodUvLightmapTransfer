@@ -597,6 +597,25 @@ namespace LightmapUvTool
                 foreach (int f in tgtShells[tsi].faceIndices)
                     result.faceToTargetShell[f] = tsi;
 
+            // ── Spatial partitioning for overlapping UV0 shells ──
+            var srcPartitions = SpatialPartitioner.PartitionShells(
+                srcShells, srcUv0, srcTris, srcVerts);
+
+            // Pre-detect ribbon shells in source (for Approach C)
+            var srcIsRibbon = new bool[srcShells.Count];
+            var srcRibbonAxis = new Vector3[srcShells.Count];
+            var srcRibbonAxis2 = new Vector3[srcShells.Count];
+            var srcRibbonCentroid = new Vector3[srcShells.Count];
+            for (int si = 0; si < srcShells.Count; si++)
+            {
+                if (srcPartitions[si].hasOverlap)
+                {
+                    srcIsRibbon[si] = StripParameterization.IsRibbon(
+                        srcShells[si], srcVerts, srcTris,
+                        out srcRibbonAxis[si], out srcRibbonAxis2[si], out srcRibbonCentroid[si]);
+                }
+            }
+
             // ── Phase 1b: Precompute similarity transform per source shell ──
             var srcTransforms = new SimilarityTransform[srcShells.Count];
             for (int si = 0; si < srcShells.Count; si++)
@@ -1197,80 +1216,147 @@ namespace LightmapUvTool
                     }
 
                     // ── Pass 2: UV0-only constrained fallback for broken force3D ──
-                    // When 3D projection fails on thin wrapping geometry (belt, strap),
-                    // UV0 interpolation constrained to the source shell gives UV2 that
-                    // matches the source LOD0 layout. Same-source overlap is correct
-                    // for tiling geometry — both shells sample the same lightmap texels.
+                    // Cascade: C (strip param) → A/B (partition BVH) → original (normal filter)
                     if (force3D && bestMergedIssues > tShell.faceIndices.Count / 2
                         && chosenSrc >= 0 && srcFacesChosen != null)
                     {
-                        var candidateUv0 = new Dictionary<int, Vector2>();
-                        int localFixesUv0 = 0;
+                        var partResult = srcPartitions[chosenSrc];
+                        bool usedPartition = false;
 
-                        // Use source shell's UV0 BVH for lookup
-                        TriangleBvh2D uv0Bvh = shellUv0Bvh[chosenSrc];
-
-                        foreach (int vi in tShell.vertexIndices)
+                        // ── Approach C: Strip parameterization for ribbon shells ──
+                        if (srcIsRibbon[chosenSrc] && partResult.hasOverlap)
                         {
-                            if (vi >= tUv0.Length) continue;
-                            Vector2 tUv = tUv0[vi];
+                            var candidateStrip = StripParameterization.Transfer(
+                                tShell, srcShells[chosenSrc],
+                                tVerts, srcVerts, srcUv0, srcUv2, srcTris,
+                                triUv2A, triUv2B, triUv2C,
+                                srcRibbonAxis[chosenSrc], srcRibbonAxis2[chosenSrc],
+                                srcRibbonCentroid[chosenSrc]);
 
-                            int bestF = -1;
-                            float bestU = 0, bestV = 0, bestW = 0;
-                            float bestDSq = float.MaxValue;
-
-                            // Inverted normal filter: force3D shells have normals opposing
-                            // the source. Negate target normal so the filter finds the
-                            // correct opposing source face (belt -X → finds source +X).
-                            // Falls back to nearest-any if no opposing face found.
-                            Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
-                                ? tNormals[vi] : Vector3.up;
-
-                            if (uv0Bvh != null)
+                            int issuesStrip = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateStrip);
+                            if (issuesStrip < bestMergedIssues)
                             {
-                                var hit = tNrm.sqrMagnitude > 0.5f
-                                    ? uv0Bvh.FindNearestNormalFiltered(tUv, -tNrm, triNormal, kBackfaceDot)
-                                    : uv0Bvh.FindNearest(tUv);
-                                bestF = hit.faceIndex;
-                                bestU = hit.u; bestV = hit.v; bestW = hit.w;
-                                bestDSq = hit.distSq;
-                            }
-                            else
-                            {
-                                // Linear fallback over source faces
-                                for (int fi = 0; fi < srcFacesChosen.Count; fi++)
-                                {
-                                    int f = srcFacesChosen[fi];
-                                    float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
-                                        out float u, out float v, out float w);
-                                    if (dSq < bestDSq)
-                                    { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
-                                    if (bestDSq < 1e-8f) break;
-                                }
-                            }
+                                bestMergedIssues = issuesStrip;
+                                bestMergedUv2 = candidateStrip;
+                                bestMergedConsistencyFixes = 0;
+                                bestWasConstrained = true;
+                                usedPartition = true;
 
-                            if (bestF >= 0)
-                            {
-                                // UV0 interpolation → UV2 (NO 3D override)
-                                candidateUv0[vi] = triUv2A[bestF] * bestU
-                                                 + triUv2B[bestF] * bestV
-                                                 + triUv2C[bestF] * bestW;
+                                UvtLog.Info($"[GroupedTransfer]   t{tsi}: strip parameterization transfer " +
+                                    $"({issuesStrip} issues)");
                             }
                         }
 
-                        int issuesUv0 = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateUv0);
-
-                        // Accept if better than 3D result. NO overlap guard — same-source
-                        // overlap is correct for tiling geometry.
-                        if (issuesUv0 < bestMergedIssues)
+                        // ── Approach A/B: Partition-constrained BVH ──
+                        if (!usedPartition && partResult.hasOverlap && partResult.partitionCount > 1)
                         {
-                            bestMergedIssues = issuesUv0;
-                            bestMergedUv2 = candidateUv0;
-                            bestMergedConsistencyFixes = localFixesUv0;
-                            bestWasConstrained = true;
+                            Vector3 tgtCentroid3D = result.targetShellCentroids[tsi];
+                            int matchedPartId = SpatialPartitioner.MatchPartition(partResult, tgtCentroid3D);
 
-                            UvtLog.Info($"[GroupedTransfer]   t{tsi}: UV0-interp fallback " +
-                                $"({issuesUv0} issues, was 3D-primary)");
+                            if (matchedPartId >= 0)
+                            {
+                                var partFaces = SpatialPartitioner.GetPartitionFaces(
+                                    srcShells[chosenSrc], partResult, matchedPartId);
+
+                                if (partFaces.Length > 0)
+                                {
+                                    var partBvh = new TriangleBvh2D(triUv0A, triUv0B, triUv0C, partFaces);
+                                    var candidatePart = new Dictionary<int, Vector2>();
+
+                                    foreach (int vi in tShell.vertexIndices)
+                                    {
+                                        if (vi >= tUv0.Length) continue;
+                                        Vector2 tUv = tUv0[vi];
+
+                                        // Partition-constrained lookup — NO normal filter needed,
+                                        // partition already disambiguates overlapping sides
+                                        var hit = partBvh.FindNearest(tUv);
+                                        if (hit.faceIndex >= 0)
+                                        {
+                                            candidatePart[vi] = triUv2A[hit.faceIndex] * hit.u
+                                                              + triUv2B[hit.faceIndex] * hit.v
+                                                              + triUv2C[hit.faceIndex] * hit.w;
+                                        }
+                                    }
+
+                                    int issuesPart = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidatePart);
+                                    if (issuesPart < bestMergedIssues)
+                                    {
+                                        bestMergedIssues = issuesPart;
+                                        bestMergedUv2 = candidatePart;
+                                        bestMergedConsistencyFixes = 0;
+                                        bestWasConstrained = true;
+                                        usedPartition = true;
+
+                                        UvtLog.Info($"[GroupedTransfer]   t{tsi}: partition-constrained UV0-interp " +
+                                            $"(srcPartition={matchedPartId}, {issuesPart} issues)");
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Original fallback: inverted normal filter ──
+                        if (!usedPartition)
+                        {
+                            var candidateUv0 = new Dictionary<int, Vector2>();
+                            int localFixesUv0 = 0;
+
+                            TriangleBvh2D uv0Bvh = shellUv0Bvh[chosenSrc];
+
+                            foreach (int vi in tShell.vertexIndices)
+                            {
+                                if (vi >= tUv0.Length) continue;
+                                Vector2 tUv = tUv0[vi];
+
+                                int bestF = -1;
+                                float bestU = 0, bestV = 0, bestW = 0;
+                                float bestDSq = float.MaxValue;
+
+                                Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
+                                    ? tNormals[vi] : Vector3.up;
+
+                                if (uv0Bvh != null)
+                                {
+                                    var hit = tNrm.sqrMagnitude > 0.5f
+                                        ? uv0Bvh.FindNearestNormalFiltered(tUv, -tNrm, triNormal, kBackfaceDot)
+                                        : uv0Bvh.FindNearest(tUv);
+                                    bestF = hit.faceIndex;
+                                    bestU = hit.u; bestV = hit.v; bestW = hit.w;
+                                    bestDSq = hit.distSq;
+                                }
+                                else
+                                {
+                                    for (int fi = 0; fi < srcFacesChosen.Count; fi++)
+                                    {
+                                        int f = srcFacesChosen[fi];
+                                        float dSq = PointToTri2D(tUv, triUv0A[f], triUv0B[f], triUv0C[f],
+                                            out float u, out float v, out float w);
+                                        if (dSq < bestDSq)
+                                        { bestDSq = dSq; bestF = f; bestU = u; bestV = v; bestW = w; }
+                                        if (bestDSq < 1e-8f) break;
+                                    }
+                                }
+
+                                if (bestF >= 0)
+                                {
+                                    candidateUv0[vi] = triUv2A[bestF] * bestU
+                                                     + triUv2B[bestF] * bestV
+                                                     + triUv2C[bestF] * bestW;
+                                }
+                            }
+
+                            int issuesUv0 = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateUv0);
+
+                            if (issuesUv0 < bestMergedIssues)
+                            {
+                                bestMergedIssues = issuesUv0;
+                                bestMergedUv2 = candidateUv0;
+                                bestMergedConsistencyFixes = localFixesUv0;
+                                bestWasConstrained = true;
+
+                                UvtLog.Info($"[GroupedTransfer]   t{tsi}: UV0-interp fallback " +
+                                    $"({issuesUv0} issues, was 3D-primary)");
+                            }
                         }
                     }
 
