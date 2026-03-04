@@ -76,9 +76,6 @@ namespace LightmapUvTool
                     continue;
                 }
 
-                UvtLog.Verbose($"[SpatialPartitioner] Shell {si}: overlap detected " +
-                    $"({overlappingFaces.Count} faces in overlap zones)");
-
                 // Step 3: Flood-fill → connected components (Approach A)
                 var components = FloodFillComponents(shell.faceIndices, adjacency);
 
@@ -93,15 +90,9 @@ namespace LightmapUvTool
                         r.partitionCentroid[ci] = ComputePartitionCentroid(
                             components[ci], triangles, vertices);
                     }
-
-                    UvtLog.Verbose($"[SpatialPartitioner] Shell {si}: flood-fill → " +
-                        $"{components.Count} partitions ({PartitionSizes(components)} faces)");
                 }
                 else
                 {
-                    UvtLog.Verbose($"[SpatialPartitioner] Shell {si}: flood-fill → " +
-                        $"1 partition (connected mesh)");
-
                     // Step 4: Approach B — forced split by 3D proximity
                     var split = ForceSplitByProximity(
                         shell, overlappingFaces, adjacency, triangles, vertices);
@@ -117,21 +108,27 @@ namespace LightmapUvTool
                             r.partitionCentroid[ci] = ComputePartitionCentroid(
                                 split[ci], triangles, vertices);
                         }
-
-                        UvtLog.Verbose($"[SpatialPartitioner] Shell {si}: forced 3D split → " +
-                            $"2 partitions ({split[0].Count} + {split[1].Count} faces)");
                     }
                     else
                     {
                         r.partitionCentroid = new[] {
                             ComputePartitionCentroid(shell.faceIndices, triangles, vertices) };
-                        UvtLog.Verbose($"[SpatialPartitioner] Shell {si}: " +
-                            $"forced split failed, staying as 1 partition");
                     }
                 }
 
                 results[si] = r;
             }
+
+            // Summary log: only shells with overlap
+            int overlapCount = 0, partitionedCount = 0;
+            for (int si = 0; si < results.Length; si++)
+            {
+                if (results[si].hasOverlap) overlapCount++;
+                if (results[si].partitionCount > 1) partitionedCount++;
+            }
+            if (overlapCount > 0)
+                UvtLog.Info($"[SpatialPartitioner] {overlapCount} shells with UV0 overlap, " +
+                    $"{partitionedCount} partitioned");
 
             return results;
         }
