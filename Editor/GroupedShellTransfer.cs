@@ -1058,20 +1058,23 @@ namespace LightmapUvTool
                     // Normal merged: constrained first, all-source fallback (unchanged).
                     bool force3D = tgtForce3DFallback[tsi];
 
-                    // ── Direct 3D projection for overlapping UV0 shells ──
-                    // When source shell has UV0 overlap, UV0-based matching is unreliable.
-                    // Instead: 3D BVH lookup → nearest normal-compatible source triangle
-                    // → barycentric UV2 interpolation. Bypasses UV0 entirely.
+                    // ── Ray-along-normal projection for overlapping UV0 shells ──
+                    // When source shell has UV0 overlap (belts, straps), UV0-based
+                    // matching is unreliable. Instead: raycast from LOD1 vertex along
+                    // its normal → find LOD0 triangle intersection → barycentric UV2.
+                    // This naturally separates inner/outer on thin geometry.
+                    // Fallback to nearest-point with normal filter for ray misses.
                     if (chosenSrc >= 0 && srcPartitions[chosenSrc].hasOverlap
-                        && shellBvh3D[chosenSrc] != null
-                        && shellBvh3DFaceNormals[chosenSrc] != null)
+                        && shellBvh3D[chosenSrc] != null)
                     {
-                        const float kOverlapNormalDot = 0.0f; // reject back-facing (dot < 0)
+                        const float kRayMaxDist = 0.5f;
+                        const float kNearestFallbackDot = 0.0f;
                         var faceMap = shellBvh3DFaceMap[chosenSrc];
                         var localNormals = shellBvh3DFaceNormals[chosenSrc];
                         var bvh3D = shellBvh3D[chosenSrc];
 
                         var candidate3D = new Dictionary<int, Vector2>();
+                        int rayHits = 0, nearestFallbacks = 0;
                         foreach (int vi in tShell.vertexIndices)
                         {
                             if (vi >= tVerts.Length) continue;
@@ -1079,16 +1082,40 @@ namespace LightmapUvTool
                             Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
                                 ? tNormals[vi] : Vector3.up;
 
-                            var hit = bvh3D.FindNearestNormalFiltered(
-                                tPos, tNrm, localNormals, kOverlapNormalDot);
+                            int hitFace = -1;
+                            Vector3 hitBary = Vector3.zero;
 
-                            if (hit.triangleIndex >= 0 && hit.triangleIndex < faceMap.Length)
+                            // Primary: ray along normal (bidirectional)
+                            if (tNrm.sqrMagnitude > 0.5f)
                             {
-                                int globalFace = faceMap[hit.triangleIndex];
-                                Vector3 bary = hit.barycentric;
-                                candidate3D[vi] = triUv2A[globalFace] * bary.x
-                                                + triUv2B[globalFace] * bary.y
-                                                + triUv2C[globalFace] * bary.z;
+                                var rayHit = bvh3D.RaycastBidirectional(tPos, tNrm, kRayMaxDist);
+                                if (rayHit.triangleIndex >= 0)
+                                {
+                                    hitFace = rayHit.triangleIndex;
+                                    hitBary = rayHit.barycentric;
+                                    rayHits++;
+                                }
+                            }
+
+                            // Fallback: nearest-point with normal filter
+                            if (hitFace < 0 && localNormals != null)
+                            {
+                                var nearest = bvh3D.FindNearestNormalFiltered(
+                                    tPos, tNrm, localNormals, kNearestFallbackDot);
+                                if (nearest.triangleIndex >= 0)
+                                {
+                                    hitFace = nearest.triangleIndex;
+                                    hitBary = nearest.barycentric;
+                                    nearestFallbacks++;
+                                }
+                            }
+
+                            if (hitFace >= 0 && hitFace < faceMap.Length)
+                            {
+                                int globalFace = faceMap[hitFace];
+                                candidate3D[vi] = triUv2A[globalFace] * hitBary.x
+                                                + triUv2B[globalFace] * hitBary.y
+                                                + triUv2C[globalFace] * hitBary.z;
                             }
                         }
 
@@ -1099,8 +1126,9 @@ namespace LightmapUvTool
                             bestMergedIssues = issues3D;
                             bestWasConstrained = true;
 
-                            UvtLog.Info($"[GroupedTransfer]   t{tsi}: direct 3D projection " +
-                                $"(overlap UV0, {candidate3D.Count} verts, {issues3D} issues)");
+                            UvtLog.Info($"[GroupedTransfer]   t{tsi}: ray-along-normal 3D projection " +
+                                $"(overlap UV0, {rayHits} ray hits, {nearestFallbacks} fallbacks, " +
+                                $"{issues3D} issues)");
                         }
                     }
 

@@ -75,6 +75,44 @@ namespace LightmapUvTool
             return best;
         }
 
+        // ─── Raycast ───
+
+        public struct RayHit
+        {
+            public int triangleIndex;
+            public float t;            // distance along ray
+            public Vector3 barycentric; // (u, v, w) where u = 1-v-w
+        }
+
+        /// <summary>
+        /// Cast a ray and find the closest triangle intersection.
+        /// Returns RayHit with triangleIndex = -1 if no hit.
+        /// </summary>
+        public RayHit Raycast(Vector3 origin, Vector3 direction, float maxDist)
+        {
+            var best = new RayHit { triangleIndex = -1, t = maxDist };
+            RaycastRecursive(0, origin, direction, ref best);
+            return best;
+        }
+
+        /// <summary>
+        /// Ray-along-normal projection: shoots ray in both directions (+normal, -normal).
+        /// Returns the closest hit. Ideal for thin geometry (belts, straps) where
+        /// nearest-point fails but the ray naturally finds "its" side.
+        /// </summary>
+        public RayHit RaycastBidirectional(Vector3 origin, Vector3 normal, float maxDist)
+        {
+            var fwd = Raycast(origin, normal, maxDist);
+            var bck = Raycast(origin, -normal, maxDist);
+
+            if (fwd.triangleIndex < 0) return bck;
+            if (bck.triangleIndex < 0) return fwd;
+
+            // Prefer forward hit (along normal = "our" side), use backward only if much closer
+            // For thin geometry, forward hit is almost always correct
+            return fwd.t <= bck.t ? fwd : bck;
+        }
+
         // ─── Build ───
         int BuildRecursive(int start, int count)
         {
@@ -160,7 +198,7 @@ namespace LightmapUvTool
             }
         }
 
-        // ─── Query ───
+        // ─── Nearest-point query ───
         void FindNearestRecursive(int nodeIdx, Vector3 q, ref HitResult best)
         {
             ref Node node = ref nodes[nodeIdx];
@@ -207,7 +245,7 @@ namespace LightmapUvTool
             }
         }
 
-        // ─── Normal-filtered query ───
+        // ─── Normal-filtered nearest-point query ───
         void FindNearestNormFiltRecursive(int nodeIdx, Vector3 q, Vector3 qNrm,
             Vector3[] fNrm, float dotMin, ref HitResult best)
         {
@@ -254,6 +292,41 @@ namespace LightmapUvTool
             }
         }
 
+        // ─── Raycast query ───
+        void RaycastRecursive(int nodeIdx, Vector3 origin, Vector3 dir, ref RayHit best)
+        {
+            ref Node node = ref nodes[nodeIdx];
+
+            // Ray-AABB intersection (slab method)
+            if (!RayIntersectsAabb(origin, dir, node.bMin, node.bMax, best.t))
+                return;
+
+            // Leaf: test triangles
+            if (node.left == -1)
+            {
+                for (int i = node.triStart; i < node.triStart + node.triCount; i++)
+                {
+                    int f = triIndices[i];
+                    int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
+
+                    if (RayTriangleIntersect(origin, dir, verts[i0], verts[i1], verts[i2],
+                            out float t, out float u, out float v)
+                        && t >= 0f && t < best.t)
+                    {
+                        best.t = t;
+                        best.triangleIndex = f;
+                        best.barycentric = new Vector3(1f - u - v, u, v);
+                    }
+                }
+                return;
+            }
+
+            // Traverse both children (order doesn't matter much for raycast, but
+            // we could optimize by traversing closer first based on ray direction)
+            RaycastRecursive(node.left, origin, dir, ref best);
+            RaycastRecursive(node.right, origin, dir, ref best);
+        }
+
         // ─── Geometry helpers ───
 
         static float AabbDistSq(Vector3 bMin, Vector3 bMax, Vector3 p)
@@ -262,6 +335,72 @@ namespace LightmapUvTool
             float dy = Mathf.Max(0, Mathf.Max(bMin.y - p.y, p.y - bMax.y));
             float dz = Mathf.Max(0, Mathf.Max(bMin.z - p.z, p.z - bMax.z));
             return dx * dx + dy * dy + dz * dz;
+        }
+
+        /// <summary>
+        /// Ray-AABB intersection test (slab method). Returns true if ray hits the box
+        /// within [0, maxT].
+        /// </summary>
+        static bool RayIntersectsAabb(Vector3 origin, Vector3 dir, Vector3 bMin, Vector3 bMax, float maxT)
+        {
+            float tmin = 0f;
+            float tmax = maxT;
+
+            for (int i = 0; i < 3; i++)
+            {
+                float o = GetComponent(origin, i);
+                float d = GetComponent(dir, i);
+                float lo = GetComponent(bMin, i);
+                float hi = GetComponent(bMax, i);
+
+                if (Mathf.Abs(d) < 1e-8f)
+                {
+                    // Ray parallel to slab — check if origin is within
+                    if (o < lo || o > hi) return false;
+                }
+                else
+                {
+                    float invD = 1f / d;
+                    float t1 = (lo - o) * invD;
+                    float t2 = (hi - o) * invD;
+                    if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+                    tmin = Mathf.Max(tmin, t1);
+                    tmax = Mathf.Min(tmax, t2);
+                    if (tmin > tmax) return false;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Möller–Trumbore ray-triangle intersection.
+        /// Returns true if hit, with t (distance), u, v (barycentric of B, C).
+        /// </summary>
+        static bool RayTriangleIntersect(Vector3 origin, Vector3 dir,
+            Vector3 a, Vector3 b, Vector3 c,
+            out float t, out float u, out float v)
+        {
+            t = 0; u = 0; v = 0;
+            const float EPSILON = 1e-7f;
+
+            Vector3 edge1 = b - a;
+            Vector3 edge2 = c - a;
+            Vector3 h = Vector3.Cross(dir, edge2);
+            float det = Vector3.Dot(edge1, h);
+
+            if (det > -EPSILON && det < EPSILON) return false; // parallel
+
+            float invDet = 1f / det;
+            Vector3 s = origin - a;
+            u = invDet * Vector3.Dot(s, h);
+            if (u < 0f || u > 1f) return false;
+
+            Vector3 q = Vector3.Cross(s, edge1);
+            v = invDet * Vector3.Dot(dir, q);
+            if (v < 0f || u + v > 1f) return false;
+
+            t = invDet * Vector3.Dot(edge2, q);
+            return true; // t can be negative — caller checks t >= 0
         }
 
         /// <summary>
