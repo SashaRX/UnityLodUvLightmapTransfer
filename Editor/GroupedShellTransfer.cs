@@ -1090,7 +1090,8 @@ namespace LightmapUvTool
                                 && partitionBvh[chosenSrc] != null)
                             {
                                 Vector3 tgtC3D = result.targetShellCentroids[tsi];
-                                matchedPartIdPass1 = SpatialPartitioner.MatchPartition(pr, tgtC3D);
+                                Vector3 tgtNrm = ComputeShellAvgNormal(tShell, tNormals);
+                                matchedPartIdPass1 = SpatialPartitioner.MatchPartition(pr, tgtC3D, tgtNrm);
                                 if (matchedPartIdPass1 >= 0
                                     && partitionBvh[chosenSrc][matchedPartIdPass1] != null)
                                     mergedUv0Bvh = partitionBvh[chosenSrc][matchedPartIdPass1];
@@ -1299,7 +1300,8 @@ namespace LightmapUvTool
                         if (!usedPartition && partResult.hasOverlap && partResult.partitionCount > 1)
                         {
                             Vector3 tgtCentroid3D = result.targetShellCentroids[tsi];
-                            int matchedPartId = SpatialPartitioner.MatchPartition(partResult, tgtCentroid3D);
+                            Vector3 tgtNrmPart = ComputeShellAvgNormal(tShell, tNormals);
+                            int matchedPartId = SpatialPartitioner.MatchPartition(partResult, tgtCentroid3D, tgtNrmPart);
 
                             if (matchedPartId >= 0)
                             {
@@ -1598,6 +1600,18 @@ namespace LightmapUvTool
         //  Count triangle issues (inverted + zero-area) for a UV2 candidate
         //  Used to pick between transform and interpolation per shell
         // ═══════════════════════════════════════════════════════════
+
+        static Vector3 ComputeShellAvgNormal(UvShell shell, Vector3[] normals)
+        {
+            if (normals == null || normals.Length == 0) return Vector3.up;
+            Vector3 sum = Vector3.zero;
+            foreach (int vi in shell.vertexIndices)
+            {
+                if (vi < normals.Length)
+                    sum += normals[vi];
+            }
+            return sum.sqrMagnitude > 1e-8f ? sum.normalized : Vector3.up;
+        }
 
         static int CountShellIssues(List<int> faceIndices, int[] tris, Vector2[] uv0,
             Dictionary<int, Vector2> candidateUv2)
