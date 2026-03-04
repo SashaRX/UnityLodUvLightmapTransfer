@@ -771,6 +771,21 @@ namespace LightmapUvTool
                 }
             }
 
+            // Per-shell local face normals for 3D BVH normal-filtered queries
+            // Only built for shells with UV0 overlap (used by direct 3D projection path)
+            var shellBvh3DFaceNormals = new Vector3[srcShells.Count][];
+            for (int si = 0; si < srcShells.Count; si++)
+            {
+                if (shellBvh3D[si] != null && srcPartitions[si].hasOverlap)
+                {
+                    var faces = srcShells[si].faceIndices;
+                    var localNormals = new Vector3[faces.Count];
+                    for (int i = 0; i < faces.Count; i++)
+                        localNormals[i] = triNormal[faces[i]];
+                    shellBvh3DFaceNormals[si] = localNormals;
+                }
+            }
+
             // Adaptive thresholds
             float kGoodDistSq = meshDiagonal > 0f
                 ? 0.001f * meshDiagonal * meshDiagonal
@@ -1042,6 +1057,53 @@ namespace LightmapUvTool
                     // source region), fall back to constrained if overlap guard rejects.
                     // Normal merged: constrained first, all-source fallback (unchanged).
                     bool force3D = tgtForce3DFallback[tsi];
+
+                    // ── Direct 3D projection for overlapping UV0 shells ──
+                    // When source shell has UV0 overlap, UV0-based matching is unreliable.
+                    // Instead: 3D BVH lookup → nearest normal-compatible source triangle
+                    // → barycentric UV2 interpolation. Bypasses UV0 entirely.
+                    if (chosenSrc >= 0 && srcPartitions[chosenSrc].hasOverlap
+                        && shellBvh3D[chosenSrc] != null
+                        && shellBvh3DFaceNormals[chosenSrc] != null)
+                    {
+                        const float kOverlapNormalDot = 0.0f; // reject back-facing (dot < 0)
+                        var faceMap = shellBvh3DFaceMap[chosenSrc];
+                        var localNormals = shellBvh3DFaceNormals[chosenSrc];
+                        var bvh3D = shellBvh3D[chosenSrc];
+
+                        var candidate3D = new Dictionary<int, Vector2>();
+                        foreach (int vi in tShell.vertexIndices)
+                        {
+                            if (vi >= tVerts.Length) continue;
+                            Vector3 tPos = tVerts[vi];
+                            Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
+                                ? tNormals[vi] : Vector3.up;
+
+                            var hit = bvh3D.FindNearestNormalFiltered(
+                                tPos, tNrm, localNormals, kOverlapNormalDot);
+
+                            if (hit.triangleIndex >= 0 && hit.triangleIndex < faceMap.Length)
+                            {
+                                int globalFace = faceMap[hit.triangleIndex];
+                                Vector3 bary = hit.barycentric;
+                                candidate3D[vi] = triUv2A[globalFace] * bary.x
+                                                + triUv2B[globalFace] * bary.y
+                                                + triUv2C[globalFace] * bary.z;
+                            }
+                        }
+
+                        if (candidate3D.Count > 0)
+                        {
+                            int issues3D = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidate3D);
+                            bestMergedUv2 = candidate3D;
+                            bestMergedIssues = issues3D;
+                            bestWasConstrained = true;
+
+                            UvtLog.Info($"[GroupedTransfer]   t{tsi}: direct 3D projection " +
+                                $"(overlap UV0, {candidate3D.Count} verts, {issues3D} issues)");
+                        }
+                    }
+
                     for (int pass = 0; pass < 2; pass++)
                     {
                         bool constrained;

@@ -63,6 +63,18 @@ namespace LightmapUvTool
             return best;
         }
 
+        /// <summary>
+        /// Find nearest triangle whose face normal has dot >= normalDotMin with queryNormal.
+        /// faceNormals is indexed by local face index (same as returned triangleIndex).
+        /// </summary>
+        public HitResult FindNearestNormalFiltered(Vector3 queryPoint, Vector3 queryNormal,
+            Vector3[] faceNormals, float normalDotMin)
+        {
+            var best = new HitResult { triangleIndex = -1, distSq = float.MaxValue };
+            FindNearestNormFiltRecursive(0, queryPoint, queryNormal, faceNormals, normalDotMin, ref best);
+            return best;
+        }
+
         // ─── Build ───
         int BuildRecursive(int start, int count)
         {
@@ -192,6 +204,53 @@ namespace LightmapUvTool
             {
                 FindNearestRecursive(node.right, q, ref best);
                 FindNearestRecursive(node.left, q, ref best);
+            }
+        }
+
+        // ─── Normal-filtered query ───
+        void FindNearestNormFiltRecursive(int nodeIdx, Vector3 q, Vector3 qNrm,
+            Vector3[] fNrm, float dotMin, ref HitResult best)
+        {
+            ref Node node = ref nodes[nodeIdx];
+
+            float boxDistSq = AabbDistSq(node.bMin, node.bMax, q);
+            if (boxDistSq >= best.distSq) return;
+
+            if (node.left == -1)
+            {
+                for (int i = node.triStart; i < node.triStart + node.triCount; i++)
+                {
+                    int f = triIndices[i];
+                    if (f < fNrm.Length && Vector3.Dot(fNrm[f], qNrm) < dotMin)
+                        continue;
+
+                    int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
+                    Vector3 closest = ClosestPointOnTriangle(q, verts[i0], verts[i1], verts[i2],
+                                                              out Vector3 bary);
+                    float dSq = (closest - q).sqrMagnitude;
+                    if (dSq < best.distSq)
+                    {
+                        best.distSq = dSq;
+                        best.triangleIndex = f;
+                        best.point = closest;
+                        best.barycentric = bary;
+                    }
+                }
+                return;
+            }
+
+            float dL = AabbDistSq(nodes[node.left].bMin, nodes[node.left].bMax, q);
+            float dR = AabbDistSq(nodes[node.right].bMin, nodes[node.right].bMax, q);
+
+            if (dL < dR)
+            {
+                FindNearestNormFiltRecursive(node.left, q, qNrm, fNrm, dotMin, ref best);
+                FindNearestNormFiltRecursive(node.right, q, qNrm, fNrm, dotMin, ref best);
+            }
+            else
+            {
+                FindNearestNormFiltRecursive(node.right, q, qNrm, fNrm, dotMin, ref best);
+                FindNearestNormFiltRecursive(node.left, q, qNrm, fNrm, dotMin, ref best);
             }
         }
 
