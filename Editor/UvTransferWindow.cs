@@ -613,7 +613,7 @@ namespace LightmapUvTool
             if (hasRepack)
             {
                 EditorGUILayout.Space(4);
-                EditorGUILayout.HelpBox("Repack done. Preview UV2, then Transfer.", MessageType.Info);
+                EditorGUILayout.HelpBox("Repack done. Preview UV1 (Lightmap), then Transfer.", MessageType.Info);
             }
         }
 
@@ -769,7 +769,7 @@ namespace LightmapUvTool
                 var bg = GUI.backgroundColor;
                 GUI.backgroundColor = new Color(.85f,.75f,.95f);
                 int ci = pvChannel == 0 ? 0 : 1;
-                ci = GUILayout.Toolbar(ci, new[]{"UV0","UV2"}, EditorStyles.toolbarButton, GUILayout.Width(80));
+                ci = GUILayout.Toolbar(ci, new[]{"UV0 (MainTex)","UV1 (Lightmap)"}, EditorStyles.toolbarButton, GUILayout.Width(220));
                 pvChannel = ci == 0 ? 0 : 1;
                 GUI.backgroundColor = bg;
             }
@@ -1387,7 +1387,7 @@ namespace LightmapUvTool
             var ee = ForLod(pvLod);
             int tV = 0, tT = 0;
             foreach (var e in ee) { Mesh m = DMesh(e); if (m == null) continue; tV += m.vertexCount; tT += m.triangles.Length / 3; }
-            EditorGUILayout.LabelField("LOD" + pvLod + " | " + ee.Count + " mesh | V:" + tV + " T:" + tT + " | " + (pvChannel == 0 ? "UV0" : "UV2"), EditorStyles.miniLabel);
+            EditorGUILayout.LabelField("LOD" + pvLod + " | " + ee.Count + " mesh | V:" + tV + " T:" + tT + " | " + (pvChannel == 0 ? "UV0 (MainTex)" : "UV1 (Lightmap)"), EditorStyles.miniLabel);
 
             GUILayout.FlexibleSpace();
 
