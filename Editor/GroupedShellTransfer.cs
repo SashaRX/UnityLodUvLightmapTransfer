@@ -1889,6 +1889,7 @@ namespace LightmapUvTool
 
                     Dictionary<int, Vector2> uv2_transform = null;
                     int issuesTransform = int.MaxValue;
+                    float shapePenaltyTransform = float.MaxValue;
 
                     if (xf.valid)
                     {
@@ -1935,6 +1936,9 @@ namespace LightmapUvTool
                             if (issuesTransform < int.MaxValue)
                                 issuesTransform += xfOob;
                         }
+                        if (issuesTransform < int.MaxValue)
+                            shapePenaltyTransform = ComputeShellShapePenalty(
+                                tShell.faceIndices, tgtTris, tUv0, uv2_transform);
                     }
 
                     // Candidate B: per-vertex UV0 interpolation (BVH + normal filtering for thin details)
@@ -1988,18 +1992,48 @@ namespace LightmapUvTool
                             uv2_interp[vi] = triUv2A[bestF] * bestU + triUv2B[bestF] * bestV + triUv2C[bestF] * bestW;
                     }
                     int issuesInterp = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_interp);
+                    float shapePenaltyInterp = ComputeShellShapePenalty(
+                        tShell.faceIndices, tgtTris, tUv0, uv2_interp);
 
-                    if (uv2_transform != null && issuesTransform < issuesInterp)
+                    bool useTransform = false;
+                    if (uv2_transform != null)
+                    {
+                        if (issuesTransform < issuesInterp)
+                        {
+                            useTransform = true;
+                        }
+                        else if (issuesTransform == issuesInterp)
+                        {
+                            float shapeDelta = shapePenaltyTransform - shapePenaltyInterp;
+                            // При почти равном качестве формы предпочитаем similarity,
+                            // т.к. он по определению сохраняет aspect ratio.
+                            useTransform = shapeDelta <= 1e-4f;
+                        }
+                    }
+
+                    string transformShape = shapePenaltyTransform < float.MaxValue
+                        ? shapePenaltyTransform.ToString("F6") : "inf";
+                    UvtLog.Verbose($"[GroupedTransfer]   t{tsi} non-merged src{chosenSrc}: " +
+                        $"xform issues={issuesTransform} shape={transformShape}; " +
+                        $"interp issues={issuesInterp} shape={shapePenaltyInterp:F6}");
+
+                    if (useTransform)
                     {
                         chosenUv2 = uv2_transform;
                         shellsTransform++;
                         result.targetShellMethod[tsi] = 1; // xform
+                        UvtLog.Info($"[GroupedTransfer]   t{tsi} non-merged: choose xform " +
+                            $"(issues {issuesTransform} vs {issuesInterp}, " +
+                            $"shape {transformShape} vs {shapePenaltyInterp:F6})");
                     }
                     else
                     {
                         chosenUv2 = uv2_interp;
                         shellsInterpolation++;
                         result.targetShellMethod[tsi] = 0; // interp
+                        UvtLog.Info($"[GroupedTransfer]   t{tsi} non-merged: choose interp " +
+                            $"(issues {issuesInterp} vs {issuesTransform}, " +
+                            $"shape {shapePenaltyInterp:F6} vs {transformShape})");
                     }
                 }
 
@@ -2102,6 +2136,98 @@ namespace LightmapUvTool
                 }
             }
             return issues;
+        }
+
+        static float ComputeShellShapePenalty(List<int> faceIndices, int[] tris, Vector2[] uv0,
+            Dictionary<int, Vector2> candidateUv2)
+        {
+            const float kEps = 1e-10f;
+            const float kDegeneratePenalty = 8f;
+            const float kAnisotropyWeight = 1f;
+            const float kShearWeight = 0.5f;
+
+            var logScales = new List<float>(faceIndices.Count);
+            var anisotropy = new List<float>(faceIndices.Count);
+            var shear = new List<float>(faceIndices.Count);
+            float penalty = 0f;
+
+            foreach (int f in faceIndices)
+            {
+                int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
+                if (!candidateUv2.TryGetValue(i0, out var a2) ||
+                    !candidateUv2.TryGetValue(i1, out var b2) ||
+                    !candidateUv2.TryGetValue(i2, out var c2) ||
+                    i0 >= uv0.Length || i1 >= uv0.Length || i2 >= uv0.Length)
+                {
+                    penalty += kDegeneratePenalty;
+                    continue;
+                }
+
+                var a0 = uv0[i0];
+                var b0 = uv0[i1];
+                var c0 = uv0[i2];
+
+                Vector2 e0 = b0 - a0;
+                Vector2 e1 = c0 - a0;
+                float det0 = e0.x * e1.y - e1.x * e0.y;
+                if (Mathf.Abs(det0) < kEps)
+                {
+                    penalty += kDegeneratePenalty;
+                    continue;
+                }
+
+                Vector2 f0 = b2 - a2;
+                Vector2 f1 = c2 - a2;
+
+                float invDet0 = 1f / det0;
+                float m00 = e1.y * invDet0;
+                float m01 = -e1.x * invDet0;
+                float m10 = -e0.y * invDet0;
+                float m11 = e0.x * invDet0;
+
+                float j00 = f0.x * m00 + f1.x * m10;
+                float j01 = f0.x * m01 + f1.x * m11;
+                float j10 = f0.y * m00 + f1.y * m10;
+                float j11 = f0.y * m01 + f1.y * m11;
+
+                float detJ = j00 * j11 - j01 * j10;
+                float a = j00 * j00 + j10 * j10;
+                float b = j00 * j01 + j10 * j11;
+                float d = j01 * j01 + j11 * j11;
+                float tr = a + d;
+                float disc = Mathf.Max(0f, tr * tr - 4f * (a * d - b * b));
+                float root = Mathf.Sqrt(disc);
+                float sigmaMax = Mathf.Sqrt(Mathf.Max((tr + root) * 0.5f, kEps));
+                float sigmaMin = Mathf.Sqrt(Mathf.Max((tr - root) * 0.5f, kEps));
+
+                float logScale = 0.5f * Mathf.Log(Mathf.Max(Mathf.Abs(detJ), kEps));
+                float anisoPenalty = Mathf.Abs(Mathf.Log(Mathf.Max(sigmaMax / sigmaMin, 1f)));
+
+                Vector2 col0 = new Vector2(j00, j10);
+                Vector2 col1 = new Vector2(j01, j11);
+                float denom = Mathf.Sqrt(Mathf.Max(col0.sqrMagnitude * col1.sqrMagnitude, kEps));
+                float shearPenalty = Mathf.Abs(Vector2.Dot(col0, col1)) / denom;
+
+                logScales.Add(logScale);
+                anisotropy.Add(anisoPenalty);
+                shear.Add(shearPenalty);
+            }
+
+            if (logScales.Count == 0)
+                return penalty + kDegeneratePenalty;
+
+            float meanLogScale = 0f;
+            for (int i = 0; i < logScales.Count; i++) meanLogScale += logScales[i];
+            meanLogScale /= logScales.Count;
+
+            for (int i = 0; i < logScales.Count; i++)
+            {
+                penalty += Mathf.Abs(logScales[i] - meanLogScale);
+                penalty += anisotropy[i] * kAnisotropyWeight;
+                penalty += shear[i] * kShearWeight;
+            }
+
+            return penalty;
         }
 
         // ═══════════════════════════════════════════════════════════
