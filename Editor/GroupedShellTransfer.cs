@@ -751,7 +751,7 @@ namespace LightmapUvTool
             for (int si = 0; si < srcShells.Count; si++)
             {
                 var faces = srcShells[si].faceIndices;
-                if (faces.Count > kMinFacesForShellBvh)
+                if (faces.Count > kMinFacesForShellBvh || srcPartitions[si].hasOverlap)
                 {
                     shellBvh3DFaceMap[si] = faces.ToArray();
                     int fn = faces.Count;
@@ -786,67 +786,7 @@ namespace LightmapUvTool
                 }
             }
 
-            // ── Per-overlap-group 3D BVH for ray-along-normal ──
-            // When source shells have UV0 overlap, shell matching and UV0-based
-            // transfer are unreliable. Build a 3D BVH per overlap GROUP (not global!)
-            // so rays only hit faces from the same group (e.g., belt faces, not torso).
-            bool modelHasOverlap = false;
-            for (int si = 0; si < srcShells.Count; si++)
-                if (srcPartitions[si].hasOverlap) { modelHasOverlap = true; break; }
-
             float kRayMaxDist = Mathf.Max(meshDiagonal * 0.1f, 0.01f);
-
-            // Map: source shell index → overlap group index (-1 if none)
-            var srcShellToOverlapGroup = new int[srcShells.Count];
-            for (int i = 0; i < srcShells.Count; i++) srcShellToOverlapGroup[i] = -1;
-
-            TriangleBvh[] overlapGroupBvh = null;
-            int[][] overlapGroupFaceMap = null;
-            Vector3[][] overlapGroupFaceNormals = null;
-
-            if (modelHasOverlap)
-            {
-                var ovGroups = UvShellExtractor.FindOverlapGroups(srcShells);
-                overlapGroupBvh = new TriangleBvh[ovGroups.Count];
-                overlapGroupFaceMap = new int[ovGroups.Count][];
-                overlapGroupFaceNormals = new Vector3[ovGroups.Count][];
-
-                for (int gi = 0; gi < ovGroups.Count; gi++)
-                {
-                    var group = ovGroups[gi];
-                    foreach (int si in group)
-                        srcShellToOverlapGroup[si] = gi;
-
-                    // Collect all faces from all shells in this group
-                    var allFaces = new List<int>();
-                    foreach (int si in group)
-                        allFaces.AddRange(srcShells[si].faceIndices);
-
-                    int fn = allFaces.Count;
-                    var sv = new Vector3[fn * 3];
-                    var st = new int[fn * 3];
-                    var faceMap = new int[fn];
-                    var faceNrm = new Vector3[fn];
-                    for (int i = 0; i < fn; i++)
-                    {
-                        int gf = allFaces[i];
-                        faceMap[i] = gf;
-                        faceNrm[i] = triNormal[gf];
-                        sv[i * 3]     = triPosA[gf];
-                        sv[i * 3 + 1] = triPosB[gf];
-                        sv[i * 3 + 2] = triPosC[gf];
-                        st[i * 3]     = i * 3;
-                        st[i * 3 + 1] = i * 3 + 1;
-                        st[i * 3 + 2] = i * 3 + 2;
-                    }
-                    overlapGroupBvh[gi] = new TriangleBvh(sv, st);
-                    overlapGroupFaceMap[gi] = faceMap;
-                    overlapGroupFaceNormals[gi] = faceNrm;
-                }
-
-                UvtLog.Info($"[GroupedTransfer] Built {ovGroups.Count} overlap-group 3D BVH(s) " +
-                    $"for ray projection (diag={meshDiagonal:F4}, rayMax={kRayMaxDist:F4})");
-            }
 
             // Adaptive thresholds
             float kGoodDistSq = meshDiagonal > 0f
@@ -1101,16 +1041,15 @@ namespace LightmapUvTool
 
                 Dictionary<int, Vector2> chosenUv2;
 
-                // ── Overlap-group ray-along-normal for overlapping UV0 shells ──
-                // Uses per-group BVH (only faces from same overlap group) so rays
-                // don't hit unrelated geometry (e.g., torso behind belt).
-                if (overlapGroupBvh != null && chosenSrc >= 0
-                    && srcShellToOverlapGroup[chosenSrc] >= 0)
+                // ── Per-shell ray-along-normal for overlapping UV0 shells ──
+                // Uses the MATCHED source shell's BVH only, so all vertices in
+                // the target shell get UV2 from exactly one source UV2 island.
+                if (chosenSrc >= 0 && srcPartitions[chosenSrc].hasOverlap
+                    && shellBvh3D[chosenSrc] != null)
                 {
-                    int gi = srcShellToOverlapGroup[chosenSrc];
-                    var groupBvh = overlapGroupBvh[gi];
-                    var faceMap = overlapGroupFaceMap[gi];
-                    var groupNormals = overlapGroupFaceNormals[gi];
+                    var srcBvh = shellBvh3D[chosenSrc];
+                    var faceMap = shellBvh3DFaceMap[chosenSrc];
+                    var srcNormals = shellBvh3DFaceNormals[chosenSrc];
 
                     var candidateRay = new Dictionary<int, Vector2>();
                     int rayHits = 0, fallbacks = 0;
@@ -1128,7 +1067,7 @@ namespace LightmapUvTool
                         // Primary: ray along normal (forward preferred)
                         if (tNrm.sqrMagnitude > 0.5f)
                         {
-                            var rayHit = groupBvh.RaycastBidirectional(
+                            var rayHit = srcBvh.RaycastBidirectional(
                                 tPos, tNrm.normalized, kRayMaxDist);
                             if (rayHit.triangleIndex >= 0)
                             {
@@ -1139,10 +1078,22 @@ namespace LightmapUvTool
                         }
 
                         // Fallback: nearest-point with normal filter (dot > 0.3)
+                        if (hitFace < 0 && srcNormals != null)
+                        {
+                            var nearest = srcBvh.FindNearestNormalFiltered(
+                                tPos, tNrm, srcNormals, 0.3f);
+                            if (nearest.triangleIndex >= 0)
+                            {
+                                hitFace = nearest.triangleIndex;
+                                hitBary = nearest.barycentric;
+                                fallbacks++;
+                            }
+                        }
+
+                        // Last resort: nearest point (no normal filter)
                         if (hitFace < 0)
                         {
-                            var nearest = groupBvh.FindNearestNormalFiltered(
-                                tPos, tNrm, groupNormals, 0.3f);
+                            var nearest = srcBvh.FindNearest(tPos);
                             if (nearest.triangleIndex >= 0)
                             {
                                 hitFace = nearest.triangleIndex;
@@ -1162,8 +1113,8 @@ namespace LightmapUvTool
 
                     int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateRay);
 
-                    UvtLog.Info($"[GroupedTransfer]   t{tsi}: overlap-group ray projection " +
-                        $"(group {gi}, {rayHits} hits, {fallbacks} fallbacks, {issues} issues)");
+                    UvtLog.Info($"[GroupedTransfer]   t{tsi}: per-shell ray projection " +
+                        $"(src{chosenSrc}, {rayHits} hits, {fallbacks} fallbacks, {issues} issues)");
 
                     foreach (var kv in candidateRay)
                     {
