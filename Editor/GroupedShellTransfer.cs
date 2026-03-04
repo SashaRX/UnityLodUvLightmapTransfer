@@ -801,6 +801,12 @@ namespace LightmapUvTool
                 maxOverlapGroupSize = Mathf.Max(maxOverlapGroupSize, group.Count);
             int kMaxRetries = Mathf.Clamp(maxOverlapGroupSize + 2, 5, srcShells.Count);
 
+            // Build overlap group membership: srcShell → list of all group members
+            var srcShellOverlapMembers = new List<int>[srcShells.Count];
+            foreach (var group in overlapGroups)
+                foreach (int si in group)
+                    srcShellOverlapMembers[si] = group;
+
             UvtLog.Verbose($"[GroupedTransfer] Adaptive: meshDiag={meshDiagonal:F4}, " +
                 $"avgUv0Edge={avgUv0Edge:F6}, goodDistSq={kGoodDistSq:F6}, " +
                 $"uv0BadThresh={kUv0BadThreshold:F6}, maxRetries={kMaxRetries}, " +
@@ -1041,90 +1047,104 @@ namespace LightmapUvTool
 
                 Dictionary<int, Vector2> chosenUv2;
 
-                // ── Per-shell ray-along-normal for overlapping UV0 shells ──
-                // Uses the MATCHED source shell's BVH only, so all vertices in
-                // the target shell get UV2 from exactly one source UV2 island.
-                if (chosenSrc >= 0 && srcPartitions[chosenSrc].hasOverlap
-                    && shellBvh3D[chosenSrc] != null)
+                // ── Try-all-sources ray projection for overlapping UV0 shells ──
+                // Centroid matching is unreliable for overlapping shells (all have
+                // same UV0). Try ALL source shells in the overlap group and pick
+                // the one with best ray projection results (most hits, fewest issues).
+                if (chosenSrc >= 0 && srcShellOverlapMembers[chosenSrc] != null)
                 {
-                    var srcBvh = shellBvh3D[chosenSrc];
-                    var faceMap = shellBvh3DFaceMap[chosenSrc];
-                    var srcNormals = shellBvh3DFaceNormals[chosenSrc];
+                    var groupMembers = srcShellOverlapMembers[chosenSrc];
 
-                    var candidateRay = new Dictionary<int, Vector2>();
-                    int rayHits = 0, fallbacks = 0;
+                    Dictionary<int, Vector2> bestRayUv2 = null;
+                    int bestRayIssues = int.MaxValue;
+                    int bestRayHits = -1;
+                    int bestRaySrc = chosenSrc;
 
-                    foreach (int vi in tShell.vertexIndices)
+                    foreach (int si in groupMembers)
                     {
-                        if (vi >= tVerts.Length) continue;
-                        Vector3 tPos = tVerts[vi];
-                        Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
-                            ? tNormals[vi] : Vector3.up;
+                        if (shellBvh3D[si] == null) continue;
+                        var srcBvh = shellBvh3D[si];
+                        var faceMap = shellBvh3DFaceMap[si];
+                        var srcNormals = shellBvh3DFaceNormals[si];
 
-                        int hitFace = -1;
-                        Vector3 hitBary = Vector3.zero;
+                        var candidateRay = new Dictionary<int, Vector2>();
+                        int rayHits = 0, fallbacks = 0;
 
-                        // Primary: ray along normal (forward preferred)
-                        if (tNrm.sqrMagnitude > 0.5f)
+                        foreach (int vi in tShell.vertexIndices)
                         {
-                            var rayHit = srcBvh.RaycastBidirectional(
-                                tPos, tNrm.normalized, kRayMaxDist);
-                            if (rayHit.triangleIndex >= 0)
+                            if (vi >= tVerts.Length) continue;
+                            Vector3 tPos = tVerts[vi];
+                            Vector3 tNrm = (tNormals != null && vi < tNormals.Length)
+                                ? tNormals[vi] : Vector3.up;
+
+                            int hitFace = -1;
+                            Vector3 hitBary = Vector3.zero;
+
+                            // Primary: ray along normal (forward preferred)
+                            if (tNrm.sqrMagnitude > 0.5f)
                             {
-                                hitFace = rayHit.triangleIndex;
-                                hitBary = rayHit.barycentric;
-                                rayHits++;
+                                var rayHit = srcBvh.RaycastBidirectional(
+                                    tPos, tNrm.normalized, kRayMaxDist);
+                                if (rayHit.triangleIndex >= 0)
+                                {
+                                    hitFace = rayHit.triangleIndex;
+                                    hitBary = rayHit.barycentric;
+                                    rayHits++;
+                                }
+                            }
+
+                            // Fallback: nearest-point with normal filter (dot > 0.3)
+                            if (hitFace < 0 && srcNormals != null)
+                            {
+                                var nearest = srcBvh.FindNearestNormalFiltered(
+                                    tPos, tNrm, srcNormals, 0.3f);
+                                if (nearest.triangleIndex >= 0)
+                                {
+                                    hitFace = nearest.triangleIndex;
+                                    hitBary = nearest.barycentric;
+                                    fallbacks++;
+                                }
+                            }
+
+                            if (hitFace >= 0 && hitFace < faceMap.Length)
+                            {
+                                int globalFace = faceMap[hitFace];
+                                candidateRay[vi] = triUv2A[globalFace] * hitBary.x
+                                                 + triUv2B[globalFace] * hitBary.y
+                                                 + triUv2C[globalFace] * hitBary.z;
                             }
                         }
 
-                        // Fallback: nearest-point with normal filter (dot > 0.3)
-                        if (hitFace < 0 && srcNormals != null)
-                        {
-                            var nearest = srcBvh.FindNearestNormalFiltered(
-                                tPos, tNrm, srcNormals, 0.3f);
-                            if (nearest.triangleIndex >= 0)
-                            {
-                                hitFace = nearest.triangleIndex;
-                                hitBary = nearest.barycentric;
-                                fallbacks++;
-                            }
-                        }
+                        int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateRay);
 
-                        // Last resort: nearest point (no normal filter)
-                        if (hitFace < 0)
+                        // Pick source with most ray hits; break ties by fewer issues
+                        if (rayHits > bestRayHits
+                            || (rayHits == bestRayHits && issues < bestRayIssues))
                         {
-                            var nearest = srcBvh.FindNearest(tPos);
-                            if (nearest.triangleIndex >= 0)
-                            {
-                                hitFace = nearest.triangleIndex;
-                                hitBary = nearest.barycentric;
-                                fallbacks++;
-                            }
-                        }
-
-                        if (hitFace >= 0 && hitFace < faceMap.Length)
-                        {
-                            int globalFace = faceMap[hitFace];
-                            candidateRay[vi] = triUv2A[globalFace] * hitBary.x
-                                             + triUv2B[globalFace] * hitBary.y
-                                             + triUv2C[globalFace] * hitBary.z;
+                            bestRayUv2 = candidateRay;
+                            bestRayIssues = issues;
+                            bestRayHits = rayHits;
+                            bestRaySrc = si;
                         }
                     }
 
-                    int issues = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, candidateRay);
-
-                    UvtLog.Info($"[GroupedTransfer]   t{tsi}: per-shell ray projection " +
-                        $"(src{chosenSrc}, {rayHits} hits, {fallbacks} fallbacks, {issues} issues)");
-
-                    foreach (var kv in candidateRay)
+                    if (bestRayUv2 != null && bestRayUv2.Count > 0)
                     {
-                        result.uv2[kv.Key] = kv.Value;
-                        result.vertexToSourceShell[kv.Key] = chosenSrc;
-                        transferred++;
+                        UvtLog.Info($"[GroupedTransfer]   t{tsi}: overlap try-all ray " +
+                            $"(best src{bestRaySrc}, {bestRayHits} hits, " +
+                            $"{bestRayIssues} issues, tried {groupMembers.Count} shells)");
+
+                        foreach (var kv in bestRayUv2)
+                        {
+                            result.uv2[kv.Key] = kv.Value;
+                            result.vertexToSourceShell[kv.Key] = bestRaySrc;
+                            transferred++;
+                        }
+                        result.targetShellToSourceShell[tsi] = bestRaySrc;
+                        shellsMerged++;
+                        result.targetShellMethod[tsi] = 2;
+                        continue;
                     }
-                    shellsMerged++;
-                    result.targetShellMethod[tsi] = 2;
-                    continue; // bypass all per-shell logic
                 }
 
                 if (tgtIsMerged[tsi])
