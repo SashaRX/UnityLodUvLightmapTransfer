@@ -1666,7 +1666,7 @@ namespace LightmapUvTool
             return false;
         }
 
-        bool TryPickInShell(MeshEntry entry, PreviewShellCache cache, Vector2 uv, int shellId, ref int checkedTri, ref ShellUvHit hit)
+        bool TryPickInShell(MeshEntry entry, PreviewShellData cache, Vector2 uv, int shellId, ref int checkedTri, ref ShellUvHit hit)
         {
             var shell = cache.shells.FirstOrDefault(s => s.shellId == shellId);
             if (shell == null) return false;
@@ -1718,7 +1718,7 @@ namespace LightmapUvTool
             return u >= eps && v >= eps && w >= eps;
         }
 
-        void GlOutlineShell(float ox, float oy, float sz, Vector2[] uv, int[] t, int uN, PreviewShellCache cache, int shellId, Color color, float width)
+        void GlOutlineShell(float ox, float oy, float sz, Vector2[] uv, int[] t, int uN, PreviewShellData cache, int shellId, Color color, float width)
         {
             if (cache == null || cache.shells == null) return;
             var shell = cache.shells.FirstOrDefault(s => s.shellId == shellId);
