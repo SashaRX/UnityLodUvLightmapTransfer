@@ -122,7 +122,7 @@ namespace LightmapUvTool
         // Preview cache: mesh instanceID -> boundary edge index pairs (a0,b0,a1,b1,...)
         readonly Dictionary<int, int[]> boundaryEdgeCache = new Dictionary<int, int[]>();
         readonly FaceToShellCache uvPreviewShellCache = new FaceToShellCache();
-        readonly Dictionary<int, PreviewShellData> previewShellDataCache = new Dictionary<int, PreviewShellData>();
+        readonly Dictionary<long, PreviewShellData> previewShellDataCache = new Dictionary<long, PreviewShellData>();
 
         // Per-frame mesh data cache to avoid repeated allocations from mesh.triangles / GetUVs
         readonly Dictionary<int, int[]> cachedTriangles = new Dictionary<int, int[]>();
@@ -131,6 +131,9 @@ namespace LightmapUvTool
         // Shell color key cache: (meshInstanceId, shellId) -> colorKey
         readonly Dictionary<long, int> shellColorKeyCache = new Dictionary<long, int>();
         bool shellColorKeyCacheDirty = true;
+
+        // UDIM tile cache: meshInstanceId+channel -> tiles
+        readonly Dictionary<long, HashSet<Vector2Int>> occupiedTilesPerMesh = new Dictionary<long, HashSet<Vector2Int>>();
 
         ShellUvHit hoveredShell;
         ShellUvHit selectedShell;
@@ -219,6 +222,7 @@ namespace LightmapUvTool
         {
             public List<UvShell> shells;
             public Dictionary<int, int> faceToShell;
+            public Dictionary<int, UvShell> shellById;
             public Bounds[] shellBounds;
             public int[] triangles;
             public Vector2[] uvs;
@@ -316,6 +320,7 @@ namespace LightmapUvTool
             boundaryEdgeCache.Clear();
             uvPreviewShellCache.Clear();
             previewShellDataCache.Clear();
+            occupiedTilesPerMesh.Clear();
             shellColorPreviewCache.Clear();
             shellColorKeyCache.Clear();
             ClearHoverState(false);
@@ -412,6 +417,7 @@ namespace LightmapUvTool
             boundaryEdgeCache.Clear();
             uvPreviewShellCache.Clear();
             previewShellDataCache.Clear();
+            occupiedTilesPerMesh.Clear();
             shellColorPreviewCache.Clear();
             shellColorKeyCache.Clear();
             uv0Analyzed = false;
@@ -1119,13 +1125,13 @@ namespace LightmapUvTool
                                 GlFillSt(cx,cy,sz, uvs,tri,fN,uN, stats);
                                 break;
                             case FillMode.Shells:
-                                GlFillSh(cx,cy,sz, uvs,tri,fN,uN, entry, hoverShellId, selectedShellId);
+                                GlFillSh(cx,cy,sz, mesh, fN, uN, entry, hoverShellId, selectedShellId);
                                 break;
                             case FillMode.None:
                                 break;
                             default:
                                 if (fillMode != FillMode.None)
-                                    GlFillSh(cx,cy,sz, uvs,tri,fN,uN, entry, hoverShellId, selectedShellId);
+                                    GlFillSh(cx,cy,sz, mesh, fN, uN, entry, hoverShellId, selectedShellId);
                                 break;
                         }
 
@@ -1505,14 +1511,12 @@ namespace LightmapUvTool
             foreach (var item in draws)
             {
                 Mesh mesh = item.Item1;
-                var uvs = RdUvCached(mesh, pvChannel);
-                var tri = GetTrianglesCached(mesh);
-                if (uvs == null || tri == null || tri.Length < 3) continue;
                 if (uvPoint.x < UV_LO || uvPoint.x > UV_HI || uvPoint.y < UV_LO || uvPoint.y > UV_HI) continue;
 
-                List<UvShell> shells;
-                try { shells = UvShellExtractor.Extract(uvs, tri); }
-                catch { continue; }
+                var cache = GetPreviewShellCache(mesh, pvChannel);
+                if (cache == null || cache.shells == null) continue;
+                var uvs = cache.uvs;
+                var tri = cache.triangles;
 
                 for (int f = 0; f < tri.Length / 3; f++)
                 {
@@ -1522,12 +1526,8 @@ namespace LightmapUvTool
                     if (!TOk(uvs, uvs.Length, a, b, c)) continue;
                     if (!PointInTriangle(uvPoint, uvs[a], uvs[b], uvs[c])) continue;
 
-                    UvShell shell = null;
-                    for (int si = 0; si < shells.Count; si++)
-                    {
-                        if (shells[si].faceIndices.Contains(f)) { shell = shells[si]; break; }
-                    }
-                    if (shell == null) return null;
+                    if (!cache.faceToShell.TryGetValue(f, out int shellId)) return null;
+                    if (!cache.shellById.TryGetValue(shellId, out var shell)) return null;
 
                     return BuildHit(item.Item2, mesh, shell, uvPoint, item.Item3);
                 }
@@ -1665,14 +1665,27 @@ namespace LightmapUvTool
             var tiles = new HashSet<Vector2Int>();
             foreach (var item in draws)
             {
-                var uvs = RdUvCached(item.Item1, channel);
-                if (uvs == null) continue;
-                for (int i = 0; i < uvs.Length; i++)
+                var mesh = item.Item1;
+                long key = ((long)mesh.GetInstanceID() << 8) ^ (uint)channel;
+                if (occupiedTilesPerMesh.TryGetValue(key, out var cached))
                 {
-                    var u = uvs[i];
-                    if (!UOk(u)) continue;
-                    tiles.Add(new Vector2Int(Mathf.FloorToInt(u.x), Mathf.FloorToInt(u.y)));
+                    foreach (var t in cached) tiles.Add(t);
+                    continue;
                 }
+                var perMesh = new HashSet<Vector2Int>();
+                var uvs = RdUvCached(mesh, channel);
+                if (uvs != null)
+                {
+                    for (int i = 0; i < uvs.Length; i++)
+                    {
+                        var u = uvs[i];
+                        if (!UOk(u)) continue;
+                        var tile = new Vector2Int(Mathf.FloorToInt(u.x), Mathf.FloorToInt(u.y));
+                        perMesh.Add(tile);
+                        tiles.Add(tile);
+                    }
+                }
+                occupiedTilesPerMesh[key] = perMesh;
             }
             return tiles;
         }
@@ -1850,22 +1863,28 @@ namespace LightmapUvTool
             GL.End();
         }
 
-        PreviewShellData GetPreviewShellCache(Vector2[] uv, int[] triangles)
+        PreviewShellData GetPreviewShellCache(Mesh mesh, int channel)
         {
-            if (triangles == null || uv == null) return null;
-            int key = (uv.GetHashCode() * 397) ^ triangles.GetHashCode();
+            if (mesh == null) return null;
+            long key = ((long)mesh.GetInstanceID() << 8) ^ (uint)channel;
             if (previewShellDataCache.TryGetValue(key, out var cached))
                 return cached;
+
+            var uv = RdUvCached(mesh, channel);
+            var triangles = GetTrianglesCached(mesh);
+            if (uv == null || triangles == null || triangles.Length < 3) return null;
 
             List<UvShell> shells;
             try { shells = UvShellExtractor.Extract(uv, triangles); }
             catch { return null; }
 
-            var faceToShell = new Dictionary<int, int>();
+            var faceToShell = new Dictionary<int, int>(triangles.Length / 3);
+            var shellById = new Dictionary<int, UvShell>(shells.Count);
             var bounds = new Bounds[shells.Count];
             for (int i = 0; i < shells.Count; i++)
             {
                 var shell = shells[i];
+                shellById[shell.shellId] = shell;
                 bool hasPoint = false;
                 Bounds b = new Bounds(Vector3.zero, Vector3.zero);
                 foreach (int fi in shell.faceIndices)
@@ -1885,7 +1904,7 @@ namespace LightmapUvTool
                 bounds[i] = b;
             }
 
-            cached = new PreviewShellData { shells = shells, faceToShell = faceToShell, shellBounds = bounds, triangles = triangles, uvs = uv };
+            cached = new PreviewShellData { shells = shells, faceToShell = faceToShell, shellById = shellById, shellBounds = bounds, triangles = triangles, uvs = uv };
             previewShellDataCache[key] = cached;
             return cached;
         }
@@ -1901,11 +1920,8 @@ namespace LightmapUvTool
             {
                 Mesh mesh = DMesh(entry);
                 if (mesh == null) continue;
-                var uvs = RdUvCached(mesh, pvChannel);
-                var tri = GetTrianglesCached(mesh);
-                if (uvs == null || tri == null || tri.Length < 3) continue;
 
-                var cache = GetPreviewShellCache(uvs, tri);
+                var cache = GetPreviewShellCache(mesh, pvChannel);
                 if (cache == null || cache.shells == null) continue;
 
                 if (mesh.GetInstanceID() == lastHitMeshId && lastHitShellId >= 0)
@@ -1956,8 +1972,7 @@ namespace LightmapUvTool
 
         bool TryPickInShell(MeshEntry entry, PreviewShellData cache, Vector2 uv, int shellId, ref int checkedTri, ref ShellUvHit hit)
         {
-            var shell = cache.shells.FirstOrDefault(s => s.shellId == shellId);
-            if (shell == null) return false;
+            if (!cache.shellById.TryGetValue(shellId, out var shell)) return false;
 
             foreach (int fi in shell.faceIndices)
             {
@@ -2008,9 +2023,8 @@ namespace LightmapUvTool
 
         void GlOutlineShell(float ox, float oy, float sz, Vector2[] uv, int[] t, int uN, PreviewShellData cache, int shellId, Color color, float width)
         {
-            if (cache == null || cache.shells == null) return;
-            var shell = cache.shells.FirstOrDefault(s => s.shellId == shellId);
-            if (shell == null) return;
+            if (cache == null || cache.shellById == null) return;
+            if (!cache.shellById.TryGetValue(shellId, out var shell)) return;
 
             GL.Begin(GL.LINES);
             GL.Color(color);
@@ -2068,10 +2082,12 @@ namespace LightmapUvTool
             return result;
         }
 
-        void GlFillSh(float ox, float oy, float sz, Vector2[] uv, int[] t, int fN, int uN, MeshEntry entry, int hoverShellId, int selectedShellId)
+        void GlFillSh(float ox, float oy, float sz, Mesh mesh, int fN, int uN, MeshEntry entry, int hoverShellId, int selectedShellId)
         {
-            var cache = GetPreviewShellCache(uv, t);
+            var cache = GetPreviewShellCache(mesh, pvChannel);
             if (cache == null || cache.shells == null) return;
+            var uv = cache.uvs;
+            var t = cache.triangles;
 
             int tot=0, b=0;
             GL.Begin(GL.TRIANGLES);
@@ -3324,6 +3340,7 @@ namespace LightmapUvTool
             shellTransformCache.Clear();
             uvPreviewShellCache.Clear();
             previewShellDataCache.Clear();
+            occupiedTilesPerMesh.Clear();
             shellColorPreviewCache.Clear();
             shellColorKeyCache.Clear();
             ClearHoverState(false);
