@@ -1482,6 +1482,17 @@ namespace LightmapUvTool
             };
         }
 
+
+        static bool PointInTriangle(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
+        {
+            float s1 = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+            float s2 = (c.x - b.x) * (p.y - b.y) - (c.y - b.y) * (p.x - b.x);
+            float s3 = (a.x - c.x) * (p.y - c.y) - (a.y - c.y) * (p.x - c.x);
+            bool hasNeg = (s1 < 0f) || (s2 < 0f) || (s3 < 0f);
+            bool hasPos = (s1 > 0f) || (s2 > 0f) || (s3 > 0f);
+            return !(hasNeg && hasPos);
+        }
+
         void FocusUvBounds(float minU, float minV, float maxU, float maxV)
         {
             float pad = 0.05f;
