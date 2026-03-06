@@ -31,7 +31,7 @@ Shader "Hidden/LightmapUvTool/SpotProjection"
             {
                 float4 vertex : POSITION;
                 float2 uv0 : TEXCOORD0;
-                float2 uv2 : TEXCOORD2;
+                float2 uv2 : TEXCOORD1;
             };
 
             struct v2f

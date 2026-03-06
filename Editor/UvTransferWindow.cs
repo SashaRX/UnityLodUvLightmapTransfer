@@ -69,6 +69,8 @@ namespace LightmapUvTool
         int hoveredShellId = -1;
         Vector2 uvSpot;
         Vector3 hoverWorldPos;
+        bool canvasSpotValid;
+        Vector2 canvasSpotUv;
 
         // Checker mode (user toggle, independent from CheckerTexturePreview.IsActive)
         bool checkerEnabled;
@@ -1197,7 +1199,7 @@ namespace LightmapUvTool
                 return;
 
             spotMat.SetVector("_SpotUv", new Vector4(uvSpot.x, uvSpot.y, 0f, 0f));
-            spotMat.SetFloat("_SpotRadius", 0.02f);
+            spotMat.SetFloat("_SpotRadius", 0.035f);
             spotMat.SetColor("_SpotColor", new Color(1f, .75f, .2f, .95f));
             spotMat.SetFloat("_UseUv2", pvChannel == 1 ? 1f : 0f);
 
@@ -1333,6 +1335,8 @@ namespace LightmapUvTool
             hoveredShellId = -1;
             uvSpot = Vector2.zero;
             hoverWorldPos = Vector3.zero;
+            canvasSpotValid = false;
+            canvasSpotUv = Vector2.zero;
             if (repaint) Repaint();
         }
 
@@ -1391,18 +1395,24 @@ namespace LightmapUvTool
             { FitToUvBounds(); e.Use(); }
 
             if (!spotMode)
+            {
+                canvasSpotValid = false;
                 return;
+            }
 
             if (!canvasRect.Contains(e.mousePosition))
             {
                 if (!lockSelection)
                     hasHoveredShell = false;
+                canvasSpotValid = false;
                 return;
             }
 
             Vector2 localPos = e.mousePosition - canvasRect.position;
             // mouse -> uv: u = (x-cx)/sz, v = 1-(y-cy)/sz
             Vector2 uv = new Vector2((localPos.x - cx) / sz, 1f - ((localPos.y - cy) / sz));
+            canvasSpotUv = uv;
+            canvasSpotValid = true;
 
             if (!lockSelection)
             {
@@ -1712,10 +1722,27 @@ namespace LightmapUvTool
             {
                 hit = hoveredShell;
             }
-            if (!hasHit) return;
 
-            float px = ox + hit.uvHit.x * sz;
-            float py = oy + (1f - hit.uvHit.y) * sz;
+            Vector2 drawUv;
+            if (hasHit)
+            {
+                drawUv = hit.uvHit;
+            }
+            else if (canvasSpotValid)
+            {
+                drawUv = canvasSpotUv;
+            }
+            else if (hoverHitValid)
+            {
+                drawUv = uvSpot;
+            }
+            else
+            {
+                return;
+            }
+
+            float px = ox + drawUv.x * sz;
+            float py = oy + (1f - drawUv.y) * sz;
             float r = 6f;
 
             GL.Begin(GL.LINES);
