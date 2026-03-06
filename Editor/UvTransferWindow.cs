@@ -1190,18 +1190,47 @@ namespace LightmapUvTool
             else if (hoverHitValid && (!hadHit || prevShell != hoveredShellId || (prevUv - uvSpot).sqrMagnitude > 1e-8f))
                 Repaint();
 
-            if (!hoverHitValid)
+            // Determine which UV to project: 3D hover > selected shell > hovered shell > canvas spot
+            Vector2 projUv;
+            bool hasProj;
+            if (hoverHitValid)
+            {
+                projUv = uvSpot;
+                hasProj = true;
+            }
+            else if (hasSelectedShell)
+            {
+                projUv = selectedShell.uvHit;
+                hasProj = true;
+            }
+            else if (hasHoveredShell)
+            {
+                projUv = hoveredShell.uvHit;
+                hasProj = true;
+            }
+            else if (canvasSpotValid)
+            {
+                projUv = canvasSpotUv;
+                hasProj = true;
+            }
+            else
+            {
+                projUv = default;
+                hasProj = false;
+            }
+
+            if (!hasProj)
                 return;
 
-            DrawSpotProjectionInScene();
+            DrawSpotProjectionInScene(projUv);
         }
 
-        void DrawSpotProjectionInScene()
+        void DrawSpotProjectionInScene(Vector2 projUv)
         {
-            if (!hoverHitValid || spotMat == null || Event.current.type != EventType.Repaint)
+            if (spotMat == null || Event.current.type != EventType.Repaint)
                 return;
 
-            spotMat.SetVector("_SpotUv", new Vector4(uvSpot.x, uvSpot.y, 0f, 0f));
+            spotMat.SetVector("_SpotUv", new Vector4(projUv.x, projUv.y, 0f, 0f));
             spotMat.SetFloat("_SpotRadius", 0.035f);
             spotMat.SetColor("_SpotColor", new Color(1f, .75f, .2f, .95f));
             spotMat.SetFloat("_UseUv2", pvChannel == 1 ? 1f : 0f);
@@ -1424,6 +1453,8 @@ namespace LightmapUvTool
                 }
             }
 
+            SceneView.RepaintAll();
+
             if (spotMode && e.type == EventType.MouseDown && e.button == 0 && !e.alt)
             {
                 if (hasHoveredShell)
@@ -1437,6 +1468,7 @@ namespace LightmapUvTool
                 }
                 e.Use();
                 Repaint();
+                SceneView.RepaintAll();
             }
         }
 
