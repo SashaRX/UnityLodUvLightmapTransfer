@@ -3444,7 +3444,7 @@ namespace LightmapUvTool
                     fbxPaths.Add(p);
             }
 
-            // Delete sidecars + reimport
+            // Delete sidecars first (all of them before any reimport)
             int deleted = 0;
             foreach (string fbxPath in fbxPaths)
             {
@@ -3454,8 +3454,15 @@ namespace LightmapUvTool
                     AssetDatabase.DeleteAsset(sp);
                     deleted++;
                 }
-                AssetDatabase.ImportAsset(fbxPath, ImportAssetOptions.ForceUpdate);
             }
+
+            // Flush asset database so postprocessor won't find cached sidecars
+            if (deleted > 0)
+                AssetDatabase.Refresh();
+
+            // Now reimport FBXs — postprocessor will find no sidecars → no UV2 injection
+            foreach (string fbxPath in fbxPaths)
+                AssetDatabase.ImportAsset(fbxPath, ImportAssetOptions.ForceUpdate);
 
             // Reset working copies
             ResetWorkingCopies();
@@ -3498,8 +3505,14 @@ namespace LightmapUvTool
                     AssetDatabase.DeleteAsset(sidecarPath);
                     deleted++;
                 }
-                AssetDatabase.ImportAsset(fbxPath, ImportAssetOptions.ForceUpdate);
             }
+
+            // Flush asset database so postprocessor won't find cached sidecars
+            if (deleted > 0)
+                AssetDatabase.Refresh();
+
+            foreach (string fbxPath in fbxPaths)
+                AssetDatabase.ImportAsset(fbxPath, ImportAssetOptions.ForceUpdate);
 
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Deleted {deleted} sidecar(s), reimported {fbxPaths.Count} FBX");
