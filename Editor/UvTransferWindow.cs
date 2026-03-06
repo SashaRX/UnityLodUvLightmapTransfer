@@ -1112,13 +1112,13 @@ namespace LightmapUvTool
                                 GlFillSt(cx,cy,sz, uvs,tri,fN,uN, stats);
                                 break;
                             case FillMode.Shells:
-                                GlFillSh(cx,cy,sz, uvs,tri,fN,uN, entry, hoverShellId, selectedShellId);
+                                GlFillSh(cx,cy,sz, uvs,tri,fN,uN, idx, hoverShellId, selectedShellId);
                                 break;
                             case FillMode.None:
                                 break;
                             default:
                                 if (fillMode != FillMode.None)
-                                    GlFillSh(cx,cy,sz, uvs,tri,fN,uN, entry, hoverShellId, selectedShellId);
+                                    GlFillSh(cx,cy,sz, uvs,tri,fN,uN, idx, hoverShellId, selectedShellId);
                                 break;
                         }
 
@@ -1398,8 +1398,6 @@ namespace LightmapUvTool
             { FitToUvBounds(); e.Use(); }
 
             if (!spotMode)
-            {
-                canvasSpotValid = false;
                 return;
             }
 
