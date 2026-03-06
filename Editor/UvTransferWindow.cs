@@ -65,7 +65,7 @@ namespace LightmapUvTool
         float fillAlpha = 0.25f;
         bool hoverSpot3D;
         bool hoverHitValid;
-        int hoveredShell = -1;
+        int hoveredShellId = -1;
         Vector2 uvSpot;
         Vector3 hoverWorldPos;
 
@@ -117,9 +117,10 @@ namespace LightmapUvTool
 
         // Preview cache: mesh instanceID -> boundary edge index pairs (a0,b0,a1,b1,...)
         readonly Dictionary<int, int[]> boundaryEdgeCache = new Dictionary<int, int[]>();
-        readonly PreviewShellCache uvPreviewShellCache = new PreviewShellCache();
+        readonly FaceToShellCache uvPreviewShellCache = new FaceToShellCache();
+        readonly Dictionary<int, PreviewShellData> previewShellDataCache = new Dictionary<int, PreviewShellData>();
 
-        class PreviewShellCache
+        class FaceToShellCache
         {
             readonly Dictionary<long, int[]> faceToShellByMeshAndChannel = new Dictionary<long, int[]>();
 
@@ -193,7 +194,7 @@ namespace LightmapUvTool
             public Vector3 barycentric;
         }
 
-        class PreviewShellCache
+        class PreviewShellData
         {
             public List<UvShell> shells;
             public Dictionary<int, int> faceToShell;
@@ -286,6 +287,7 @@ namespace LightmapUvTool
             CleanupWorkingMeshes();
             boundaryEdgeCache.Clear();
             uvPreviewShellCache.Clear();
+            previewShellDataCache.Clear();
             shellColorPreviewCache.Clear();
             ClearHoverState(false);
             if (canvasRT) { canvasRT.Release(); DestroyImmediate(canvasRT); canvasRT = null; }
@@ -378,6 +380,7 @@ namespace LightmapUvTool
             uv0Reports.Clear();
             boundaryEdgeCache.Clear();
             uvPreviewShellCache.Clear();
+            previewShellDataCache.Clear();
             shellColorPreviewCache.Clear();
             uv0Analyzed = false;
             uv0Welded = false;
@@ -1148,23 +1151,23 @@ namespace LightmapUvTool
             var ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
             bool hadHit = hoverHitValid;
             Vector2 prevUv = uvSpot;
-            int prevShell = hoveredShell;
+            int prevShell = hoveredShellId;
 
             hoverHitValid = TryRaycastPreview(ray, out var hit);
             if (hoverHitValid)
             {
                 hoverWorldPos = hit.worldPos;
                 uvSpot = hit.uv;
-                hoveredShell = hit.shellId;
+                hoveredShellId = hit.shellId;
             }
             else
             {
-                hoveredShell = -1;
+                hoveredShellId = -1;
             }
 
             if (!hoverHitValid && hadHit)
                 Repaint();
-            else if (hoverHitValid && (!hadHit || prevShell != hoveredShell || (prevUv - uvSpot).sqrMagnitude > 1e-8f))
+            else if (hoverHitValid && (!hadHit || prevShell != hoveredShellId || (prevUv - uvSpot).sqrMagnitude > 1e-8f))
                 Repaint();
 
             if (!hoverHitValid)
@@ -1289,7 +1292,7 @@ namespace LightmapUvTool
         void ClearHoverState(bool repaint = true)
         {
             hoverHitValid = false;
-            hoveredShell = -1;
+            hoveredShellId = -1;
             uvSpot = Vector2.zero;
             hoverWorldPos = Vector3.zero;
             if (repaint) Repaint();
@@ -1559,11 +1562,11 @@ namespace LightmapUvTool
             GL.End();
         }
 
-        PreviewShellCache GetPreviewShellCache(Vector2[] uv, int[] triangles)
+        PreviewShellData GetPreviewShellCache(Vector2[] uv, int[] triangles)
         {
             if (triangles == null || uv == null) return null;
             int key = (uv.GetHashCode() * 397) ^ triangles.GetHashCode();
-            if (uvPreviewShellCache.TryGetValue(key, out var cached))
+            if (previewShellDataCache.TryGetValue(key, out var cached))
                 return cached;
 
             List<UvShell> shells;
@@ -1594,8 +1597,8 @@ namespace LightmapUvTool
                 bounds[i] = b;
             }
 
-            cached = new PreviewShellCache { shells = shells, faceToShell = faceToShell, shellBounds = bounds, triangles = triangles, uvs = uv };
-            uvPreviewShellCache[key] = cached;
+            cached = new PreviewShellData { shells = shells, faceToShell = faceToShell, shellBounds = bounds, triangles = triangles, uvs = uv };
+            previewShellDataCache[key] = cached;
             return cached;
         }
 
@@ -1946,7 +1949,7 @@ namespace LightmapUvTool
             int tV = 0, tT = 0;
             foreach (var e in ee) { Mesh m = DMesh(e); if (m == null) continue; tV += m.vertexCount; tT += m.triangles.Length / 3; }
             string hoverInfo = hoverHitValid
-                ? $" | Hover UV: {uvSpot.x:F4},{uvSpot.y:F4} Shell:{hoveredShell}"
+                ? $" | Hover UV: {uvSpot.x:F4},{uvSpot.y:F4} Shell:{hoveredShellId}"
                 : (hoverSpot3D ? " | Hover UV: --" : string.Empty);
             EditorGUILayout.LabelField("LOD" + pvLod + " | " + ee.Count + " mesh | V:" + tV + " T:" + tT + " | " + (pvChannel == 0 ? "UV0 (MainTex)" : "UV1 (Lightmap)") + hoverInfo, EditorStyles.miniLabel);
 
@@ -2987,6 +2990,7 @@ namespace LightmapUvTool
             srcCache.Clear();
             shellTransformCache.Clear();
             uvPreviewShellCache.Clear();
+            previewShellDataCache.Clear();
             shellColorPreviewCache.Clear();
             ClearHoverState(false);
             UvtLog.Info("[Reset] All working copies destroyed and restored to FBX originals");
