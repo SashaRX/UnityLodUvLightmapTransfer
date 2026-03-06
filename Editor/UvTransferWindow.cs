@@ -1149,23 +1149,7 @@ namespace LightmapUvTool
 
                 RenderTexture.active = prevRT;
                 GUI.DrawTexture(canvasRect, canvasRT, ScaleMode.StretchToFill, false);
-                DrawHoverSpotInCanvas(canvasRect, cx, cy, sz);
             }
-        }
-
-        void DrawHoverSpotInCanvas(Rect canvasRect, float ox, float oy, float sz)
-        {
-            if (!spotMode || !hoverHitValid) return;
-
-            float x = canvasRect.x + ox + uvSpot.x * sz;
-            float y = canvasRect.y + oy + (1f - uvSpot.y) * sz;
-
-            Handles.BeginGUI();
-            var prev = Handles.color;
-            Handles.color = new Color(1f, .75f, .2f, .95f);
-            Handles.DrawSolidDisc(new Vector3(x, y, 0f), Vector3.forward, 4f);
-            Handles.color = prev;
-            Handles.EndGUI();
         }
 
         void OnSceneGUI(SceneView sv)
@@ -1821,13 +1805,14 @@ namespace LightmapUvTool
 
             float px = ox + drawUv.x * sz;
             float py = oy + (1f - drawUv.y) * sz;
-            float r = 6f;
+            // Use same UV-space radius as 3D spot shader, converted to pixels
+            float r = Mathf.Max(0.035f * sz, 4f);
 
             GL.Begin(GL.LINES);
             GL.Color(Color.black);
             GL.Vertex3(px - r - 1f, py, 0); GL.Vertex3(px + r + 1f, py, 0);
             GL.Vertex3(px, py - r - 1f, 0); GL.Vertex3(px, py + r + 1f, 0);
-            GL.Color(new Color(1f, .2f, .2f, 1f));
+            GL.Color(new Color(1f, .75f, .2f, 1f));
             GL.Vertex3(px - r, py, 0); GL.Vertex3(px + r, py, 0);
             GL.Vertex3(px, py - r, 0); GL.Vertex3(px, py + r, 0);
             GL.End();
