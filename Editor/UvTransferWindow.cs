@@ -1192,25 +1192,30 @@ namespace LightmapUvTool
 
             // Determine which UV to project: 3D hover > selected shell > hovered shell > canvas spot
             Vector2 projUv;
+            MeshEntry projEntry = null;
             bool hasProj;
             if (hoverHitValid)
             {
                 projUv = uvSpot;
+                projEntry = hit.meshEntry;
                 hasProj = true;
             }
             else if (hasSelectedShell)
             {
                 projUv = selectedShell.uvHit;
+                projEntry = selectedShell.meshEntry;
                 hasProj = true;
             }
             else if (hasHoveredShell)
             {
                 projUv = hoveredShell.uvHit;
+                projEntry = hoveredShell.meshEntry;
                 hasProj = true;
             }
             else if (canvasSpotValid)
             {
                 projUv = canvasSpotUv;
+                projEntry = null; // no specific entry — draw on all
                 hasProj = true;
             }
             else
@@ -1222,10 +1227,10 @@ namespace LightmapUvTool
             if (!hasProj)
                 return;
 
-            DrawSpotProjectionInScene(projUv);
+            DrawSpotProjectionInScene(projUv, projEntry);
         }
 
-        void DrawSpotProjectionInScene(Vector2 projUv)
+        void DrawSpotProjectionInScene(Vector2 projUv, MeshEntry limitEntry = null)
         {
             if (spotMat == null || Event.current.type != EventType.Repaint)
                 return;
@@ -1238,6 +1243,8 @@ namespace LightmapUvTool
             var entries = ForLod(pvLod);
             foreach (var entry in entries)
             {
+                if (limitEntry != null && entry != limitEntry) continue;
+
                 var mesh = DMesh(entry);
                 if (mesh == null) continue;
 
@@ -1257,6 +1264,7 @@ namespace LightmapUvTool
             public Vector3 worldPos;
             public Vector2 uv;
             public int shellId;
+            public MeshEntry meshEntry;
         }
 
         bool TryRaycastPreview(Ray ray, out HoverHit bestHit)
@@ -1310,6 +1318,7 @@ namespace LightmapUvTool
                     bestHit.worldPos = ray.origin + ray.direction * t;
                     bestHit.uv = hitUv;
                     bestHit.shellId = (faceToShell != null && (f / 3) < faceToShell.Length) ? faceToShell[f / 3] : -1;
+                    bestHit.meshEntry = entry;
                     found = true;
                 }
             }
@@ -1453,6 +1462,7 @@ namespace LightmapUvTool
                 }
             }
 
+            Repaint();
             SceneView.RepaintAll();
 
             if (spotMode && e.type == EventType.MouseDown && e.button == 0 && !e.alt)
