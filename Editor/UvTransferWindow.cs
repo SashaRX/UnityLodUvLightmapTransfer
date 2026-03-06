@@ -1052,17 +1052,24 @@ namespace LightmapUvTool
                     GL.PushMatrix(); push = true;
                     GL.LoadPixelMatrix(0, rtW, rtH, 0);
 
+                    var occupiedTiles = GetOccupiedUdimTiles(draws, pvChannel);
+
+                    // Draw background quads for all occupied tiles
                     GL.Begin(GL.QUADS);
                     GL.Color(new Color(.12f,.12f,.12f));
-                    GL.Vertex3(cx, cy, 0); GL.Vertex3(cx + sz, cy, 0);
-                    GL.Vertex3(cx + sz, cy + sz, 0); GL.Vertex3(cx, cy + sz, 0);
+                    foreach (var tile in occupiedTiles)
+                    {
+                        float tx = cx + tile.x * sz, ty = cy - tile.y * sz;
+                        GL.Vertex3(tx, ty, 0); GL.Vertex3(tx + sz, ty, 0);
+                        GL.Vertex3(tx + sz, ty + sz, 0); GL.Vertex3(tx, ty + sz, 0);
+                    }
                     GL.End();
 
                     Texture bgTex = ResolveUvPreviewBackgroundTexture(draws);
                     if (bgTex != null)
                     {
                         float bgAlpha = checkerEnabled ? 0.33333f : 0.95f;
-                        GlTextureBg(cx, cy, sz, bgTex, new Vector2(1f, 1f), Vector2.zero, bgAlpha);
+                        GlTextureBg(cx, cy, sz, bgTex, new Vector2(1f, 1f), Vector2.zero, bgAlpha, occupiedTiles);
                         glMat.SetPass(0);
                     }
 
@@ -1072,22 +1079,10 @@ namespace LightmapUvTool
                             ? 0.24f
                             : (checkerEnabled ? 0.33333f : fillAlpha * 0.45f);
                         float checkerAlpha = Mathf.Clamp(baseAlpha, 0.06f, 0.33333f);
-                        GlCheckerBg(cx, cy, sz, 8, checkerAlpha, pvChannel == 1);
+                        GlCheckerBg(cx, cy, sz, 8, checkerAlpha, pvChannel == 1, occupiedTiles);
                     }
 
-                    GL.Begin(GL.QUADS);
-                    GL.Color(new Color(.10f,.10f,.10f));
-                    for (int tu = -1; tu <= 3; tu++)
-                    for (int tv = -1; tv <= 3; tv++)
-                    {
-                        if (tu == 0 && tv == 0) continue;
-                        float tx = cx + tu * sz, ty = cy - tv * sz;
-                        GL.Vertex3(tx, ty, 0); GL.Vertex3(tx + sz, ty, 0);
-                        GL.Vertex3(tx + sz, ty + sz, 0); GL.Vertex3(tx, ty + sz, 0);
-                    }
-                    GL.End();
-
-                    GlGrid(cx, cy, sz);
+                    GlGrid(cx, cy, sz, occupiedTiles);
 
                     ClearFrameCaches();
                     shellColorKeyCacheDirty = false;
@@ -1665,7 +1660,24 @@ namespace LightmapUvTool
         static bool TOk(Vector2[] u, int n, int a, int b, int c) => a>=0&&a<n&&b>=0&&b<n&&c>=0&&c<n && UOk(u[a])&&UOk(u[b])&&UOk(u[c]);
         static void Vx(float ox, float oy, float sz, Vector2 u) => GL.Vertex3(ox+u.x*sz, oy+(1f-u.y)*sz, 0);
 
-        void GlGrid(float ox, float oy, float sz)
+        HashSet<Vector2Int> GetOccupiedUdimTiles(List<ValueTuple<Mesh, MeshEntry, int>> draws, int channel)
+        {
+            var tiles = new HashSet<Vector2Int>();
+            foreach (var item in draws)
+            {
+                var uvs = RdUvCached(item.Item1, channel);
+                if (uvs == null) continue;
+                for (int i = 0; i < uvs.Length; i++)
+                {
+                    var u = uvs[i];
+                    if (!UOk(u)) continue;
+                    tiles.Add(new Vector2Int(Mathf.FloorToInt(u.x), Mathf.FloorToInt(u.y)));
+                }
+            }
+            return tiles;
+        }
+
+        void GlGrid(float ox, float oy, float sz, HashSet<Vector2Int> occupiedTiles = null)
         {
             // Main 0-1 tile grid
             GL.Begin(GL.LINES);
@@ -1676,17 +1688,19 @@ namespace LightmapUvTool
             GL.Vertex3(ox+sz,oy,0); GL.Vertex3(ox+sz,oy+sz,0);
             GL.Vertex3(ox+sz,oy+sz,0); GL.Vertex3(ox,oy+sz,0);
             GL.Vertex3(ox,oy+sz,0); GL.Vertex3(ox,oy,0);
-            // Adjacent UDIM tiles (faded outlines)
+            // Adjacent UDIM tiles (faded outlines) – only occupied
             GL.Color(new Color(.3f,.3f,.3f,.4f));
-            for (int tu = -1; tu <= 3; tu++)
-            for (int tv = -1; tv <= 3; tv++)
+            if (occupiedTiles != null)
             {
-                if (tu == 0 && tv == 0) continue;
-                float tx = ox + tu * sz, ty = oy - tv * sz;
-                GL.Vertex3(tx,ty,0); GL.Vertex3(tx+sz,ty,0);
-                GL.Vertex3(tx+sz,ty,0); GL.Vertex3(tx+sz,ty+sz,0);
-                GL.Vertex3(tx+sz,ty+sz,0); GL.Vertex3(tx,ty+sz,0);
-                GL.Vertex3(tx,ty+sz,0); GL.Vertex3(tx,ty,0);
+                foreach (var tile in occupiedTiles)
+                {
+                    if (tile.x == 0 && tile.y == 0) continue;
+                    float tx = ox + tile.x * sz, ty = oy - tile.y * sz;
+                    GL.Vertex3(tx,ty,0); GL.Vertex3(tx+sz,ty,0);
+                    GL.Vertex3(tx+sz,ty,0); GL.Vertex3(tx+sz,ty+sz,0);
+                    GL.Vertex3(tx+sz,ty+sz,0); GL.Vertex3(tx,ty+sz,0);
+                    GL.Vertex3(tx,ty+sz,0); GL.Vertex3(tx,ty,0);
+                }
             }
             GL.End();
         }
@@ -1719,31 +1733,38 @@ namespace LightmapUvTool
             return null;
         }
 
-        void GlCheckerBg(float ox, float oy, float sz, int cells, float alpha, bool neutralGray = false)
+        void GlCheckerBg(float ox, float oy, float sz, int cells, float alpha, bool neutralGray = false, HashSet<Vector2Int> occupiedTiles = null)
         {
             if (cells <= 0 || alpha <= 0f) return;
             float cell = sz / cells;
             GL.Begin(GL.QUADS);
             Color darkColor = neutralGray ? new Color(.24f,.24f,.24f,alpha) : new Color(.20f,.20f,.20f,alpha);
             Color lightColor = neutralGray ? new Color(.32f,.32f,.32f,alpha) : new Color(.38f,.38f,.38f,alpha);
-            for (int y = 0; y < cells; y++)
+
+            var tilesToDraw = occupiedTiles ?? new HashSet<Vector2Int> { new Vector2Int(0, 0) };
+            foreach (var tile in tilesToDraw)
             {
-                for (int x = 0; x < cells; x++)
+                float tox = ox + tile.x * sz;
+                float toy = oy - tile.y * sz;
+                for (int y = 0; y < cells; y++)
                 {
-                    bool dark = ((x + y) & 1) == 0;
-                    GL.Color(dark ? darkColor : lightColor);
-                    float x0 = ox + x * cell;
-                    float y0 = oy + y * cell;
-                    GL.Vertex3(x0, y0, 0);
-                    GL.Vertex3(x0 + cell, y0, 0);
-                    GL.Vertex3(x0 + cell, y0 + cell, 0);
-                    GL.Vertex3(x0, y0 + cell, 0);
+                    for (int x = 0; x < cells; x++)
+                    {
+                        bool dark = ((x + y) & 1) == 0;
+                        GL.Color(dark ? darkColor : lightColor);
+                        float x0 = tox + x * cell;
+                        float y0 = toy + y * cell;
+                        GL.Vertex3(x0, y0, 0);
+                        GL.Vertex3(x0 + cell, y0, 0);
+                        GL.Vertex3(x0 + cell, y0 + cell, 0);
+                        GL.Vertex3(x0, y0 + cell, 0);
+                    }
                 }
             }
             GL.End();
         }
 
-        void GlTextureBg(float ox, float oy, float sz, Texture tex, Vector2 tiling, Vector2 offset, float alpha)
+        void GlTextureBg(float ox, float oy, float sz, Texture tex, Vector2 tiling, Vector2 offset, float alpha, HashSet<Vector2Int> occupiedTiles = null)
         {
             if (tex == null || texMat == null) return;
 
@@ -1752,21 +1773,32 @@ namespace LightmapUvTool
             texMat.SetPass(0);
 
             GL.Begin(GL.QUADS);
-            for (int tu = -1; tu <= 3; tu++)
-            for (int tv = -1; tv <= 3; tv++)
+            if (occupiedTiles != null)
             {
-                float tx = ox + tu * sz;
-                float ty = oy - tv * sz;
+                foreach (var tile in occupiedTiles)
+                {
+                    int tu = tile.x, tv = tile.y;
+                    float tx = ox + tu * sz;
+                    float ty = oy - tv * sz;
 
-                float u0 = (tu + offset.x) * tiling.x;
-                float u1 = (tu + 1 + offset.x) * tiling.x;
-                float v0 = (tv + offset.y) * tiling.y;
-                float v1 = (tv + 1 + offset.y) * tiling.y;
+                    float u0 = (tu + offset.x) * tiling.x;
+                    float u1 = (tu + 1 + offset.x) * tiling.x;
+                    float v0 = (tv + offset.y) * tiling.y;
+                    float v1 = (tv + 1 + offset.y) * tiling.y;
 
-                GL.TexCoord2(u0, v1); GL.Vertex3(tx, ty, 0);
-                GL.TexCoord2(u1, v1); GL.Vertex3(tx + sz, ty, 0);
-                GL.TexCoord2(u1, v0); GL.Vertex3(tx + sz, ty + sz, 0);
-                GL.TexCoord2(u0, v0); GL.Vertex3(tx, ty + sz, 0);
+                    GL.TexCoord2(u0, v1); GL.Vertex3(tx, ty, 0);
+                    GL.TexCoord2(u1, v1); GL.Vertex3(tx + sz, ty, 0);
+                    GL.TexCoord2(u1, v0); GL.Vertex3(tx + sz, ty + sz, 0);
+                    GL.TexCoord2(u0, v0); GL.Vertex3(tx, ty + sz, 0);
+                }
+            }
+            else
+            {
+                float tx = ox, ty = oy;
+                GL.TexCoord2(offset.x * tiling.x, (1 + offset.y) * tiling.y); GL.Vertex3(tx, ty, 0);
+                GL.TexCoord2((1 + offset.x) * tiling.x, (1 + offset.y) * tiling.y); GL.Vertex3(tx + sz, ty, 0);
+                GL.TexCoord2((1 + offset.x) * tiling.x, offset.y * tiling.y); GL.Vertex3(tx + sz, ty + sz, 0);
+                GL.TexCoord2(offset.x * tiling.x, offset.y * tiling.y); GL.Vertex3(tx, ty + sz, 0);
             }
             GL.End();
         }
