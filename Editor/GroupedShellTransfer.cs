@@ -1049,6 +1049,43 @@ namespace LightmapUvTool
                 }
             }
 
+            // ── Phase 2c: Detect source UV2 collisions ──
+            // Non-merged target shells assigned to different source shells
+            // whose UV2 AABBs overlap will produce diff-src UV2 overlaps.
+            // Force the smaller shell to merged+3D to disambiguate via 3D projection.
+            {
+                int uv2CollisionForced = 0;
+                for (int a = 0; a < tgtShells.Count; a++)
+                {
+                    if (tgtIsMerged[a]) continue;
+                    int srcA = result.targetShellToSourceShell[a];
+                    if (srcA < 0) continue;
+
+                    for (int b = a + 1; b < tgtShells.Count; b++)
+                    {
+                        if (tgtIsMerged[b]) continue;
+                        int srcB = result.targetShellToSourceShell[b];
+                        if (srcB < 0 || srcB == srcA) continue;
+
+                        // Check if source shells' UV2 AABBs overlap
+                        if (srcUv2Min[srcA].x >= srcUv2Max[srcB].x || srcUv2Max[srcA].x <= srcUv2Min[srcB].x ||
+                            srcUv2Min[srcA].y >= srcUv2Max[srcB].y || srcUv2Max[srcA].y <= srcUv2Min[srcB].y)
+                            continue;
+
+                        // UV2 collision detected — force smaller shell to merged+3D
+                        int smaller = tgtShells[a].faceIndices.Count <= tgtShells[b].faceIndices.Count ? a : b;
+                        tgtIsMerged[smaller] = true;
+                        tgtForce3DFallback[smaller] = true;
+                        uv2CollisionForced++;
+
+                        UvtLog.Info($"[GroupedTransfer] UV2 collision: t{a}(src{srcA}) vs t{b}(src{srcB}) " +
+                            $"→ t{smaller} forced merged+3D");
+                    }
+                }
+                if (uv2CollisionForced > 0)
+                    UvtLog.Info($"[GroupedTransfer] Phase 2c: {uv2CollisionForced} shells forced merged+3D due to UV2 collision");
+            }
+
             // ── Phase 3: Transfer UV2 using final source assignments ──
             // Verbose: dump per-shell matching for diagnostics
             for (int tsi = 0; tsi < tgtShells.Count; tsi++)
