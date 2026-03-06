@@ -1852,7 +1852,16 @@ namespace LightmapUvTool
             float py = oy + (1f - drawUv.y) * sz;
             // Use same UV-space radius as 3D spot shader, converted to pixels
             float r = Mathf.Max(0.012f * sz, 4f);
+            float gr = r * 1.6f;
 
+            // Glow (larger, semi-transparent)
+            GL.Begin(GL.LINES);
+            GL.Color(new Color(1f, .75f, .2f, .18f));
+            GL.Vertex3(px - gr, py, 0); GL.Vertex3(px + gr, py, 0);
+            GL.Vertex3(px, py - gr, 0); GL.Vertex3(px, py + gr, 0);
+            GL.End();
+
+            // Crosshair
             GL.Begin(GL.LINES);
             GL.Color(Color.black);
             GL.Vertex3(px - r - 1f, py, 0); GL.Vertex3(px + r + 1f, py, 0);
