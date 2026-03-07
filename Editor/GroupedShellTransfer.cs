@@ -1234,30 +1234,19 @@ namespace LightmapUvTool
                             bool sameIssues = b.issues == bestOverlapIssues;
                             bool isHintMatch = (si == hintSrc);
                             bool bestIsHintMatch = (bestOverlapSrc == hintSrc);
-
-                            // Promote hint source to vote-winner status when its votes
-                            // are competitive (within 30% of winner). This ensures
-                            // cross-LOD consistency for thin belts/straps where LOD2
-                            // geometry changes cause marginal vote flips.
                             bool isVoteWinner = (si == voteSrc && voteCount > 0);
                             bool bestIsVoteWinner = (bestOverlapSrc == voteSrc && voteCount > 0);
-                            if (hintSrc >= 0 && totalVotes > 0)
-                            {
-                                int hintVotes = srcVoteCount[hintSrc];
-                                bool hintCompetitive = hintVotes >= voteCount * 0.7f;
-                                if (hintCompetitive)
-                                {
-                                    // Treat hint match as equivalent to vote winner
-                                    isVoteWinner = isVoteWinner || isHintMatch;
-                                    bestIsVoteWinner = bestIsVoteWinner || bestIsHintMatch;
-                                }
-                            }
 
-                            // Priority: issues → vote/hint winner → hint match → vote count
+                            // Priority: issues → hint match → vote winner → vote count
+                            // Cross-LOD hint is the strongest signal for overlap groups:
+                            // LOD0 has full geometry and reliably identifies the correct
+                            // source. Lower LODs have simplified geometry where face-
+                            // proximity votes can unanimously pick a wrong overlapping
+                            // copy (all copies share the same 3D region). Trust LOD0.
                             bool wins = betterIssues
-                                || (sameIssues && isVoteWinner && !bestIsVoteWinner)
-                                || (sameIssues && isVoteWinner == bestIsVoteWinner && isHintMatch && !bestIsHintMatch)
-                                || (sameIssues && isVoteWinner == bestIsVoteWinner && isHintMatch == bestIsHintMatch
+                                || (sameIssues && isHintMatch && !bestIsHintMatch)
+                                || (sameIssues && isHintMatch == bestIsHintMatch && isVoteWinner && !bestIsVoteWinner)
+                                || (sameIssues && isHintMatch == bestIsHintMatch && isVoteWinner == bestIsVoteWinner
                                     && votes > srcVoteCount[bestOverlapSrc]);
 
                             if (wins)
