@@ -1109,13 +1109,74 @@ namespace LightmapUvTool
                     Dictionary<int, Vector2> bestOverlapUv2 = null;
                     int bestOverlapIssues = int.MaxValue;
                     int bestOverlapCoverage = -1;
-                    int bestOverlapRayHits = -1;
-                    float bestOverlapDistSq = float.MaxValue;
                     int bestOverlapSrc = chosenSrc;
                     string bestOverlapMethod = "";
 
                     // Target 3D centroid for distance-based source selection
                     Vector3 tgtCentroid = result.targetShellCentroids[tsi];
+
+                    // ── Pre-pass: 3D face-proximity voting with normal alignment ──
+                    // For each target face centroid, find the nearest source face centroid
+                    // (across all overlap group members) with aligned normal. Vote for that
+                    // source. The source with the most votes is the physically correct one.
+                    // This is deterministic across LODs because source faces are fixed.
+                    var srcVoteCount = new int[srcShells.Count];
+                    int totalVotes = 0;
+
+                    foreach (int tfi in tShell.faceIndices)
+                    {
+                        int ti0 = tgtTris[tfi * 3], ti1 = tgtTris[tfi * 3 + 1], ti2 = tgtTris[tfi * 3 + 2];
+                        if (ti0 >= tVerts.Length || ti1 >= tVerts.Length || ti2 >= tVerts.Length) continue;
+
+                        Vector3 tFC = (tVerts[ti0] + tVerts[ti1] + tVerts[ti2]) / 3f;
+                        Vector3 tFN = Vector3.Cross(tVerts[ti1] - tVerts[ti0], tVerts[ti2] - tVerts[ti0]);
+                        if (tFN.sqrMagnitude < 1e-12f) continue;
+                        tFN.Normalize();
+
+                        float bestDistSq = float.MaxValue;
+                        int bestSrc = -1;
+
+                        foreach (int si in groupMembers)
+                        {
+                            foreach (int sfi in srcShells[si].faceIndices)
+                            {
+                                int s0 = srcTris[sfi * 3], s1 = srcTris[sfi * 3 + 1], s2 = srcTris[sfi * 3 + 2];
+                                if (s0 >= srcVerts.Length || s1 >= srcVerts.Length || s2 >= srcVerts.Length) continue;
+
+                                Vector3 sFC = (srcVerts[s0] + srcVerts[s1] + srcVerts[s2]) / 3f;
+                                float dSq = (tFC - sFC).sqrMagnitude;
+                                if (dSq >= bestDistSq) continue;
+
+                                Vector3 sFN = Vector3.Cross(srcVerts[s1] - srcVerts[s0], srcVerts[s2] - srcVerts[s0]);
+                                if (sFN.sqrMagnitude < 1e-12f) continue;
+                                sFN.Normalize();
+
+                                // Skip backfacing: only match faces pointing in a similar direction
+                                if (Vector3.Dot(tFN, sFN) < 0.3f) continue;
+
+                                bestDistSq = dSq;
+                                bestSrc = si;
+                            }
+                        }
+
+                        if (bestSrc >= 0)
+                        {
+                            srcVoteCount[bestSrc]++;
+                            totalVotes++;
+                        }
+                    }
+
+                    // Find vote winner
+                    int voteSrc = -1;
+                    int voteCount = 0;
+                    foreach (int si in groupMembers)
+                    {
+                        if (srcVoteCount[si] > voteCount)
+                        {
+                            voteCount = srcVoteCount[si];
+                            voteSrc = si;
+                        }
+                    }
 
                     // Check for cross-LOD hint: find nearest previous-LOD merged shell
                     // and prefer its source for consistent cross-LOD appearance.
@@ -1125,7 +1186,6 @@ namespace LightmapUvTool
                         float bestHintDistSq = float.MaxValue;
                         foreach (var hint in previousLodHints)
                         {
-                            // Only consider hints from the same overlap group
                             if (!groupMembers.Contains(hint.sourceShellIndex)) continue;
                             float d = (tgtCentroid - hint.centroid3D).sqrMagnitude;
                             if (d < bestHintDistSq)
@@ -1153,47 +1213,34 @@ namespace LightmapUvTool
                             srcUv2Min, srcUv2Max, groupMembers,
                             kRayMaxDist);
 
-                        // Count ray hits for this source — measures 3D proximity reliability.
-                        // Ray-based methods (ray+partition) use actual 3D raycasting, so more
-                        // hits = more vertices physically match this source. This is the most
-                        // reliable indicator of which source is correct for overlapping geometry.
-                        int rayHits = 0;
-                        foreach (var c in allCandidates)
-                        {
-                            if (c.method == "ray+partition" && c.coverage > rayHits)
-                                rayHits = c.coverage;
-                        }
-
                         var best = SelectBestCandidate(allCandidates, tShell.faceIndices, tgtTris, tUv0);
                         if (best.HasValue)
                         {
                             var b = best.Value;
-                            float distSq = (tgtCentroid - srcCentroid3D[si]).sqrMagnitude;
+                            int votes = srcVoteCount[si];
 
                             bool betterIssues = b.issues < bestOverlapIssues;
                             bool sameIssues = b.issues == bestOverlapIssues;
-                            bool moreRayHits = rayHits > bestOverlapRayHits;
-                            bool sameRayHits = rayHits == bestOverlapRayHits;
+                            bool isVoteWinner = (si == voteSrc && voteCount > 0);
+                            bool bestIsVoteWinner = (bestOverlapSrc == voteSrc && voteCount > 0);
                             bool isHintMatch = (si == hintSrc);
                             bool bestIsHintMatch = (bestOverlapSrc == hintSrc);
-                            bool closer3D = distSq < bestOverlapDistSq;
 
-                            // Priority: issues → ray hits → hint match → 3D distance
-                            // Ray hits are the strongest 3D signal — they prove vertices
-                            // physically correspond to this source. This is deterministic
-                            // across LODs because the same source mesh is used.
+                            // Priority: issues → 3D face vote → hint match → vote count
+                            // Face-proximity voting is the strongest 3D signal — it proves
+                            // that target faces physically overlap with this source's faces
+                            // with aligned normals. Deterministic across LODs.
                             bool wins = betterIssues
-                                || (sameIssues && moreRayHits)
-                                || (sameIssues && sameRayHits && isHintMatch && !bestIsHintMatch)
-                                || (sameIssues && sameRayHits && isHintMatch == bestIsHintMatch && closer3D);
+                                || (sameIssues && isVoteWinner && !bestIsVoteWinner)
+                                || (sameIssues && isVoteWinner == bestIsVoteWinner && isHintMatch && !bestIsHintMatch)
+                                || (sameIssues && isVoteWinner == bestIsVoteWinner && isHintMatch == bestIsHintMatch
+                                    && votes > srcVoteCount[bestOverlapSrc]);
 
                             if (wins)
                             {
                                 bestOverlapUv2 = b.uv2;
                                 bestOverlapIssues = b.issues;
                                 bestOverlapCoverage = b.coverage;
-                                bestOverlapRayHits = rayHits;
-                                bestOverlapDistSq = distSq;
                                 bestOverlapSrc = si;
                                 bestOverlapMethod = b.method;
                             }
@@ -1206,7 +1253,8 @@ namespace LightmapUvTool
 
                         UvtLog.Info($"[GroupedTransfer]   t{tsi}: overlap unified " +
                             $"(best src{bestOverlapSrc}, {bestOverlapCoverage} cov, " +
-                            $"{bestOverlapIssues} issues, rayHits={bestOverlapRayHits}, " +
+                            $"{bestOverlapIssues} issues, " +
+                            $"vote=src{voteSrc}({voteCount}/{totalVotes}), " +
                             $"method={bestOverlapMethod}, " +
                             $"tried {groupMembers.Count} shells" +
                             (hintSrc >= 0 ? $", hint=src{hintSrc}" : "") +
