@@ -1097,7 +1097,15 @@ namespace LightmapUvTool
                     int bestOverlapSrc = chosenSrc;
                     string bestOverlapMethod = "";
 
+                    // Try preferred source (chosenSrc) first so it gets the tie-break advantage
+                    var sortedMembers = new List<int>(groupMembers.Count);
                     foreach (int si in groupMembers)
+                    {
+                        if (si == chosenSrc) sortedMembers.Insert(0, si);
+                        else sortedMembers.Add(si);
+                    }
+
+                    foreach (int si in sortedMembers)
                     {
                         var allCandidates = GenerateOverlapCandidates(
                             tShell, si,
@@ -1118,8 +1126,16 @@ namespace LightmapUvTool
                         if (best.HasValue)
                         {
                             var b = best.Value;
-                            if (b.issues < bestOverlapIssues
-                                || (b.issues == bestOverlapIssues && b.coverage > bestOverlapCoverage))
+                            // Preferred source (chosenSrc) wins ties: only replace if strictly
+                            // fewer issues, or same issues with significantly more coverage.
+                            // This ensures cross-LOD consistency for overlapping geometry.
+                            bool isPreferred = (bestOverlapSrc == chosenSrc);
+                            bool betterIssues = b.issues < bestOverlapIssues;
+                            bool sameIssues = b.issues == bestOverlapIssues;
+                            bool moreCoverage = b.coverage > bestOverlapCoverage;
+
+                            if (betterIssues
+                                || (sameIssues && moreCoverage && !isPreferred))
                             {
                                 bestOverlapUv2 = b.uv2;
                                 bestOverlapIssues = b.issues;
@@ -2152,19 +2168,14 @@ namespace LightmapUvTool
                     uv2Map[vi] = perPartXform[pid].Apply(tUv0[vi]);
                 }
 
-                // Reject if result goes outside source shell's UV2 AABB or 0-1 range
+                // Reject if any vertex goes outside 0-1 range
                 bool partXfRejected = false;
                 if (uv2Map.Count > 0)
                 {
-                    const float kMargin = 0.02f;
-                    Vector2 sMin = srcUv2Min[srcIdx];
-                    Vector2 sMax = srcUv2Max[srcIdx];
                     foreach (var kv in uv2Map)
                     {
                         Vector2 uv = kv.Value;
-                        if (uv.x < sMin.x - kMargin || uv.x > sMax.x + kMargin ||
-                            uv.y < sMin.y - kMargin || uv.y > sMax.y + kMargin ||
-                            uv.x < -0.01f || uv.x > 1.01f || uv.y < -0.01f || uv.y > 1.01f)
+                        if (uv.x < -0.01f || uv.x > 1.01f || uv.y < -0.01f || uv.y > 1.01f)
                         {
                             partXfRejected = true;
                             break;
@@ -2220,17 +2231,9 @@ namespace LightmapUvTool
                         xfMax = Vector2.Max(xfMax, kv.Value);
                     }
 
-                    // Reject if result extends significantly outside source shell's UV2 AABB
-                    const float kSrcMargin = 0.02f;
-                    Vector2 sMin = srcUv2Min[srcIdx];
-                    Vector2 sMax = srcUv2Max[srcIdx];
-                    if (xfMin.x < sMin.x - kSrcMargin || xfMax.x > sMax.x + kSrcMargin ||
-                        xfMin.y < sMin.y - kSrcMargin || xfMax.y > sMax.y + kSrcMargin)
-                        rejected = true;
-
-                    // Reject if result goes outside 0-1 range
-                    if (!rejected && (xfMin.x < -0.01f || xfMax.x > 1.01f ||
-                                      xfMin.y < -0.01f || xfMax.y > 1.01f))
+                    // Reject if result goes outside 0-1 range (catches wild extrapolation)
+                    if (xfMin.x < -0.01f || xfMax.x > 1.01f ||
+                        xfMin.y < -0.01f || xfMax.y > 1.01f)
                         rejected = true;
 
                     // Reject if result overlaps another source shell's UV2 region
