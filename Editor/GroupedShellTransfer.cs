@@ -2152,7 +2152,27 @@ namespace LightmapUvTool
                     uv2Map[vi] = perPartXform[pid].Apply(tUv0[vi]);
                 }
 
+                // Reject if result goes outside source shell's UV2 AABB or 0-1 range
+                bool partXfRejected = false;
                 if (uv2Map.Count > 0)
+                {
+                    const float kMargin = 0.02f;
+                    Vector2 sMin = srcUv2Min[srcIdx];
+                    Vector2 sMax = srcUv2Max[srcIdx];
+                    foreach (var kv in uv2Map)
+                    {
+                        Vector2 uv = kv.Value;
+                        if (uv.x < sMin.x - kMargin || uv.x > sMax.x + kMargin ||
+                            uv.y < sMin.y - kMargin || uv.y > sMax.y + kMargin ||
+                            uv.x < -0.01f || uv.x > 1.01f || uv.y < -0.01f || uv.y > 1.01f)
+                        {
+                            partXfRejected = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!partXfRejected && uv2Map.Count > 0)
                     candidates.Add(new OverlapCandidate
                     {
                         uv2 = uv2Map, issues = -1, coverage = uv2Map.Count,
@@ -2187,8 +2207,8 @@ namespace LightmapUvTool
                     uv2Map[vi] = fullXform.Apply(tUv0[vi]);
                 }
 
-                // Cross-source UV2 AABB guard: reject if xform extrapolates
-                // into another source shell's UV2 region
+                // Guard: reject if xform result goes outside source shell's UV2 AABB
+                // (with margin) or outside 0-1 range, or overlaps another source's UV2
                 bool rejected = false;
                 if (uv2Map.Count > 0)
                 {
@@ -2199,14 +2219,32 @@ namespace LightmapUvTool
                         xfMin = Vector2.Min(xfMin, kv.Value);
                         xfMax = Vector2.Max(xfMax, kv.Value);
                     }
-                    for (int si = 0; si < srcShellCount; si++)
+
+                    // Reject if result extends significantly outside source shell's UV2 AABB
+                    const float kSrcMargin = 0.02f;
+                    Vector2 sMin = srcUv2Min[srcIdx];
+                    Vector2 sMax = srcUv2Max[srcIdx];
+                    if (xfMin.x < sMin.x - kSrcMargin || xfMax.x > sMax.x + kSrcMargin ||
+                        xfMin.y < sMin.y - kSrcMargin || xfMax.y > sMax.y + kSrcMargin)
+                        rejected = true;
+
+                    // Reject if result goes outside 0-1 range
+                    if (!rejected && (xfMin.x < -0.01f || xfMax.x > 1.01f ||
+                                      xfMin.y < -0.01f || xfMax.y > 1.01f))
+                        rejected = true;
+
+                    // Reject if result overlaps another source shell's UV2 region
+                    if (!rejected)
                     {
-                        if (si == srcIdx) continue;
-                        if (xfMin.x < srcUv2Max[si].x && xfMax.x > srcUv2Min[si].x &&
-                            xfMin.y < srcUv2Max[si].y && xfMax.y > srcUv2Min[si].y)
+                        for (int si = 0; si < srcShellCount; si++)
                         {
-                            rejected = true;
-                            break;
+                            if (si == srcIdx) continue;
+                            if (xfMin.x < srcUv2Max[si].x && xfMax.x > srcUv2Min[si].x &&
+                                xfMin.y < srcUv2Max[si].y && xfMax.y > srcUv2Min[si].y)
+                            {
+                                rejected = true;
+                                break;
+                            }
                         }
                     }
                 }
