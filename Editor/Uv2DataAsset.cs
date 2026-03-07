@@ -41,31 +41,30 @@ namespace LightmapUvTool
             for (int s = 0; s < mesh.subMeshCount; s++)
                 fp.submeshTriCounts[s] = mesh.GetTriangles(s).Length;
 
-            // Order-independent hash over quantized positions.
-            // Uses per-vertex FNV hash XORed together so vertex reordering
-            // during FBX reimport doesn't change the result.
+            // Order-DEPENDENT hash over quantized positions.
+            // Must be order-dependent because vertex remap is order-dependent:
+            // if Unity reorders vertices on reimport, we MUST detect it as stale
+            // so RebuildRemapFromPositions runs. Order-independent hash would
+            // hide the reordering and cause the original remap to be applied to
+            // wrong vertices, causing catastrophic 3D stretching.
             var positions = mesh.vertices;
-            uint posHash = 0u;
+            uint posHash = 2166136261u;
             for (int i = 0; i < positions.Length; i++)
             {
-                uint vh = 2166136261u;
-                vh = FnvStep(vh, Mathf.RoundToInt(positions[i].x * 10000f));
-                vh = FnvStep(vh, Mathf.RoundToInt(positions[i].y * 10000f));
-                vh = FnvStep(vh, Mathf.RoundToInt(positions[i].z * 10000f));
-                posHash ^= vh;
+                posHash = FnvStep(posHash, Mathf.RoundToInt(positions[i].x * 10000f));
+                posHash = FnvStep(posHash, Mathf.RoundToInt(positions[i].y * 10000f));
+                posHash = FnvStep(posHash, Mathf.RoundToInt(positions[i].z * 10000f));
             }
             fp.positionsHash = unchecked((int)posHash);
 
-            // Order-independent hash over quantized UV0
+            // Order-DEPENDENT hash over quantized UV0
             var uv0 = new List<Vector2>();
             mesh.GetUVs(0, uv0);
-            uint uvHash = 0u;
+            uint uvHash = 2166136261u;
             for (int i = 0; i < uv0.Count; i++)
             {
-                uint vh = 2166136261u;
-                vh = FnvStep(vh, Mathf.RoundToInt(uv0[i].x * 10000f));
-                vh = FnvStep(vh, Mathf.RoundToInt(uv0[i].y * 10000f));
-                uvHash ^= vh;
+                uvHash = FnvStep(uvHash, Mathf.RoundToInt(uv0[i].x * 10000f));
+                uvHash = FnvStep(uvHash, Mathf.RoundToInt(uv0[i].y * 10000f));
             }
             fp.uv0Hash = unchecked((int)uvHash);
 
