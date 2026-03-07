@@ -1,13 +1,17 @@
 # Changelog
 
+## [0.13.29] - 2026-03-07
+
+### Fixed — Demote centroid distance to tiebreaker in overlap ranking
+- Centroid distance was overriding face-proximity voting (e.g. LOD1 t106: 14/14 votes for src96 but centroid picked src104). A small nearby source shell can have a closer centroid while its individual faces are wrong.
+- **New ranking chain**: `issues → hint → vote winner → vote count → centroid distance`
+- Face-proximity voting is the most reliable geometric signal (compares individual faces). Cross-LOD hint provides consistency. Centroid distance and area ratio kept for diagnostics and final tiebreaker only.
+
 ## [0.13.28] - 2026-03-07
 
-### Fixed — Multi-signal overlap shell ranking for cross-LOD stability
-- **3D centroid distance ranking**: primary geometric signal for overlap groups. Source shells significantly closer in 3D (back-projection check) win over farther ones. Uses 30% bucketed tolerance.
-- **3D area ratio matching**: prefer source shells with matching 3D triangle area. Catches mismatches where overlapping copies differ in surface area due to curvature/position.
-- **Cross-LOD hint priority**: hint from previous LOD breaks ties among centroid-equivalent sources, ensuring consistency when LOD2 geometry simplification causes face-proximity votes to pick wrong copy.
-- **Ranking chain**: `issues → centroid proximity → hint → area ratio → vote winner → vote count`
-- **Diagnostic logging**: overlap unified log now includes `dist3D` and `areaR` for debugging.
+### Added — 3D centroid distance + area ratio diagnostic data
+- Precompute per-source-shell 3D area and centroid distance for overlap groups.
+- Log `dist3D` and `areaR` in overlap unified output for debugging.
 
 ### Fixed (0.13.27) — Deterministic overlap shell matching
 - **Vote tie-breaking**: use 3D centroid distance as deterministic tiebreaker when vote counts are identical.

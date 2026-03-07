@@ -1146,12 +1146,6 @@ namespace LightmapUvTool
                         srcGroupDistSq[si] = (srcCentroid3D[si] - tgtCentroid).sqrMagnitude;
                     }
 
-                    // Find the closest source by centroid distance (for bucketed comparison)
-                    float minCentroidDistSq = float.MaxValue;
-                    foreach (int si in groupMembers)
-                        if (srcGroupDistSq[si] < minCentroidDistSq)
-                            minCentroidDistSq = srcGroupDistSq[si];
-
                     // ── Pre-pass: 3D face-proximity voting with normal alignment ──
                     // For each target face centroid, find the nearest source face centroid
                     // (across all overlap group members) with aligned normal. Vote for that
@@ -1270,46 +1264,25 @@ namespace LightmapUvTool
                             bool bestIsHintMatch = (bestOverlapSrc == hintSrc);
                             bool isVoteWinner = (si == voteSrc && voteCount > 0);
                             bool bestIsVoteWinner = (bestOverlapSrc == voteSrc && voteCount > 0);
+                            bool closerCentroid = centroidDistSq < bestOverlapCentroidDistSq - 1e-8f;
 
-                            // Centroid distance bucketed comparison (30% tolerance).
-                            // Sources within the "close bucket" (<=1.3× minimum distance)
-                            // are considered equivalent — tiebroken by other signals.
-                            // Sources significantly farther lose to closer ones.
-                            float closeBucket = minCentroidDistSq * 1.69f + 1e-6f; // 1.3² = 1.69
-                            bool inCloseBucket = centroidDistSq <= closeBucket;
-                            bool bestInCloseBucket = bestOverlapCentroidDistSq <= closeBucket;
-                            bool centroidWins = inCloseBucket && !bestInCloseBucket;
-                            bool centroidEqual = inCloseBucket == bestInCloseBucket;
-
-                            // 3D area ratio: prefer source whose 3D area matches target.
-                            // Overlap copies at the same 3D region have similar areas;
-                            // copies at different positions may differ due to curvature.
-                            float areaRatio = (tgt3DArea > 1e-8f && srcGroupArea[si] > 1e-8f)
-                                ? Mathf.Min(srcGroupArea[si], tgt3DArea) / Mathf.Max(srcGroupArea[si], tgt3DArea)
-                                : 0f;
-                            float bestAreaRatio = (tgt3DArea > 1e-8f && bestOverlapSrc >= 0 && srcGroupArea[bestOverlapSrc] > 1e-8f)
-                                ? Mathf.Min(srcGroupArea[bestOverlapSrc], tgt3DArea) / Mathf.Max(srcGroupArea[bestOverlapSrc], tgt3DArea)
-                                : 0f;
-                            bool betterArea = areaRatio > bestAreaRatio + 0.15f;
-                            bool sameArea = !betterArea && areaRatio >= bestAreaRatio - 0.15f;
-
-                            // Priority: issues → centroid proximity → hint → area → vote → count
-                            // 1) Fewer issues always wins
-                            // 2) Significantly closer 3D centroid wins (back-projection check)
-                            // 3) Cross-LOD hint ensures consistency across LODs
-                            // 4) Better 3D area match (catches size mismatches)
-                            // 5) Face-proximity vote winner
-                            // 6) Higher vote count as final tiebreaker
+                            // Priority: issues → hint → vote winner → vote count → centroid distance
+                            // Face-proximity voting is the most reliable geometric signal
+                            // because it compares individual faces (robust on simplified LODs).
+                            // Centroid distance can be misleading: a small nearby source shell
+                            // may have a closer centroid but its faces aren't the right match.
+                            // Cross-LOD hint provides consistency when votes are ambiguous.
                             bool wins = betterIssues
-                                || (sameIssues && centroidWins)
-                                || (sameIssues && centroidEqual && isHintMatch && !bestIsHintMatch)
-                                || (sameIssues && centroidEqual && isHintMatch == bestIsHintMatch
-                                    && betterArea)
-                                || (sameIssues && centroidEqual && isHintMatch == bestIsHintMatch
-                                    && sameArea && isVoteWinner && !bestIsVoteWinner)
-                                || (sameIssues && centroidEqual && isHintMatch == bestIsHintMatch
-                                    && sameArea && isVoteWinner == bestIsVoteWinner
-                                    && votes > srcVoteCount[bestOverlapSrc]);
+                                || (sameIssues && isHintMatch && !bestIsHintMatch)
+                                || (sameIssues && isHintMatch == bestIsHintMatch
+                                    && isVoteWinner && !bestIsVoteWinner)
+                                || (sameIssues && isHintMatch == bestIsHintMatch
+                                    && isVoteWinner == bestIsVoteWinner
+                                    && votes > srcVoteCount[bestOverlapSrc])
+                                || (sameIssues && isHintMatch == bestIsHintMatch
+                                    && isVoteWinner == bestIsVoteWinner
+                                    && votes == srcVoteCount[bestOverlapSrc]
+                                    && closerCentroid);
 
                             if (wins)
                             {
