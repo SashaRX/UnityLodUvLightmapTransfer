@@ -7,6 +7,9 @@
 - **Root cause B — No used-tracking in `RebuildRemapFromPositions`**: When multiple raw vertices share the same position (UV seams, hard edges), all could match to the same stored vertex, leaving other optimized indices unfilled (zero position/normal/UV0 → 3D stretching). Added `usedStored[]` tracking with priority: unused+valid-remap > unused+invalid > used. Fixes 864/856/323 unfilled vertices on TrainСarriage LOD0/1/2.
 - **Normal-based disambiguation**: Added `vertNormals` to sidecar (raw FBX normals). When UV0 alone can't distinguish candidates at the same position (hard edges: same pos+UV0, different normal), normal dot product breaks ties.
 - **Fixed matched counter**: No longer double-counts vertices where `origRemap[j] == -1` (Pass 1 increments, Pass 2 re-processes since `newRemap[i] < 0`).
+- **Single-candidate reuse**: When only one stored vertex exists at a position, always use it (reuse is safe — same position = same origRemap). Previously returned -1 if already used, leaving 2 vertices unfilled on LOD0/LOD1.
+- **Pass 2 allows reuse**: Nearest-neighbor fallback no longer filters by `usedStored` — these are rare bucket-boundary cases where the nearest stored vertex should have the correct origRemap.
+- **Fingerprint carry-forward fix**: Detect raw vs postprocessed mesh by comparing vertex count to stored remap length. Compute fresh fingerprint when mesh is raw (after Reset), carry forward only when postprocessed. Ensures new order-independent hash takes effect without requiring manual Reset.
 
 ## [0.13.31] - 2026-03-07
 

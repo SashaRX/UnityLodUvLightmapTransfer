@@ -571,7 +571,10 @@ namespace LightmapUvTool
                 }
             }
 
-            // Pass 2: nearest-neighbor fallback for bucket boundary misses
+            // Pass 2: nearest-neighbor fallback for bucket boundary misses.
+            // Allow reuse of already-used stored vertices here — these are rare
+            // boundary cases where the quantization rounded differently, and the
+            // nearest stored vertex (same position) should have the same origRemap.
             if (matched < newCount)
             {
                 for (int i = 0; i < newCount; i++)
@@ -581,14 +584,12 @@ namespace LightmapUvTool
                     int bestOld = -1;
                     for (int j = 0; j < storedCount; j++)
                     {
-                        if (usedStored[j]) continue;
                         float d = Vector3.SqrMagnitude(newPos[i] - storedPos[j]);
                         if (d < bestDist) { bestDist = d; bestOld = j; }
                     }
                     if (bestOld >= 0 && bestDist < 1e-4f)
                     {
                         newRemap[i] = origRemap[bestOld];
-                        usedStored[bestOld] = true;
                         if (origRemap[bestOld] >= 0) matched++;
                     }
                 }
@@ -614,8 +615,9 @@ namespace LightmapUvTool
         {
             if (candidates.Count == 1)
             {
-                int ci = candidates[0];
-                return usedStored[ci] ? -1 : ci;
+                // Single candidate: always use it. Multiple raw verts can safely
+                // map to the same stored vert (dedup — same position, same origRemap).
+                return candidates[0];
             }
 
             int bestOld = -1;

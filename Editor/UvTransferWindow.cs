@@ -3086,25 +3086,30 @@ namespace LightmapUvTool
 
                 string meshName = e.fbxMesh != null ? e.fbxMesh.name : e.originalMesh.name;
 
-                // Carry forward existing fingerprint from sidecar when available.
-                // On repeat runs, e.fbxMesh is mf.sharedMesh which may have been
-                // modified by the postprocessor (replay changes vertex order),
-                // so recomputing would produce a hash that doesn't match the raw FBX.
-                // The original fingerprint (from the first run on a clean FBX) is still valid
-                // as long as the FBX file itself hasn't changed.
+                // Fingerprint: detect whether e.fbxMesh is raw FBX or postprocessed.
+                // On repeat runs, e.fbxMesh = mf.sharedMesh may be the postprocessed mesh
+                // (replay changes vertex count). If vertex count matches the stored remap
+                // length (= original raw count), the mesh is likely raw → compute fresh.
+                // If counts differ, the mesh is postprocessed → carry forward old fingerprint.
                 MeshFingerprint fp = null;
                 if (e.fbxMesh != null)
                 {
                     var existingSidecar = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(
                         Uv2DataAsset.GetSidecarPath(fbxPath));
                     var existingEntry = existingSidecar != null ? existingSidecar.Find(meshName) : null;
-                    if (existingEntry?.sourceFingerprint != null && existingEntry.hasReplayData)
+                    bool meshLikelyRaw = existingEntry == null
+                        || !existingEntry.hasReplayData
+                        || existingEntry.vertexRemap == null
+                        || e.fbxMesh.vertexCount == existingEntry.vertexRemap.Length;
+
+                    if (!meshLikelyRaw && existingEntry?.sourceFingerprint != null)
                     {
-                        // Reuse fingerprint from previous run — it was computed from the raw FBX
+                        // Postprocessed mesh — can't compute correct fingerprint, carry forward
                         fp = existingEntry.sourceFingerprint;
                     }
                     else
                     {
+                        // Raw FBX mesh — compute fresh fingerprint (uses current hash algorithm)
                         fp = MeshFingerprint.Compute(e.fbxMesh);
                     }
                 }
