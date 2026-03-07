@@ -1119,7 +1119,7 @@ namespace LightmapUvTool
                             partitionXform[si],
                             srcTransforms[si],
                             srcIsRibbon[si], srcRibbonAxis[si], srcRibbonAxis2[si], srcRibbonCentroid[si],
-                            srcUv2Min, srcUv2Max, srcShells.Count,
+                            srcUv2Min, srcUv2Max, sortedMembers,
                             kRayMaxDist);
 
                         var best = SelectBestCandidate(allCandidates, tShell.faceIndices, tgtTris, tUv0);
@@ -1452,7 +1452,7 @@ namespace LightmapUvTool
                             srcTransforms[chosenSrc],
                             srcIsRibbon[chosenSrc], srcRibbonAxis[chosenSrc],
                             srcRibbonAxis2[chosenSrc], srcRibbonCentroid[chosenSrc],
-                            srcUv2Min, srcUv2Max, srcShells.Count,
+                            srcUv2Min, srcUv2Max, null,
                             kRayMaxDist);
 
                         var bestOverlap = SelectBestCandidate(
@@ -2012,7 +2012,7 @@ namespace LightmapUvTool
             // Ribbon data
             bool isRibbon, Vector3 ribbonAxis, Vector3 ribbonAxis2, Vector3 ribbonCentroid,
             // Cross-source UV2 guard data
-            Vector2[] srcUv2Min, Vector2[] srcUv2Max, int srcShellCount,
+            Vector2[] srcUv2Min, Vector2[] srcUv2Max, List<int> overlapGroupMembers,
             // Thresholds
             float kRayMaxDist)
         {
@@ -2236,10 +2236,13 @@ namespace LightmapUvTool
                         xfMin.y < -0.01f || xfMax.y > 1.01f)
                         rejected = true;
 
-                    // Reject if result overlaps another source shell's UV2 region
-                    if (!rejected)
+                    // Reject if result overlaps another overlap-group member's UV2 region.
+                    // Only check shells in same overlap group (same UV0, different UV2) —
+                    // checking all source shells causes false positives from unrelated
+                    // shells that happen to be adjacent in UV2 packing.
+                    if (!rejected && overlapGroupMembers != null)
                     {
-                        for (int si = 0; si < srcShellCount; si++)
+                        foreach (int si in overlapGroupMembers)
                         {
                             if (si == srcIdx) continue;
                             if (xfMin.x < srcUv2Max[si].x && xfMax.x > srcUv2Min[si].x &&
