@@ -3145,9 +3145,20 @@ namespace LightmapUvTool
                         }
                     }
 
-                    // Skip large position/UV0 arrays when replay data is present —
-                    // ReplayOptimization + orphan fill handles all vertex mapping deterministically.
-                    if (sidecar.hasReplayData)
+                    // Store raw FBX positions/UV0 alongside replay data.
+                    // The postprocessor needs these to handle vertex reordering between
+                    // imports (e.g. when generateSecondaryUV is toggled off by OnPreprocessModel,
+                    // Unity may reorder vertices even if the count stays the same).
+                    // ReplayOptimization matches reimported → stored-raw by position+UV0,
+                    // then composes with the stored remap for order-independent replay.
+                    if (sidecar.hasReplayData && e.fbxMesh != null)
+                    {
+                        sidecar.positions = e.fbxMesh.vertices;
+                        var rawUv0 = new List<Vector2>();
+                        e.fbxMesh.GetUVs(0, rawUv0);
+                        sidecar.uv0 = rawUv0.Count == e.fbxMesh.vertexCount ? rawUv0.ToArray() : null;
+                    }
+                    else if (sidecar.hasReplayData)
                     {
                         sidecar.positions = null;
                         sidecar.uv0 = null;
