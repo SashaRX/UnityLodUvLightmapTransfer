@@ -1155,8 +1155,10 @@ namespace LightmapUvTool
                     // (across all overlap group members) with aligned normal. Vote for that
                     // source. The source with the most votes is the physically correct one.
                     // This is deterministic across LODs because source faces are fixed.
+                    // Also record per-face source for composite UV2 building.
                     var srcVoteCount = new int[srcShells.Count];
                     int totalVotes = 0;
+                    var perFaceVoteSrc = new Dictionary<int, int>(); // faceIndex → sourceIndex
 
                     foreach (int tfi in tShell.faceIndices)
                     {
@@ -1198,6 +1200,7 @@ namespace LightmapUvTool
                         {
                             srcVoteCount[bestSrc]++;
                             totalVotes++;
+                            perFaceVoteSrc[tfi] = bestSrc;
                         }
                     }
 
@@ -1238,6 +1241,10 @@ namespace LightmapUvTool
                         }
                     }
 
+                    // Collect valid UV2 candidates from all group members.
+                    // Each source produces UV2 for the target vertices via its own UV0→UV2 mapping.
+                    var validCandidates = new Dictionary<int, OverlapCandidate>();
+
                     foreach (int si in groupMembers)
                     {
                         var allCandidates = GenerateOverlapCandidates(
@@ -1258,6 +1265,9 @@ namespace LightmapUvTool
                         var best = SelectBestCandidate(allCandidates, tShell.faceIndices, tgtTris, tUv0);
                         if (best.HasValue)
                         {
+                            validCandidates[si] = best.Value;
+
+                            // Track best overall source (for fallback and logging)
                             var b = best.Value;
                             int votes = srcVoteCount[si];
                             float centroidDistSq = srcGroupDistSq[si];
@@ -1272,11 +1282,6 @@ namespace LightmapUvTool
                             bool bestIsVoteWinner = (bestOverlapSrc == voteSrc && voteCount > 0);
                             bool closerCentroid = centroidDistSq < bestOverlapCentroidDistSq - 1e-8f;
 
-                            // Priority: issues → unclaimed → hint → vote winner → vote count → centroid
-                            // "Unclaimed" prevents multiple targets from using the same source
-                            // which would produce UV2 overlap (same-src) artifacts. A source
-                            // claimed by an earlier target (interp or merged) is deprioritized
-                            // so this target picks its next-best alternative.
                             bool wins = betterIssues
                                 || (sameIssues && isUnclaimed && !bestIsUnclaimed)
                                 || (sameIssues && isUnclaimed == bestIsUnclaimed
@@ -1310,11 +1315,73 @@ namespace LightmapUvTool
                     {
                         bool tooManyIssues = bestOverlapIssues > tShell.faceIndices.Count / 2;
 
+                        // ── Build composite UV2 from per-face voting ──
+                        // On lower LODs, one target shell can span multiple source shells
+                        // (e.g., belt strap: LOD0 has 13 source shells, LOD2 has 4 target shells).
+                        // Instead of picking one source for all vertices, each face gets UV2
+                        // from the source that's geometrically closest (per-face vote).
+                        // Shared vertices at source boundaries may get reassigned — lightmap
+                        // padding handles the resulting micro-seams.
+                        var compositeUv2 = new Dictionary<int, Vector2>();
+                        var compositeUsedSources = new HashSet<int>();
+                        int compositeFaces = 0;
+
+                        foreach (int tfi in tShell.faceIndices)
+                        {
+                            int ti0 = tgtTris[tfi * 3], ti1 = tgtTris[tfi * 3 + 1], ti2 = tgtTris[tfi * 3 + 2];
+                            if (ti0 >= tVerts.Length || ti1 >= tVerts.Length || ti2 >= tVerts.Length) continue;
+
+                            // Try voted source first, then best overall
+                            int faceSrc = perFaceVoteSrc.ContainsKey(tfi) ? perFaceVoteSrc[tfi] : -1;
+                            bool assigned = false;
+
+                            // Candidate sources in priority order: voted source, then best overall
+                            int[] tryOrder = (faceSrc >= 0 && faceSrc != bestOverlapSrc)
+                                ? new[] { faceSrc, bestOverlapSrc }
+                                : new[] { bestOverlapSrc };
+
+                            foreach (int src in tryOrder)
+                            {
+                                if (src < 0 || !validCandidates.ContainsKey(src)) continue;
+                                if (validCandidates[src].issues > tShell.faceIndices.Count / 2) continue;
+                                var srcUv2Map = validCandidates[src].uv2;
+                                if (srcUv2Map.ContainsKey(ti0) && srcUv2Map.ContainsKey(ti1) && srcUv2Map.ContainsKey(ti2))
+                                {
+                                    compositeUv2[ti0] = srcUv2Map[ti0];
+                                    compositeUv2[ti1] = srcUv2Map[ti1];
+                                    compositeUv2[ti2] = srcUv2Map[ti2];
+                                    compositeUsedSources.Add(src);
+                                    compositeFaces++;
+                                    assigned = true;
+                                    break;
+                                }
+                            }
+
+                            // Last resort: use best overall even if it doesn't have all 3 verts
+                            if (!assigned && bestOverlapUv2 != null)
+                            {
+                                if (bestOverlapUv2.ContainsKey(ti0)) compositeUv2[ti0] = bestOverlapUv2[ti0];
+                                if (bestOverlapUv2.ContainsKey(ti1)) compositeUv2[ti1] = bestOverlapUv2[ti1];
+                                if (bestOverlapUv2.ContainsKey(ti2)) compositeUv2[ti2] = bestOverlapUv2[ti2];
+                                compositeUsedSources.Add(bestOverlapSrc);
+                            }
+                        }
+
+                        // Fill any remaining gaps from best overall
+                        foreach (var kv in bestOverlapUv2)
+                            if (!compositeUv2.ContainsKey(kv.Key))
+                                compositeUv2[kv.Key] = kv.Value;
+
+                        // Determine primary source (most faces contributed) for hint/log
+                        int primarySrc = bestOverlapSrc;
+
                         float bestSrcDist = Mathf.Sqrt(bestOverlapCentroidDistSq);
                         float bestAreaR = (tgt3DArea > 1e-8f && srcGroupArea[bestOverlapSrc] > 1e-8f)
                             ? Mathf.Min(srcGroupArea[bestOverlapSrc], tgt3DArea) / Mathf.Max(srcGroupArea[bestOverlapSrc], tgt3DArea)
                             : 0f;
-                        bool bestWasClaimed = overlapClaimedSources.Contains(bestOverlapSrc);
+                        string compositeInfo = compositeUsedSources.Count > 1
+                            ? $", composite={compositeUsedSources.Count}src"
+                            : "";
                         UvtLog.Info($"[GroupedTransfer]   t{tsi}: overlap unified " +
                             $"(best src{bestOverlapSrc}, {bestOverlapCoverage} cov, " +
                             $"{bestOverlapIssues} issues, " +
@@ -1323,21 +1390,22 @@ namespace LightmapUvTool
                             $"method={bestOverlapMethod}, " +
                             $"tried {groupMembers.Count} shells" +
                             (hintSrc >= 0 ? $", hint=src{hintSrc}" : "") +
-                            (bestWasClaimed ? ", CLAIMED" : "") +
+                            compositeInfo +
                             (tooManyIssues ? " → fall-through" : "") + ")");
 
                         if (!tooManyIssues)
                         {
-                            foreach (var kv in bestOverlapUv2)
+                            foreach (var kv in compositeUv2)
                             {
                                 result.uv2[kv.Key] = kv.Value;
-                                result.vertexToSourceShell[kv.Key] = bestOverlapSrc;
+                                result.vertexToSourceShell[kv.Key] = primarySrc;
                                 transferred++;
                             }
-                            result.targetShellToSourceShell[tsi] = bestOverlapSrc;
+                            result.targetShellToSourceShell[tsi] = primarySrc;
                             shellsMerged++;
                             result.targetShellMethod[tsi] = 2;
-                            overlapClaimedSources.Add(bestOverlapSrc);
+                            foreach (int src in compositeUsedSources)
+                                overlapClaimedSources.Add(src);
 
                             continue;
                         }

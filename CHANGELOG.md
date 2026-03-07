@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.13.31] - 2026-03-07
+
+### Fixed — Per-face composite UV2 for overlap groups spanning multiple sources
+- On lower LODs, one target shell can span multiple source shells (e.g., belt: LOD0 has 13 source shells, LOD2 has 4 target shells covering the same UV0 area).
+- Instead of picking one source for all vertices, each target face now gets UV2 from the source that is geometrically closest (per-face 3D proximity vote).
+- Shared vertices at source boundaries are handled by last-writer-wins — lightmap padding covers micro-seams.
+- Log shows `composite=Nsrc` when multiple sources contribute UV2 to a single target shell.
+- All contributing sources are claimed to prevent reuse by other targets.
+
 ## [0.13.30] - 2026-03-07
 
 ### Fixed — Source claiming prevents same-source UV2 overlap in overlap groups
