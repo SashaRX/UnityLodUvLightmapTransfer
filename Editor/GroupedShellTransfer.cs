@@ -975,16 +975,20 @@ namespace LightmapUvTool
                 var needsRematch = new List<int>();
                 int dedupConflicts = 0;
 
-                foreach (var kv in srcClaimants)
+                // Sort keys for deterministic iteration order
+                var sortedSrcKeys = new List<int>(srcClaimants.Keys);
+                sortedSrcKeys.Sort();
+                foreach (int srcKey in sortedSrcKeys)
                 {
-                    claimed.Add(kv.Key); // source is claimed regardless
-                    if (kv.Value.Count <= 1) continue;
+                    var claimants = srcClaimants[srcKey];
+                    claimed.Add(srcKey); // source is claimed regardless
+                    if (claimants.Count <= 1) continue;
 
                     // Multiple non-merged targets claim same source — keep best
-                    kv.Value.Sort((a, b) => a.avg3D.CompareTo(b.avg3D));
-                    for (int i = 1; i < kv.Value.Count; i++)
+                    claimants.Sort((a, b) => a.avg3D.CompareTo(b.avg3D));
+                    for (int i = 1; i < claimants.Count; i++)
                     {
-                        needsRematch.Add(kv.Value[i].tsi);
+                        needsRematch.Add(claimants[i].tsi);
                         dedupConflicts++;
                     }
                 }
@@ -1166,15 +1170,22 @@ namespace LightmapUvTool
                         }
                     }
 
-                    // Find vote winner
+                    // Find vote winner — deterministic tie-breaking by 3D centroid
+                    // distance ensures stable results across LODs even when vote
+                    // counts are identical (common for thin belts/straps).
                     int voteSrc = -1;
                     int voteCount = 0;
+                    float voteWinnerDistSq = float.MaxValue;
                     foreach (int si in groupMembers)
                     {
-                        if (srcVoteCount[si] > voteCount)
+                        int votes = srcVoteCount[si];
+                        if (votes < voteCount) continue;
+                        float dSq = (srcCentroid3D[si] - tgtCentroid).sqrMagnitude;
+                        if (votes > voteCount || dSq < voteWinnerDistSq)
                         {
-                            voteCount = srcVoteCount[si];
+                            voteCount = votes;
                             voteSrc = si;
+                            voteWinnerDistSq = dSq;
                         }
                     }
 
@@ -1221,15 +1232,28 @@ namespace LightmapUvTool
 
                             bool betterIssues = b.issues < bestOverlapIssues;
                             bool sameIssues = b.issues == bestOverlapIssues;
-                            bool isVoteWinner = (si == voteSrc && voteCount > 0);
-                            bool bestIsVoteWinner = (bestOverlapSrc == voteSrc && voteCount > 0);
                             bool isHintMatch = (si == hintSrc);
                             bool bestIsHintMatch = (bestOverlapSrc == hintSrc);
 
-                            // Priority: issues → 3D face vote → hint match → vote count
-                            // Face-proximity voting is the strongest 3D signal — it proves
-                            // that target faces physically overlap with this source's faces
-                            // with aligned normals. Deterministic across LODs.
+                            // Promote hint source to vote-winner status when its votes
+                            // are competitive (within 30% of winner). This ensures
+                            // cross-LOD consistency for thin belts/straps where LOD2
+                            // geometry changes cause marginal vote flips.
+                            bool isVoteWinner = (si == voteSrc && voteCount > 0);
+                            bool bestIsVoteWinner = (bestOverlapSrc == voteSrc && voteCount > 0);
+                            if (hintSrc >= 0 && totalVotes > 0)
+                            {
+                                int hintVotes = srcVoteCount[hintSrc];
+                                bool hintCompetitive = hintVotes >= voteCount * 0.7f;
+                                if (hintCompetitive)
+                                {
+                                    // Treat hint match as equivalent to vote winner
+                                    isVoteWinner = isVoteWinner || isHintMatch;
+                                    bestIsVoteWinner = bestIsVoteWinner || bestIsHintMatch;
+                                }
+                            }
+
+                            // Priority: issues → vote/hint winner → hint match → vote count
                             bool wins = betterIssues
                                 || (sameIssues && isVoteWinner && !bestIsVoteWinner)
                                 || (sameIssues && isVoteWinner == bestIsVoteWinner && isHintMatch && !bestIsHintMatch)

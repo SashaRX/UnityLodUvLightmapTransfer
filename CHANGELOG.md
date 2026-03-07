@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.27] - 2026-03-07
+
+### Fixed — Deterministic overlap shell matching for cross-LOD consistency
+- **Vote tie-breaking** (`GroupedShellTransfer.cs`): when two source shells receive identical vote counts in face-proximity voting, use 3D centroid distance as deterministic tiebreaker. Prevents belt/strap shells from flipping between sources across LODs.
+- **Cross-LOD hint promotion**: when the previous-LOD hint source has competitive votes (>=70% of winner), promote it to vote-winner status. Ensures thin geometry (belts, straps) stays consistent from LOD0 through LOD2.
+- **Deterministic iteration order**: sort Dictionary keys in dedup phase (`srcClaimants`) and overlap group members in `UvShellExtractor.FindOverlapGroups()`. Sort shell extraction by root face index for stable shell IDs.
+
 ## [0.13.11] - 2026-03-03
 
 ### Fixed — UV Preview uses the same checker as model with requested alpha
