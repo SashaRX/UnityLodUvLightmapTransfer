@@ -334,7 +334,8 @@ namespace LightmapUvTool
             glMat.SetInt("_Cull",     (int)CullMode.Off);
             glMat.SetInt("_ZWrite",   0);
 
-            var texShader = Shader.Find("Unlit/Transparent");
+            var texShader = Shader.Find("Hidden/LightmapUvTool/TintedTexture");
+            if (texShader == null) texShader = Shader.Find("Unlit/Transparent");
             if (texShader != null)
                 texMat = new Material(texShader) { hideFlags = HideFlags.HideAndDontSave };
 
