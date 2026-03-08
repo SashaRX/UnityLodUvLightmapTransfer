@@ -512,6 +512,7 @@ namespace LightmapUvTool
             var storedUv0 = entry.vertUv0;
             int storedCount = storedPos.Length;
             int[] origRemap = entry.vertexRemap;
+            int optCount = entry.optimizedVertexCount;
 
             if (origRemap.Length != storedCount)
             {
@@ -541,12 +542,15 @@ namespace LightmapUvTool
             }
 
             // Map newRaw[i] → oldRaw[j] by position + UV0 matching.
-            // Track used stored indices to ensure 1:1 mapping (prevents multiple
-            // new vertices from claiming the same stored vertex, which would leave
-            // other optimized indices unfilled and cause 3D stretching to origin).
+            // Track coverage at OPTIMIZED index level (not stored raw index level).
+            // Multiple raw vertices legitimately map to the same opt slot (meshopt
+            // merges duplicates). Tracking at raw level would penalize these duplicates,
+            // pushing them to wrong stored vertices with different origRemap values.
+            // Tracking at opt level ensures each opt slot gets covered while allowing
+            // legitimate duplicate mappings.
             var newRemap = new int[newCount];
             for (int i = 0; i < newCount; i++) newRemap[i] = -1;
-            var usedStored = new bool[storedCount];
+            var coveredOpt = new bool[optCount > 0 ? optCount : 1];
             int matched = 0;
 
             for (int i = 0; i < newCount; i++)
@@ -554,14 +558,17 @@ namespace LightmapUvTool
                 var key = QuantizePosForRemap(newPos[i]);
                 if (!posLookup.TryGetValue(key, out var candidates)) continue;
 
-                int bestOld = PickBestCandidate(candidates, i, origRemap, usedStored,
+                int bestOld = PickBestCandidate(candidates, i, origRemap, coveredOpt,
                     hasUv0 ? newUv0 : null, storedUv0);
 
                 if (bestOld >= 0)
                 {
                     newRemap[i] = origRemap[bestOld];
-                    usedStored[bestOld] = true;
-                    if (origRemap[bestOld] >= 0) matched++;
+                    if (origRemap[bestOld] >= 0)
+                    {
+                        coveredOpt[origRemap[bestOld]] = true;
+                        matched++;
+                    }
                 }
             }
 
@@ -593,27 +600,38 @@ namespace LightmapUvTool
                 UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': remap rebuild matched {matched}/{newCount} " +
                             $"({newCount - matched} unmapped)");
 
-            // ── Pass 3: Coverage repair ──
-            // After matching, some optimized indices may be referenced by triangles
-            // but not covered by any raw vertex (uncovered), while other optimized
-            // indices may have multiple raw vertices pointing to them (multi-covered).
-            // This pass detects uncovered indices and steals raw vertices from
-            // multi-covered indices to fill them, preventing 3D stretching to origin.
-            int repaired = CoverageRepair(newRemap, entry, mesh.name);
+            // Coverage diagnostic: count how many referenced opt indices are still uncovered
+            int uncoveredCount = 0;
+            if (entry.optimizedTriangles != null && optCount > 0)
+            {
+                var referenced = new HashSet<int>();
+                for (int i = 0; i < entry.optimizedTriangles.Length; i++)
+                    referenced.Add(entry.optimizedTriangles[i]);
+
+                var orphanSet = new HashSet<int>();
+                if (entry.orphanIndices != null)
+                    for (int i = 0; i < entry.orphanIndices.Length; i++)
+                        orphanSet.Add(entry.orphanIndices[i]);
+
+                foreach (int idx in referenced)
+                    if (idx < optCount && !coveredOpt[idx] && !orphanSet.Contains(idx))
+                        uncoveredCount++;
+            }
 
             UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': rebuilt remap from stored positions " +
-                        $"({matched}/{newCount} matched, {repaired} repaired, stale fingerprint)");
+                        $"({matched}/{newCount} matched, {uncoveredCount} uncovered opt indices, stale fingerprint)");
             return newRemap;
         }
 
         /// <summary>
         /// Pick the best stored vertex candidate for a new raw vertex.
-        /// Priority: unused with valid remap > unused with invalid remap > any remaining.
+        /// Priority: uncovered opt slot > already-covered opt slot > invalid (-1).
         /// Among equal priority, prefer closest UV0.
-        /// NOTE: Normal tiebreaker was removed — Unity float jitter between imports
-        /// causes normals to differ slightly, leading to wrong candidate selection.
+        /// Tracking coverage at OPTIMIZED level (not raw level) is critical:
+        /// - For true duplicates (same origRemap): all map to same opt slot, no penalty
+        /// - For seam splits (different origRemap): prefers uncovered opt slots
         /// </summary>
-        static int PickBestCandidate(List<int> candidates, int newIdx, int[] origRemap, bool[] usedStored,
+        static int PickBestCandidate(List<int> candidates, int newIdx, int[] origRemap, bool[] coveredOpt,
                                       List<Vector2> newUv0, Vector2[] storedUv0)
         {
             if (candidates.Count == 1)
@@ -625,12 +643,17 @@ namespace LightmapUvTool
 
             int bestOld = -1;
             float bestScore = float.MaxValue;
-            int bestPriority = int.MaxValue; // lower = better: 0=unused+valid, 1=unused+invalid, 2=used
+            int bestPriority = int.MaxValue; // 0=uncovered valid, 1=covered valid, 2=invalid(-1)
 
             for (int k = 0; k < candidates.Count; k++)
             {
                 int ci = candidates[k];
-                int priority = usedStored[ci] ? 2 : (origRemap[ci] >= 0 ? 0 : 1);
+                int opt = origRemap[ci];
+                int priority;
+                if (opt < 0) priority = 2; // invalid remap
+                else if (!coveredOpt[opt]) priority = 0; // uncovered opt slot — prefer this
+                else priority = 1; // already covered — OK but lower priority
+
                 if (priority > bestPriority) continue;
 
                 float score = 0f;
@@ -646,129 +669,6 @@ namespace LightmapUvTool
             }
 
             return bestOld;
-        }
-
-        /// <summary>
-        /// Post-hoc coverage repair: finds optimized indices referenced by triangles
-        /// but not covered by any raw vertex in newRemap, then steals raw vertices
-        /// from multi-covered optimized indices to fill them.
-        /// Returns the number of repaired indices.
-        /// </summary>
-        static int CoverageRepair(int[] newRemap, MeshUv2Entry entry, string meshName)
-        {
-            int optCount = entry.optimizedVertexCount;
-            var optTris = entry.optimizedTriangles;
-            if (optTris == null || optCount <= 0) return 0;
-
-            // Build set of optimized indices referenced by triangles
-            var referenced = new HashSet<int>();
-            for (int i = 0; i < optTris.Length; i++)
-                referenced.Add(optTris[i]);
-
-            // Exclude orphan indices (they're filled from sidecar data, not remap)
-            var orphanSet = new HashSet<int>();
-            if (entry.orphanIndices != null)
-                for (int i = 0; i < entry.orphanIndices.Length; i++)
-                    orphanSet.Add(entry.orphanIndices[i]);
-
-            // Count coverage: how many raw vertices map to each optimized index
-            var coverage = new int[optCount];
-            // Track which raw indices map to each optimized index
-            var rawPerOpt = new Dictionary<int, List<int>>();
-            for (int i = 0; i < newRemap.Length; i++)
-            {
-                int opt = newRemap[i];
-                if (opt < 0) continue;
-                coverage[opt]++;
-                if (!rawPerOpt.TryGetValue(opt, out var list))
-                {
-                    list = new List<int>(2);
-                    rawPerOpt[opt] = list;
-                }
-                list.Add(i);
-            }
-
-            // Find uncovered referenced indices (not orphans)
-            var uncovered = new List<int>();
-            foreach (int idx in referenced)
-            {
-                if (idx < optCount && coverage[idx] == 0 && !orphanSet.Contains(idx))
-                    uncovered.Add(idx);
-            }
-
-            if (uncovered.Count == 0) return 0;
-
-            // Find multi-covered indices that can donate a raw vertex
-            // Sort donors by coverage (highest first) for best redistribution
-            var donors = new List<int>();
-            foreach (var kv in rawPerOpt)
-            {
-                if (kv.Value.Count > 1)
-                    donors.Add(kv.Key);
-            }
-
-            if (donors.Count == 0)
-            {
-                UvtLog.Warn($"[UV2 Postprocess] '{meshName}': {uncovered.Count} uncovered optimized indices " +
-                            "but no multi-covered donors available for repair");
-                return 0;
-            }
-
-            // For each uncovered index, find the best donor:
-            // prefer donors whose stored position is closest to the uncovered vertex's
-            // expected position (from the UV2/optimized mesh data).
-            // We use the stored raw positions to approximate spatial proximity.
-            int repaired = 0;
-            var storedPos = entry.vertPositions;
-
-            foreach (int uncovIdx in uncovered)
-            {
-                // Find a donor with multiple raw vertices → steal one
-                int bestDonor = -1;
-                int bestRawIdx = -1;
-                int bestDonorCoverage = 0;
-
-                for (int d = 0; d < donors.Count; d++)
-                {
-                    int donorOpt = donors[d];
-                    var rawList = rawPerOpt[donorOpt];
-                    if (rawList.Count <= 1) continue; // no longer a multi-cover
-
-                    if (rawList.Count > bestDonorCoverage)
-                    {
-                        bestDonorCoverage = rawList.Count;
-                        bestDonor = d;
-                        bestRawIdx = rawList[rawList.Count - 1]; // take last
-                    }
-                }
-
-                if (bestRawIdx < 0) break; // no more donors
-
-                int donorOptIdx = donors[bestDonor];
-                var donorRawList = rawPerOpt[donorOptIdx];
-
-                // Reassign: steal this raw vertex from donor → uncovered
-                newRemap[bestRawIdx] = uncovIdx;
-                donorRawList.RemoveAt(donorRawList.Count - 1);
-                coverage[donorOptIdx]--;
-                coverage[uncovIdx]++;
-
-                // Track the new assignment
-                if (!rawPerOpt.ContainsKey(uncovIdx))
-                    rawPerOpt[uncovIdx] = new List<int>();
-                rawPerOpt[uncovIdx].Add(bestRawIdx);
-
-                repaired++;
-            }
-
-            if (repaired > 0)
-                UvtLog.Info($"[UV2 Postprocess] '{meshName}': coverage repair fixed {repaired}/{uncovered.Count} " +
-                            "uncovered optimized indices");
-            if (repaired < uncovered.Count)
-                UvtLog.Warn($"[UV2 Postprocess] '{meshName}': {uncovered.Count - repaired} optimized indices " +
-                            "still uncovered after repair (may cause stretching)");
-
-            return repaired;
         }
 
         static (int, int, int) QuantizePosForRemap(Vector3 pos)
