@@ -2622,12 +2622,19 @@ namespace LightmapUvTool
             var bmax = shell.boundsMax;
 
             var lines = new List<string>();
-            string header = pinned ? $"Shell {hit.shellId} (pinned)" : $"Shell {hit.shellId}";
-            lines.Add(header);
-            lines.Add($"{hit.mesh?.name ?? "?"}  UV{hit.uvChannel}");
-            lines.Add($"F:{shell.faceIndices.Count} V:{shell.vertexIndices.Count}");
-            lines.Add($"({bmin.x:F3},{bmin.y:F3})-({bmax.x:F3},{bmax.y:F3})");
-            lines.Add($"area {shell.bboxArea:F5}  UDIM({hit.tileU},{hit.tileV})");
+            string pin = pinned ? " pin" : "";
+            lines.Add($"#{hit.shellId}{pin}  F:{shell.faceIndices.Count} V:{shell.vertexIndices.Count}");
+
+            // Show mesh name only when multiple meshes in this LOD
+            var ee = ForLod(pvLod);
+            if (ee.Count > 1)
+                lines.Add(hit.mesh?.name ?? "?");
+
+            lines.Add($"area {shell.bboxArea:F5}");
+
+            // Show UDIM only for non-default tiles
+            if (hit.tileU != 0 || hit.tileV != 0)
+                lines.Add($"UDIM({hit.tileU},{hit.tileV})");
 
             if (fillMode == FillMode.ShellMatch && hit.entry?.shellTransferResult?.vertexToSourceShell != null)
             {
