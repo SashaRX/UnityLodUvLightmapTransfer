@@ -534,6 +534,7 @@ namespace LightmapUvTool
                 ReapplyShellColorPreview();
 
             Repaint();
+            SceneView.RepaintAll();
         }
 
         // ════════════════════════════════════════════════════════════
