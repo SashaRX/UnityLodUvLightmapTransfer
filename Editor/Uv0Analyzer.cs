@@ -683,28 +683,60 @@ namespace LightmapUvTool
             if (triCount == 0) return mesh;
 
             // ── 1. Build position groups ──
-            // Vertices at same 3D position → same group ID
+            // Vertices at same 3D position → same group ID.
+            // SpatialKey uses XOR hash which can have collisions, so we must verify
+            // actual position distance within each hash bucket to avoid merging
+            // vertices at different positions (which causes geometric stretching).
             const float posEps = 1e-5f;
-            var posToGroup = new Dictionary<long, List<int>>();
             int[] posGroup = new int[vertCount];
+            int nextGroup = 0;
 
+            // Hash buckets: SpatialKey → list of vertex indices
+            var hashBuckets = new Dictionary<long, List<int>>();
             for (int i = 0; i < vertCount; i++)
             {
                 long h = SpatialKey(verts[i], posEps);
-                if (!posToGroup.ContainsKey(h))
-                    posToGroup[h] = new List<int>();
-                posToGroup[h].Add(i);
+                if (!hashBuckets.TryGetValue(h, out var bucket))
+                {
+                    bucket = new List<int>();
+                    hashBuckets[h] = bucket;
+                }
+                bucket.Add(i);
             }
 
-            // Assign group IDs: first vertex in each bucket is the representative
-            int nextGroup = 0;
-            var groupIdMap = new Dictionary<long, int>();
-            for (int i = 0; i < vertCount; i++)
+            // Within each bucket, split into sub-groups by actual position distance
+            foreach (var bucket in hashBuckets.Values)
             {
-                long h = SpatialKey(verts[i], posEps);
-                if (!groupIdMap.ContainsKey(h))
-                    groupIdMap[h] = nextGroup++;
-                posGroup[i] = groupIdMap[h];
+                // Track which sub-group each bucket member belongs to
+                // subGroupLeaders[k] = first vertex index of sub-group k
+                var subGroupLeaders = new List<int>();
+                var subGroupIds = new List<int>(); // parallel: group ID for each sub-group
+
+                for (int bi = 0; bi < bucket.Count; bi++)
+                {
+                    int vi = bucket[bi];
+                    // Find a sub-group whose leader is within posEps
+                    int found = -1;
+                    for (int sg = 0; sg < subGroupLeaders.Count; sg++)
+                    {
+                        if (Vector3.Distance(verts[vi], verts[subGroupLeaders[sg]]) <= posEps)
+                        {
+                            found = sg;
+                            break;
+                        }
+                    }
+                    if (found >= 0)
+                    {
+                        posGroup[vi] = subGroupIds[found];
+                    }
+                    else
+                    {
+                        int gid = nextGroup++;
+                        subGroupLeaders.Add(vi);
+                        subGroupIds.Add(gid);
+                        posGroup[vi] = gid;
+                    }
+                }
             }
 
             // ── 2. Build edge adjacency ──
@@ -770,6 +802,43 @@ namespace LightmapUvTool
             }
 
             if (weldCount == 0) return mesh;
+
+            // ── 3b. VALIDATE: ensure merged vertices are actually co-located ──
+            // SpatialKey uses XOR hash which can have collisions — two vertices at
+            // DIFFERENT positions could end up in the same position group, causing
+            // incorrect merges that produce geometric stretching.
+            {
+                int badMerges = 0;
+                int undone = 0;
+                for (int i = 0; i < vertCount; i++)
+                {
+                    int root = Find(parent, i);
+                    if (root == i) continue;
+                    float dist = Vector3.Distance(verts[i], verts[root]);
+                    if (dist > posEps * 10f) // generous threshold: 10x posEps
+                    {
+                        badMerges++;
+                        // Undo this merge by making vertex its own root
+                        parent[i] = i;
+                        undone++;
+                    }
+                }
+                if (badMerges > 0)
+                {
+                    UvtLog.Warn($"[UV0Fix] UvEdgeWeld '{mesh.name}': detected {badMerges} bad merges " +
+                                $"(vertices at different positions merged due to hash collision), " +
+                                $"undone {undone} merges to prevent stretching");
+                    // Re-run Find with path compression to fix up parent chains
+                    for (int i = 0; i < vertCount; i++)
+                        Find(parent, i);
+
+                    // Recount actual welds after undo
+                    int actualWelds = 0;
+                    for (int i = 0; i < vertCount; i++)
+                        if (Find(parent, i) != i) actualWelds++;
+                    if (actualWelds == 0) return mesh;
+                }
+            }
 
             // ── 4. Rebuild mesh with merged vertices ──
             // Remap indices
