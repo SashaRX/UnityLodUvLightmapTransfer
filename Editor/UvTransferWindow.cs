@@ -1695,19 +1695,14 @@ namespace LightmapUvTool
                     selectedShellDebug = CloneHit(hoveredShellDebug);
                 else
                     selectedShellDebug = null;
+
+                // Double-click => focus SceneView camera on spot position
+                if (e.clickCount == 2 && hasSelectedShell)
+                    FocusSceneViewOnSpot(selectedShell);
+
                 e.Use();
                 Repaint();
                 SceneView.RepaintAll();
-            }
-
-            // Double-click on shell => focus SceneView camera on it
-            if (spotMode && e.type == EventType.MouseDown && e.clickCount == 2 && e.button == 0 && !e.alt)
-            {
-                if (selectedShellDebug != null)
-                {
-                    FocusSceneViewOnShell(selectedShellDebug);
-                    e.Use();
-                }
             }
         }
 
@@ -1806,58 +1801,46 @@ namespace LightmapUvTool
 
 
         /// <summary>
-        /// Focus SceneView camera on shell: pivot at center, camera looks along inverted normal.
+        /// Focus SceneView camera on the spot position using face barycentric coords.
+        /// Camera rotates to look along inverted face normal.
         /// </summary>
-        void FocusSceneViewOnShell(ShellDebugHit hit)
+        void FocusSceneViewOnSpot(ShellUvHit uvHit)
         {
-            if (hit?.shell == null || hit.entry?.renderer == null) return;
+            if (uvHit.meshEntry?.renderer == null) return;
 
-            var mesh = hit.mesh ?? hit.entry.originalMesh;
+            var mesh = DMesh(uvHit.meshEntry);
             if (mesh == null) return;
 
             var verts = mesh.vertices;
             var normals = mesh.normals;
             var tris = mesh.triangles;
-            var tr = hit.entry.renderer.transform;
+            var tr = uvHit.meshEntry.renderer.transform;
 
-            var bounds = new Bounds();
-            var avgNormal = Vector3.zero;
-            bool first = true;
-            int normalCount = 0;
+            int i0 = uvHit.faceIndex * 3;
+            if (i0 + 2 >= tris.Length) return;
 
-            foreach (int face in hit.shell.faceIndices)
+            int vi0 = tris[i0], vi1 = tris[i0 + 1], vi2 = tris[i0 + 2];
+            if (vi0 >= verts.Length || vi1 >= verts.Length || vi2 >= verts.Length) return;
+
+            // World-space position from barycentric
+            var bary = uvHit.barycentric;
+            var localPos = verts[vi0] * bary.x + verts[vi1] * bary.y + verts[vi2] * bary.z;
+            var worldPos = tr.TransformPoint(localPos);
+
+            // Face normal at spot
+            var normal = Vector3.up;
+            if (normals != null && vi0 < normals.Length && vi1 < normals.Length && vi2 < normals.Length)
             {
-                int i0 = face * 3;
-                if (i0 + 2 >= tris.Length) continue;
-                for (int k = 0; k < 3; k++)
-                {
-                    int vi = tris[i0 + k];
-                    if (vi >= verts.Length) continue;
-                    var wp = tr.TransformPoint(verts[vi]);
-                    if (first) { bounds = new Bounds(wp, Vector3.zero); first = false; }
-                    else bounds.Encapsulate(wp);
-
-                    if (normals != null && vi < normals.Length)
-                    {
-                        avgNormal += tr.TransformDirection(normals[vi]);
-                        normalCount++;
-                    }
-                }
+                var localNormal = (normals[vi0] * bary.x + normals[vi1] * bary.y + normals[vi2] * bary.z).normalized;
+                normal = tr.TransformDirection(localNormal).normalized;
             }
-            if (first) return;
-
-            if (normalCount > 0) avgNormal = (avgNormal / normalCount).normalized;
-            else avgNormal = Vector3.up;
 
             var sv = SceneView.lastActiveSceneView;
             if (sv == null) return;
 
-            // Pivot = exact center of the shell
-            sv.pivot = bounds.center;
-            // Size — tight fit around the shell
-            sv.size = Mathf.Max(bounds.extents.magnitude * 0.8f, 0.1f);
-            // Rotate camera to look along inverted normal (from outside toward surface)
-            sv.rotation = Quaternion.LookRotation(-avgNormal);
+            sv.pivot = worldPos;
+            sv.size = 0.5f;
+            sv.rotation = Quaternion.LookRotation(-normal);
             sv.Repaint();
         }
 
