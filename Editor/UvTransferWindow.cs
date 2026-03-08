@@ -129,6 +129,7 @@ namespace LightmapUvTool
         Material glMat;
         Material texMat;
         Material spotMat;
+        Material shellOverlayMat;
 
         string previewConflictNotice;
 
@@ -332,6 +333,14 @@ namespace LightmapUvTool
             var spotShader = Shader.Find("Hidden/LightmapUvTool/SpotProjection");
             if (spotShader != null)
                 spotMat = new Material(spotShader) { hideFlags = HideFlags.HideAndDontSave };
+
+            // Shell overlay material for 3D highlighting (depth-tested, transparent)
+            shellOverlayMat = new Material(sh) { hideFlags = HideFlags.HideAndDontSave };
+            shellOverlayMat.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
+            shellOverlayMat.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
+            shellOverlayMat.SetInt("_Cull",     (int)CullMode.Back);
+            shellOverlayMat.SetInt("_ZWrite",   0);
+            shellOverlayMat.SetInt("_ZTest",    (int)UnityEngine.Rendering.CompareFunction.LessEqual);
         }
 
         void OnDisable()
@@ -353,9 +362,11 @@ namespace LightmapUvTool
             if (glMat) DestroyImmediate(glMat);
             if (texMat) DestroyImmediate(texMat);
             if (spotMat) DestroyImmediate(spotMat);
+            if (shellOverlayMat) DestroyImmediate(shellOverlayMat);
             glMat = null;
             texMat = null;
             spotMat = null;
+            shellOverlayMat = null;
         }
 
         void OnSelectionChange()
@@ -1370,6 +1381,9 @@ namespace LightmapUvTool
                 hasProj = false;
             }
 
+            // Draw selected shell highlight in 3D
+            DrawSelectedShellOverlay();
+
             if (!hasProj)
                 return;
 
@@ -1403,6 +1417,55 @@ namespace LightmapUvTool
                 spotMat.SetPass(0);
                 Graphics.DrawMeshNow(mesh, l2w);
             }
+        }
+
+        void DrawSelectedShellOverlay()
+        {
+            var hit = selectedShellDebug;
+            if (hit?.shell == null || hit.entry?.renderer == null || shellOverlayMat == null) return;
+
+            var mesh = hit.mesh ?? hit.entry.originalMesh;
+            if (mesh == null) return;
+
+            var verts = mesh.vertices;
+            var tris = mesh.triangles;
+            var tr = hit.entry.renderer.transform;
+
+            shellOverlayMat.SetPass(0);
+            GL.PushMatrix();
+            GL.MultMatrix(tr.localToWorldMatrix);
+            GL.Begin(GL.TRIANGLES);
+            GL.Color(new Color(0.2f, 0.6f, 1f, 0.25f));
+
+            foreach (int face in hit.shell.faceIndices)
+            {
+                int i0 = face * 3;
+                if (i0 + 2 >= tris.Length) continue;
+                GL.Vertex(verts[tris[i0]]);
+                GL.Vertex(verts[tris[i0 + 1]]);
+                GL.Vertex(verts[tris[i0 + 2]]);
+            }
+
+            GL.End();
+
+            // Wire edges for outline
+            GL.Begin(GL.LINES);
+            GL.Color(new Color(0.1f, 0.4f, 1f, 0.7f));
+
+            foreach (int face in hit.shell.faceIndices)
+            {
+                int i0 = face * 3;
+                if (i0 + 2 >= tris.Length) continue;
+                var a = verts[tris[i0]];
+                var b = verts[tris[i0 + 1]];
+                var c = verts[tris[i0 + 2]];
+                GL.Vertex(a); GL.Vertex(b);
+                GL.Vertex(b); GL.Vertex(c);
+                GL.Vertex(c); GL.Vertex(a);
+            }
+
+            GL.End();
+            GL.PopMatrix();
         }
 
         struct HoverHit
