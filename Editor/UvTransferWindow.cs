@@ -416,7 +416,7 @@ namespace LightmapUvTool
         //  Mesh Collection
         // ════════════════════════════════════════════════════════════
 
-        void Refresh()
+        void Refresh(bool restoreShellMatch = true)
         {
             RestoreAllPreviews();
             meshEntries.Clear();
@@ -459,7 +459,8 @@ namespace LightmapUvTool
             if (LodN > 0) SetPreviewLod(pvLod, force: true);
             else pvLod = 0;
 
-            TryRestoreShellMatchFromSidecar();
+            if (restoreShellMatch)
+                TryRestoreShellMatchFromSidecar();
             UpdateSelectedSidecar();
         }
 
@@ -3667,13 +3668,7 @@ namespace LightmapUvTool
             UvtLog.Info($"[Apply] Done: {totalMeshes} mesh(es) across {fbxGroups.Count} FBX file(s)");
             CleanupWorkingMeshes();
             fillMode = FillMode.Shells;
-            Refresh();
-            // Clear transfer mapping so Shells view uses fresh UV-based coloring
-            foreach (var e in meshEntries)
-            {
-                e.shellTransferResult = null;
-                e.restoredSourceDescriptors = null;
-            }
+            Refresh(restoreShellMatch: false);
             shellColorKeyCache.Clear();
             shellColorKeyCacheDirty = true;
             Repaint();
