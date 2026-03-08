@@ -1095,7 +1095,7 @@ namespace LightmapUvTool
             {
                 var bg3 = GUI.backgroundColor;
                 GUI.backgroundColor = new Color(.95f, .35f, .3f);
-                if (GUILayout.Button("Reset UV2: " + selectedResetLabel, EditorStyles.toolbarButton, GUILayout.Width(140)))
+                if (GUILayout.Button("Reset UV2: " + selectedResetLabel, EditorStyles.toolbarButton))
                     ResetSelectedUv2();
                 GUI.backgroundColor = bg3;
                 GUILayout.Space(6);
@@ -3061,7 +3061,7 @@ namespace LightmapUvTool
             var groupKeys = BuildGroupKeys(pvLod);
             if (groupKeys.Count <= 1) return;
 
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Width(meshGroupPanelW));
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Width(meshGroupPanelW), GUILayout.MinWidth(60));
 
             // "All" button
             var bg = GUI.backgroundColor;
@@ -3300,18 +3300,16 @@ namespace LightmapUvTool
                 if (issues > 0) lines.Add($"tri issues: {issues}/{shell.faceIndices.Count}");
             }
 
-            // Measure and draw overlay — clamp to canvas bounds
+            // Measure and draw overlay — anchor to right edge of canvas
             float lineH = 13f;
             float pad = 6f;
             float w = 220f;
             float h = lines.Count * lineH + pad * 2f;
-            // Shift left when mesh group panel is visible on the right
-            float rightMargin = (repackPerMesh && MeshGroupCount(pvLod) > 1) ? meshGroupPanelW + 8f : 4f;
-            float x = canvasRect.xMax - w - rightMargin;
-            float y = canvasRect.yMin + 4f;
+            float x = canvasRect.xMax - w - 2f;
+            float y = canvasRect.yMin + 2f;
             // Clamp to stay within canvas
-            if (x < canvasRect.xMin + 4f) x = canvasRect.xMin + 4f;
-            if (x + w > canvasRect.xMax) w = canvasRect.xMax - x;
+            if (x < canvasRect.xMin + 2f) x = canvasRect.xMin + 2f;
+            if (x + w > canvasRect.xMax - 2f) w = canvasRect.xMax - 2f - x;
             var bgRect = new Rect(x, y, w, h);
 
             EditorGUI.DrawRect(bgRect, new Color(0f, 0f, 0f, 0.35f));
