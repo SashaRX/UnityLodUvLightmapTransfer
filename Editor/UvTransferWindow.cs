@@ -53,6 +53,7 @@ namespace LightmapUvTool
         // Canvas — fill mode (mutually exclusive overlays)
         enum FillMode { Shells, Status, ShellMatch, Validation, None }
         FillMode fillMode = FillMode.Shells;
+        FillMode fillModeBeforeHide = FillMode.Shells; // for show/hide toggle
 
         float canvasZoom = 1f;
         Vector2 canvasPan;
@@ -416,7 +417,7 @@ namespace LightmapUvTool
         //  Mesh Collection
         // ════════════════════════════════════════════════════════════
 
-        void Refresh(bool restoreShellMatch = true)
+        void Refresh()
         {
             RestoreAllPreviews();
             meshEntries.Clear();
@@ -459,8 +460,7 @@ namespace LightmapUvTool
             if (LodN > 0) SetPreviewLod(pvLod, force: true);
             else pvLod = 0;
 
-            if (restoreShellMatch)
-                TryRestoreShellMatchFromSidecar();
+            TryRestoreShellMatchFromSidecar();
             UpdateSelectedSidecar();
         }
 
@@ -995,9 +995,16 @@ namespace LightmapUvTool
 
             GUILayout.Space(6);
 
-            // ── Fill mode dropdown ──
+            // ── Fill mode dropdown + show/hide toggle ──
             EditorGUILayout.LabelField("Fill:", EditorStyles.miniLabel, GUILayout.Width(24));
             fillMode = (FillMode)EditorGUILayout.Popup((int)fillMode, fillModeLabels, EditorStyles.toolbarPopup, GUILayout.Width(80));
+            if (fillMode != FillMode.None) fillModeBeforeHide = fillMode;
+            {
+                bool fillVisible = fillMode != FillMode.None;
+                bool next = GUILayout.Toggle(fillVisible, fillVisible ? "\u25C9" : "\u25CB", EditorStyles.toolbarButton, GUILayout.Width(22));
+                if (next != fillVisible)
+                    fillMode = next ? fillModeBeforeHide : FillMode.None;
+            }
 
             GUILayout.Space(4);
 
@@ -1194,6 +1201,9 @@ namespace LightmapUvTool
                                 break;
                             case FillMode.Shells:
                                 GlFillSh(cx,cy,sz, mesh, fN, uN, entry, hoverShellId, selectedShellId);
+                                // Overlay validation problems on top of shell fill (skip clean triangles)
+                                if (hasValidation)
+                                    GlFillValidationOverlay(cx,cy,sz, uvs,tri,fN,uN, entry.validationReport.perTriangle);
                                 break;
                             case FillMode.None:
                                 break;
@@ -2278,43 +2288,11 @@ namespace LightmapUvTool
 
             int result;
 
-            // Priority 1: Transfer mapping (target LODs) — uses source shell index
-            // from transfer result, then maps to source UV0 descriptor hash.
-            var map = entry?.shellTransferResult?.vertexToSourceShell;
-            if (map != null && shell?.vertexIndices != null && shell.vertexIndices.Count > 0)
-            {
-                int bestKey = -1, bestCount = 0;
-                var freq = new Dictionary<int, int>();
-                foreach (int v in shell.vertexIndices)
-                {
-                    if (v < 0 || v >= map.Length) continue;
-                    int srcShell = map[v];
-                    if (srcShell < 0) continue;
-                    freq.TryGetValue(srcShell, out int c);
-                    c++;
-                    freq[srcShell] = c;
-                    if (c > bestCount || (c == bestCount && srcShell < bestKey))
-                    {
-                        bestCount = c;
-                        bestKey = srcShell;
-                    }
-                }
-                if (bestKey >= 0)
-                {
-                    var srcDescs = GetSourceDescriptors(entry);
-                    result = (srcDescs != null && bestKey < srcDescs.Length)
-                        ? Mathf.Abs(srcDescs[bestKey].stableHash)
-                        : bestKey;
-                }
-                else
-                {
-                    result = Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
-                }
-            }
-            // Priority 2: UV0 shell mapping — for source LOD or entries without transfer data.
-            // Maps each preview shell's vertices to dominant UV0 shell and uses its
-            // descriptor hash, ensuring consistent colors with target LODs.
-            else if (mesh != null && shell?.vertexIndices != null && shell.vertexIndices.Count > 0)
+            // UV0 shell mapping — maps each preview shell's vertices to dominant
+            // UV0 shell and uses its descriptor hash, ensuring consistent colors
+            // across all LODs (source and target). Transfer mapping is reserved
+            // for ShellMatch fill mode only.
+            if (mesh != null && shell?.vertexIndices != null && shell.vertexIndices.Count > 0)
             {
                 var (v2s, descs) = GetUv0ShellMap(mesh);
                 if (v2s != null && descs != null)
@@ -2551,6 +2529,33 @@ namespace LightmapUvTool
                 else if ((fl & TransferValidator.TriIssue.OutOfBounds) != 0) nc = cValOOB;
                 else if ((fl & TransferValidator.TriIssue.TexelDensity) != 0) nc = cValTexel;
                 else nc = cValClean;
+                GL.Color(nc);
+                Vx(ox, oy, sz, uv[a0]); Vx(ox, oy, sz, uv[a1]); Vx(ox, oy, sz, uv[a2]);
+                tot++; b++;
+                if (b >= BATCH) { GL.End(); GL.Begin(GL.TRIANGLES); b = 0; }
+            }
+            GL.End();
+        }
+
+        /// <summary>Draws only problem triangles from validation as overlay (skips clean).</summary>
+        void GlFillValidationOverlay(float ox, float oy, float sz, Vector2[] uv, int[] t, int fN, int uN, TransferValidator.TriIssue[] perTri)
+        {
+            if (perTri == null) return;
+            int tot = 0, b = 0;
+            GL.Begin(GL.TRIANGLES);
+            for (int f = 0; f < fN && tot < MAX_TRI; f++)
+            {
+                var fl = (f < perTri.Length) ? perTri[f] : TransferValidator.TriIssue.None;
+                if (fl == TransferValidator.TriIssue.None) continue;
+                int a0 = t[f*3], a1 = t[f*3+1], a2 = t[f*3+2];
+                if (!TOk(uv, uN, a0, a1, a2)) continue;
+                Color nc;
+                if      ((fl & TransferValidator.TriIssue.ZeroArea) != 0)  nc = cValZero;
+                else if ((fl & TransferValidator.TriIssue.Stretched) != 0) nc = cValStretch;
+                else if ((fl & TransferValidator.TriIssue.Overlap) != 0)   nc = cValOverlap;
+                else if ((fl & TransferValidator.TriIssue.OutOfBounds) != 0) nc = cValOOB;
+                else if ((fl & TransferValidator.TriIssue.TexelDensity) != 0) nc = cValTexel;
+                else continue;
                 GL.Color(nc);
                 Vx(ox, oy, sz, uv[a0]); Vx(ox, oy, sz, uv[a1]); Vx(ox, oy, sz, uv[a2]);
                 tot++; b++;
@@ -3211,12 +3216,8 @@ namespace LightmapUvTool
             int faceCount = tris != null ? tris.Length / 3 : 0;
             if (faceCount == 0) return new int[0];
 
-            // Extract UV0 shells for this mesh
+            // UV0 shell descriptors — consistent across all LODs
             var (v2s, descs) = GetUv0ShellMap(mesh);
-
-            // Transfer mapping (target LODs): map vertices → source shell → source descriptor
-            var map = entry?.shellTransferResult?.vertexToSourceShell;
-            ShellDescriptor[] srcDescs = (map != null) ? GetSourceDescriptors(entry) : null;
 
             var faceKeys = new int[faceCount];
             for (int face = 0; face < faceCount; face++)
@@ -3224,18 +3225,6 @@ namespace LightmapUvTool
                 int triBase = face * 3;
                 int i0 = tris[triBase], i1 = tris[triBase + 1], i2 = tris[triBase + 2];
 
-                // Priority 1: Transfer mapping to source descriptors
-                if (map != null && srcDescs != null)
-                {
-                    int bestKey = VoteBestShell(map, mesh.vertexCount, i0, i1, i2);
-                    if (bestKey >= 0 && bestKey < srcDescs.Length)
-                    {
-                        faceKeys[face] = Mathf.Abs(srcDescs[bestKey].stableHash);
-                        continue;
-                    }
-                }
-
-                // Priority 2: UV0 shell descriptors
                 if (v2s != null && descs != null)
                 {
                     int bestKey = VoteBestShell(v2s, mesh.vertexCount, i0, i1, i2);
@@ -3266,6 +3255,19 @@ namespace LightmapUvTool
             if (s0 >= 0) return s0;
             if (s1 >= 0) return s1;
             return s2;
+        }
+
+        /// <summary>
+        /// Common view reset after Apply/Reset: switch to Shells fill with
+        /// lower alpha, refresh entries, clear stale caches.
+        /// </summary>
+        void SwitchToPostApplyView()
+        {
+            fillMode = FillMode.Shells;
+            fillAlpha = 0.15f;
+            Refresh();
+            shellColorKeyCache.Clear();
+            shellColorKeyCacheDirty = true;
         }
 
         void RestoreAllPreviews()
@@ -3667,10 +3669,7 @@ namespace LightmapUvTool
             AssetDatabase.Refresh();
             UvtLog.Info($"[Apply] Done: {totalMeshes} mesh(es) across {fbxGroups.Count} FBX file(s)");
             CleanupWorkingMeshes();
-            fillMode = FillMode.Shells;
-            Refresh(restoreShellMatch: false);
-            shellColorKeyCache.Clear();
-            shellColorKeyCacheDirty = true;
+            SwitchToPostApplyView();
             Repaint();
         }
 
@@ -3883,12 +3882,7 @@ namespace LightmapUvTool
             bool touchesLoaded = meshEntries.Any(e =>
                 e.fbxMesh != null && AssetDatabase.GetAssetPath(e.fbxMesh) == selectedFbxPath);
             if (touchesLoaded)
-            {
-                fillMode = FillMode.Shells;
-                Refresh(restoreShellMatch: false);
-                shellColorKeyCache.Clear();
-                shellColorKeyCacheDirty = true;
-            }
+                SwitchToPostApplyView();
 
             UpdateSelectedSidecar();
             Repaint();
@@ -3970,10 +3964,7 @@ namespace LightmapUvTool
 
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Full pipeline state reset: {deleted} sidecar(s) deleted, {fbxPaths.Count} FBX reimported");
-            fillMode = FillMode.Shells;
-            Refresh(restoreShellMatch: false);
-            shellColorKeyCache.Clear();
-            shellColorKeyCacheDirty = true;
+            SwitchToPostApplyView();
             Repaint();
         }
 
@@ -4021,10 +4012,7 @@ namespace LightmapUvTool
 
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Deleted {deleted} sidecar(s), reimported {fbxPaths.Count} FBX");
-            fillMode = FillMode.Shells;
-            Refresh(restoreShellMatch: false);
-            shellColorKeyCache.Clear();
-            shellColorKeyCacheDirty = true;
+            SwitchToPostApplyView();
             Repaint();
         }
 
