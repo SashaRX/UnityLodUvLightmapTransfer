@@ -151,6 +151,73 @@ namespace LightmapUvTool
                             $"{totalFbxVerts}→{totalFinalVerts} verts (−{saved}, −{pct:F1}%) | " +
                             $"replay={replayCount} legacy={legacyCount} remap={remapCount} " +
                             $"stale={staleCount} fallback={totalFallback}");
+
+                // ── POST-IMPORT VALIDATION ──
+                // Check mesh data AFTER Unity's import pipeline fully completes.
+                // If Unity modifies our mesh after OnPostprocessModel, we'll catch it here.
+                string capturedPath = modelPath;
+                string capturedSidecar = Uv2DataAsset.GetSidecarPath(modelPath);
+                EditorApplication.delayCall += () =>
+                {
+                    try
+                    {
+                        var sidecar = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(capturedSidecar);
+                        if (sidecar == null) return;
+
+                        var allMeshes = AssetDatabase.LoadAllAssetsAtPath(capturedPath);
+                        foreach (var obj in allMeshes)
+                        {
+                            var m = obj as Mesh;
+                            if (m == null) continue;
+
+                            var fp = MeshFingerprint.Compute(m);
+                            var e = sidecar.FindRobust(m.name, fp);
+                            if (e == null || e.optimizedPositions == null) continue;
+
+                            int expVerts = e.optimizedVertexCount;
+                            int actVerts = m.vertexCount;
+                            var actTris = m.triangles;
+                            var actPos = m.vertices;
+
+                            bool vertCountOk = actVerts == expVerts;
+                            bool triCountOk = actTris.Length == e.optimizedTriangles.Length;
+
+                            int posMismatch = 0;
+                            float maxDev = 0f;
+                            int maxDevIdx = -1;
+                            int cnt = System.Math.Min(actVerts, expVerts);
+                            for (int i = 0; i < cnt; i++)
+                            {
+                                float d = Vector3.Distance(actPos[i], e.optimizedPositions[i]);
+                                if (d > 1e-6f)
+                                {
+                                    posMismatch++;
+                                    if (d > maxDev) { maxDev = d; maxDevIdx = i; }
+                                }
+                            }
+
+                            int triMis = 0;
+                            int triCnt = System.Math.Min(actTris.Length, e.optimizedTriangles.Length);
+                            for (int i = 0; i < triCnt; i++)
+                                if (actTris[i] != e.optimizedTriangles[i]) triMis++;
+
+                            if (!vertCountOk || !triCountOk || posMismatch > 0 || triMis > 0)
+                            {
+                                UvtLog.Warn($"[UV2 POST-IMPORT] '{m.name}': Unity MODIFIED mesh after postprocessor! " +
+                                            $"verts={actVerts}(exp={expVerts}), tris={actTris.Length}(exp={e.optimizedTriangles.Length}), " +
+                                            $"posMismatch={posMismatch}(maxDev={maxDev:E3}@{maxDevIdx}), triMismatch={triMis}");
+                            }
+                            else
+                            {
+                                UvtLog.Info($"[UV2 POST-IMPORT] '{m.name}': OK — mesh unchanged after import ({actVerts} verts, {actTris.Length} tri-indices)");
+                            }
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        UvtLog.Warn($"[UV2 POST-IMPORT] validation failed: {ex.Message}");
+                    }
+                };
             }
         }
 
