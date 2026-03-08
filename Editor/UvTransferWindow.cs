@@ -36,6 +36,8 @@ namespace LightmapUvTool
         int borderPaddingPx = 0;
         bool repackPerMesh;  // per-mesh repack: each mesh group packed to [0,1] independently
         int  isolatedMeshGroup = -1; // -1 = show all, >=0 = isolate mesh group by index
+        const float meshGroupPanelW = 160f;
+        Vector2 meshGroupScroll;
 
         // UV0 analysis
         Dictionary<int, Uv0Report> uv0Reports = new Dictionary<int, Uv0Report>();
@@ -574,9 +576,22 @@ namespace LightmapUvTool
             DrawToolbar();
             if (!string.IsNullOrEmpty(previewConflictNotice))
                 EditorGUILayout.HelpBox(previewConflictNotice, MessageType.Info);
+
+            bool showGroupPanel = repackPerMesh && MeshGroupCount(pvLod) > 1;
+            if (showGroupPanel)
+                EditorGUILayout.BeginHorizontal();
+
+            EditorGUILayout.BeginVertical();
             DrawCanvas();
             DrawStatusBar();
-            if (repackPerMesh) DrawMeshGroupBar();
+            EditorGUILayout.EndVertical();
+
+            if (showGroupPanel)
+            {
+                DrawMeshGroupPanel();
+                EditorGUILayout.EndHorizontal();
+            }
+
             EditorGUILayout.EndVertical();
 
             EditorGUILayout.EndHorizontal();
@@ -1085,14 +1100,7 @@ namespace LightmapUvTool
             // Build mesh group keys for isolation filtering
             List<string> canvasGroupKeys = null;
             if (repackPerMesh && isolatedMeshGroup >= 0)
-            {
-                canvasGroupKeys = new List<string>();
-                foreach (var e in meshEntries.Where(me => me.lodIndex == pvLod && me.include))
-                {
-                    string key = e.meshGroupKey ?? e.renderer.name;
-                    if (!canvasGroupKeys.Contains(key)) canvasGroupKeys.Add(key);
-                }
-            }
+                canvasGroupKeys = BuildGroupKeys(pvLod);
 
             var draws = new List<ValueTuple<Mesh, MeshEntry, int>>();
             for (int i = 0; i < ee.Count; i++)
@@ -2771,45 +2779,56 @@ namespace LightmapUvTool
             EditorGUILayout.EndHorizontal();
         }
 
-        /// <summary>Mesh group isolation bar for per-mesh repack mode.</summary>
-        void DrawMeshGroupBar()
+        /// <summary>Count unique mesh groups for a LOD level.</summary>
+        int MeshGroupCount(int lod)
         {
-            var ee = ForLod(pvLod);
-            if (ee.Count == 0) return;
+            var seen = new HashSet<string>();
+            foreach (var e in meshEntries)
+                if (e.lodIndex == lod && e.include)
+                    seen.Add(e.meshGroupKey ?? e.renderer.name);
+            return seen.Count;
+        }
 
-            // Build unique group keys in order
-            var groupKeys = new List<string>();
-            foreach (var e in meshEntries.Where(me => me.lodIndex == pvLod && me.include))
+        /// <summary>Build ordered list of unique mesh group keys for a LOD.</summary>
+        List<string> BuildGroupKeys(int lod)
+        {
+            var keys = new List<string>();
+            foreach (var e in meshEntries.Where(me => me.lodIndex == lod && me.include))
             {
                 string key = e.meshGroupKey ?? e.renderer.name;
-                if (!groupKeys.Contains(key)) groupKeys.Add(key);
+                if (!keys.Contains(key)) keys.Add(key);
             }
-            if (groupKeys.Count <= 1) return; // nothing to isolate
+            return keys;
+        }
 
-            EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
+        /// <summary>Vertical mesh-group isolation panel (right side of canvas).</summary>
+        void DrawMeshGroupPanel()
+        {
+            var groupKeys = BuildGroupKeys(pvLod);
+            if (groupKeys.Count <= 1) return;
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Width(meshGroupPanelW));
 
             // "All" button
             var bg = GUI.backgroundColor;
             if (isolatedMeshGroup < 0) GUI.backgroundColor = new Color(.35f, .65f, 1f);
-            if (GUILayout.Button("All", EditorStyles.toolbarButton, GUILayout.Width(32)))
+            if (GUILayout.Button("All", EditorStyles.miniButton))
                 isolatedMeshGroup = -1;
             GUI.backgroundColor = bg;
 
-            // Scrollable group buttons
+            // Scrollable list of groups
+            meshGroupScroll = EditorGUILayout.BeginScrollView(meshGroupScroll);
             for (int i = 0; i < groupKeys.Count; i++)
             {
                 bool active = isolatedMeshGroup == i;
                 if (active) GUI.backgroundColor = new Color(.35f, .85f, .4f);
-                // Short label: just the group key (without LOD suffix)
-                string label = groupKeys[i];
-                if (label.Length > 24) label = label.Substring(0, 22) + "..";
-                if (GUILayout.Button(label, EditorStyles.toolbarButton))
-                    isolatedMeshGroup = active ? -1 : i; // toggle
+                if (GUILayout.Button(groupKeys[i], EditorStyles.miniButton))
+                    isolatedMeshGroup = active ? -1 : i;
                 if (active) GUI.backgroundColor = bg;
             }
+            EditorGUILayout.EndScrollView();
 
-            GUILayout.FlexibleSpace();
-            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.EndVertical();
         }
 
         void SyncPreviewModeFromFlags()
@@ -3032,7 +3051,9 @@ namespace LightmapUvTool
             float pad = 6f;
             float w = 220f;
             float h = lines.Count * lineH + pad * 2f;
-            float x = canvasRect.xMax - w - 4f;
+            // Shift left when mesh group panel is visible on the right
+            float rightMargin = (repackPerMesh && MeshGroupCount(pvLod) > 1) ? meshGroupPanelW + 8f : 4f;
+            float x = canvasRect.xMax - w - rightMargin;
             float y = canvasRect.yMin + 4f;
             // Clamp to stay within canvas
             if (x < canvasRect.xMin + 4f) x = canvasRect.xMin + 4f;
