@@ -572,6 +572,32 @@ namespace LightmapUvTool
                 }
             }
 
+            // ── Ground-truth position validation ──
+            // Compare replayed positions against stored optimized positions.
+            // Any vertex that deviates is corrected. This catches ALL replay errors
+            // regardless of cause (dedup collisions, remap gaps, orphan issues, etc).
+            if (entry.optimizedPositions != null && entry.optimizedPositions.Length == optCount)
+            {
+                int corrected = 0;
+                const float kPosTolerance = 1e-4f; // squared distance threshold
+                for (int i = 0; i < optCount; i++)
+                {
+                    float dSq = Vector3.SqrMagnitude(optPos[i] - entry.optimizedPositions[i]);
+                    if (dSq > kPosTolerance)
+                    {
+                        optPos[i] = entry.optimizedPositions[i];
+                        if (optNormals != null && entry.optimizedNormals != null && i < entry.optimizedNormals.Length)
+                            optNormals[i] = entry.optimizedNormals[i];
+                        if (optTangents != null && entry.optimizedTangents != null && i < entry.optimizedTangents.Length)
+                            optTangents[i] = entry.optimizedTangents[i];
+                        corrected++;
+                    }
+                }
+                if (corrected > 0)
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': ground-truth validation corrected " +
+                                $"{corrected}/{optCount} vertices (position deviation > {Mathf.Sqrt(kPosTolerance):F4})");
+            }
+
             // ── Rebuild mesh ──
             // IMPORTANT: Do NOT use mesh.Clear() here. During OnPostprocessModel, Unity
             // allows mesh modifications regardless of isReadable. However, Clear() resets

@@ -3145,6 +3145,10 @@ namespace LightmapUvTool
             public Vector3[] orphanNormals;
             public Vector4[] orphanTangents;
             public Vector2[] orphanUv0;
+            // Ground-truth optimized vertex data
+            public Vector3[] optimizedPositions;
+            public Vector3[] optimizedNormals;
+            public Vector4[] optimizedTangents;
             // Shell descriptors (v0.14.0+)
             public ShellDescriptor[] shellDescriptors;
             public int[] vertexToSourceShellDescriptor;
@@ -3267,6 +3271,12 @@ namespace LightmapUvTool
                     sidecar.optimizedVertexCount = optimizedMesh.vertexCount;
                     BuildTriangleData(optimizedMesh, out sidecar.optimizedTriangles, out sidecar.submeshTriangleCounts);
                     sidecar.hasReplayData = (sidecar.vertexRemap != null);
+
+                    // Store optimized mesh vertex data as ground truth for replay validation.
+                    // During replay, any vertex that deviates from these positions is corrected.
+                    sidecar.optimizedPositions = optimizedMesh.vertices;
+                    sidecar.optimizedNormals = optimizedMesh.normals;
+                    sidecar.optimizedTangents = optimizedMesh.tangents;
 
                     // ── Detect orphan vertices (optimized indices not covered by any remap entry) ──
                     if (sidecar.vertexRemap != null && sidecar.optimizedVertexCount > 0)
@@ -3452,6 +3462,9 @@ namespace LightmapUvTool
                             orphanNormals = entry.orphanNormals,
                             orphanTangents = entry.orphanTangents,
                             orphanUv0 = entry.orphanUv0,
+                            optimizedPositions = entry.optimizedPositions,
+                            optimizedNormals = entry.optimizedNormals,
+                            optimizedTangents = entry.optimizedTangents,
                             shellDescriptors = entry.shellDescriptors,
                             vertexToSourceShellDescriptor = entry.vertexToSourceShellDescriptor,
                             targetShellToSourceShellDescriptor = entry.targetShellToSourceShellDescriptor,

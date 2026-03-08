@@ -162,6 +162,16 @@ namespace LightmapUvTool
         /// <summary>UV0 for orphan vertices (parallel to orphanIndices).</summary>
         public Vector2[] orphanUv0;
 
+        // ── Optimized vertex positions (ground truth for replay validation) ──
+        /// <summary>All vertex positions from the optimized mesh at Apply time.
+        /// Used to validate and fix replay results — corrects any vertex that
+        /// deviates from its original position (dedup collisions, remap gaps, etc).</summary>
+        public Vector3[] optimizedPositions;
+        /// <summary>All vertex normals from the optimized mesh at Apply time.</summary>
+        public Vector3[] optimizedNormals;
+        /// <summary>All vertex tangents from the optimized mesh at Apply time.</summary>
+        public Vector4[] optimizedTangents;
+
         // ── Shell descriptors (v0.14.0+) ──
         /// <summary>Stable shell descriptors for the target mesh UV0 shells.</summary>
         public ShellDescriptor[] shellDescriptors;
@@ -316,6 +326,9 @@ namespace LightmapUvTool
             dst.orphanNormals = src.orphanNormals;
             dst.orphanTangents = src.orphanTangents;
             dst.orphanUv0 = src.orphanUv0;
+            dst.optimizedPositions = src.optimizedPositions;
+            dst.optimizedNormals = src.optimizedNormals;
+            dst.optimizedTangents = src.optimizedTangents;
             dst.shellDescriptors = src.shellDescriptors;
             dst.vertexToSourceShellDescriptor = src.vertexToSourceShellDescriptor;
             dst.targetShellToSourceShellDescriptor = src.targetShellToSourceShellDescriptor;
