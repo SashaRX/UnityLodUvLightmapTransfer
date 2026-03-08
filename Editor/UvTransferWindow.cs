@@ -207,6 +207,8 @@ namespace LightmapUvTool
             /// E.g. "InnerDoor_A_01_Base_LOD0" → "InnerDoor_A_01_Base"
             /// </summary>
             public string meshGroupKey;
+            /// <summary>Source shell descriptors restored from sidecar, for stable ShellMatch coloring.</summary>
+            public ShellDescriptor[] restoredSourceDescriptors;
         }
 
         struct ShellUvHit
@@ -448,7 +450,59 @@ namespace LightmapUvTool
             if (LodN > 0) SetPreviewLod(pvLod);
             else pvLod = 0;
 
+            TryRestoreShellMatchFromSidecar();
             UpdateSelectedSidecar();
+        }
+
+        /// <summary>
+        /// Try to restore ShellMatch data from sidecar for entries that don't have
+        /// an in-memory shellTransferResult. This allows ShellMatch view to work
+        /// after reopening the window without re-running transfer.
+        /// </summary>
+        void TryRestoreShellMatchFromSidecar()
+        {
+            // Collect FBX paths → sidecar assets
+            var sidecarCache = new Dictionary<string, Uv2DataAsset>();
+            foreach (var e in meshEntries)
+            {
+                if (e.shellTransferResult != null) continue; // already has in-memory data
+                if (e.fbxMesh == null) continue;
+
+                string fbxPath = AssetDatabase.GetAssetPath(e.fbxMesh);
+                if (string.IsNullOrEmpty(fbxPath)) continue;
+
+                if (!sidecarCache.TryGetValue(fbxPath, out var sidecar))
+                {
+                    string sidecarPath = Uv2DataAsset.GetSidecarPath(fbxPath);
+                    sidecar = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+                    sidecarCache[fbxPath] = sidecar; // null is fine — caches miss
+                }
+                if (sidecar == null) continue;
+
+                string meshName = e.fbxMesh.name;
+                var entry = sidecar.Find(meshName);
+                if (entry == null) continue;
+
+                // Restore shell match from persisted data
+                if (entry.vertexToSourceShellDescriptor != null && entry.vertexToSourceShellDescriptor.Length > 0)
+                {
+                    var tr = new GroupedShellTransfer.TransferResult();
+                    tr.vertexToSourceShell = entry.vertexToSourceShellDescriptor;
+                    tr.targetShellToSourceShell = entry.targetShellToSourceShellDescriptor;
+                    tr.verticesTotal = e.fbxMesh.vertexCount;
+
+                    // Count transferred vertices
+                    int transferred = 0;
+                    for (int i = 0; i < tr.vertexToSourceShell.Length; i++)
+                        if (tr.vertexToSourceShell[i] >= 0) transferred++;
+                    tr.verticesTransferred = transferred;
+
+                    e.shellTransferResult = tr;
+
+                    // Also store source descriptors for stable ShellMatch coloring
+                    e.restoredSourceDescriptors = entry.sourceShellDescriptors;
+                }
+            }
         }
 
         List<MeshEntry> ForLod(int li) => meshEntries.Where(e => e.lodIndex == li && e.include).ToList();
@@ -1116,7 +1170,7 @@ namespace LightmapUvTool
                         switch (fillMode)
                         {
                             case FillMode.ShellMatch when hasShellMatch:
-                                GlFillShellMatch(cx,cy,sz, uvs,tri,fN,uN, entry.shellTransferResult.vertexToSourceShell);
+                                GlFillShellMatch(cx,cy,sz, uvs,tri,fN,uN, entry.shellTransferResult.vertexToSourceShell, GetSourceDescriptors(entry));
                                 break;
                             case FillMode.Validation when hasValidation:
                                 GlFillValidation(cx,cy,sz, uvs,tri,fN,uN, entry.validationReport.perTriangle);
@@ -2078,6 +2132,48 @@ namespace LightmapUvTool
         }
 
 
+        /// <summary>Get source shell descriptors for ShellMatch coloring. Returns null if unavailable.</summary>
+        ShellDescriptor[] GetSourceDescriptors(MeshEntry entry)
+        {
+            if (entry == null) return null;
+
+            // Restored from sidecar
+            if (entry.restoredSourceDescriptors != null)
+                return entry.restoredSourceDescriptors;
+
+            // Live: compute from source mesh and cache on entry
+            if (entry.lodIndex == sourceLodIndex) return null; // source LOD doesn't have "source descriptors"
+
+            var srcEntries = ForLod(sourceLodIndex);
+            MeshEntry se = null;
+            if (!string.IsNullOrEmpty(entry.meshGroupKey))
+                se = srcEntries.FirstOrDefault(s => s.meshGroupKey == entry.meshGroupKey);
+            if (se == null)
+            {
+                int ti = ForLod(entry.lodIndex).IndexOf(entry);
+                se = ti < srcEntries.Count ? srcEntries[ti] : (srcEntries.Count > 0 ? srcEntries[0] : null);
+            }
+            if (se == null) return null;
+
+            Mesh srcMesh = se.repackedMesh ?? se.originalMesh;
+            if (srcMesh == null) return null;
+
+            var srcUv0 = new List<Vector2>();
+            srcMesh.GetUVs(0, srcUv0);
+            if (srcUv0.Count != srcMesh.vertexCount) return null;
+
+            try
+            {
+                var srcShells = UvShellExtractor.Extract(srcUv0.ToArray(), srcMesh.triangles, computeDescriptors: true);
+                var descs = new ShellDescriptor[srcShells.Count];
+                for (int i = 0; i < srcShells.Count; i++)
+                    descs[i] = srcShells[i].descriptor;
+                entry.restoredSourceDescriptors = descs; // cache for next frame
+                return descs;
+            }
+            catch { return null; }
+        }
+
         int GetShellColorKey(UvShell shell, MeshEntry entry)
         {
             int meshId = 0;
@@ -2272,7 +2368,7 @@ namespace LightmapUvTool
             if (!orient.ContainsKey(key)) orient[key] = (a, b);
         }
 
-        void GlFillShellMatch(float ox, float oy, float sz, Vector2[] uv, int[] t, int fN, int uN, int[] vertShellMap)
+        void GlFillShellMatch(float ox, float oy, float sz, Vector2[] uv, int[] t, int fN, int uN, int[] vertShellMap, ShellDescriptor[] sourceDescriptors = null)
         {
             if (vertShellMap == null) return;
             int tot = 0, b = 0;
@@ -2282,8 +2378,20 @@ namespace LightmapUvTool
                 int a0 = t[f*3], a1 = t[f*3+1], a2 = t[f*3+2];
                 if (!TOk(uv, uN, a0, a1, a2)) continue;
                 int sh = (a0 < vertShellMap.Length) ? vertShellMap[a0] : -1;
-                Color nc = sh < 0 ? new Color(0.3f, 0.3f, 0.3f, fillAlpha) :
-                    new Color(pal[sh % pal.Length].r, pal[sh % pal.Length].g, pal[sh % pal.Length].b, fillAlpha * 1.5f);
+                Color nc;
+                if (sh < 0)
+                {
+                    nc = new Color(0.3f, 0.3f, 0.3f, fillAlpha);
+                }
+                else
+                {
+                    // Use source descriptor hash for stable color when available
+                    int colorKey = (sourceDescriptors != null && sh < sourceDescriptors.Length)
+                        ? Mathf.Abs(sourceDescriptors[sh].stableHash)
+                        : sh;
+                    Color pc = pal[colorKey % pal.Length];
+                    nc = new Color(pc.r, pc.g, pc.b, fillAlpha * 1.5f);
+                }
                 GL.Color(nc);
                 Vx(ox, oy, sz, uv[a0]); Vx(ox, oy, sz, uv[a1]); Vx(ox, oy, sz, uv[a2]);
                 tot++; b++;
@@ -3534,6 +3642,7 @@ namespace LightmapUvTool
 
                 if (e.fbxMesh != null) e.originalMesh = e.fbxMesh;
                 e.shellTransferResult = null;
+                e.restoredSourceDescriptors = null;
                 e.wasWelded = false;
                 e.wasEdgeWelded = false;
                 e.wasSymmetrySplit = false;
