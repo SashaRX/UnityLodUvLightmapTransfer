@@ -1913,7 +1913,7 @@ namespace LightmapUvTool
             if (uv == null || triangles == null || triangles.Length < 3) return null;
 
             List<UvShell> shells;
-            try { shells = UvShellExtractor.Extract(uv, triangles); }
+            try { shells = UvShellExtractor.Extract(uv, triangles, computeDescriptors: true); }
             catch { return null; }
 
             var faceToShell = new Dictionary<int, int>(triangles.Length / 3);
@@ -2089,31 +2089,41 @@ namespace LightmapUvTool
                 return cached;
 
             int result;
-            var map = entry?.shellTransferResult?.vertexToSourceShell;
-            if (map != null && shell?.vertexIndices != null && shell.vertexIndices.Count > 0)
+
+            // Priority 1: Use stable descriptor hash if available on the shell itself
+            if (shell.hasDescriptor)
             {
-                // Find most frequent source shell without LINQ
-                int bestKey = -1, bestCount = 0;
-                var freq = new Dictionary<int, int>();
-                foreach (int v in shell.vertexIndices)
-                {
-                    if (v < 0 || v >= map.Length) continue;
-                    int srcShell = map[v];
-                    if (srcShell < 0) continue;
-                    freq.TryGetValue(srcShell, out int c);
-                    c++;
-                    freq[srcShell] = c;
-                    if (c > bestCount || (c == bestCount && srcShell < bestKey))
-                    {
-                        bestCount = c;
-                        bestKey = srcShell;
-                    }
-                }
-                result = bestKey >= 0 ? bestKey : Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
+                result = Mathf.Abs(shell.descriptor.stableHash);
             }
+            // Priority 2: Use source shell mapping from transfer result (in-memory)
             else
             {
-                result = Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
+                var map = entry?.shellTransferResult?.vertexToSourceShell;
+                if (map != null && shell?.vertexIndices != null && shell.vertexIndices.Count > 0)
+                {
+                    // Find most frequent source shell without LINQ
+                    int bestKey = -1, bestCount = 0;
+                    var freq = new Dictionary<int, int>();
+                    foreach (int v in shell.vertexIndices)
+                    {
+                        if (v < 0 || v >= map.Length) continue;
+                        int srcShell = map[v];
+                        if (srcShell < 0) continue;
+                        freq.TryGetValue(srcShell, out int c);
+                        c++;
+                        freq[srcShell] = c;
+                        if (c > bestCount || (c == bestCount && srcShell < bestKey))
+                        {
+                            bestCount = c;
+                            bestKey = srcShell;
+                        }
+                    }
+                    result = bestKey >= 0 ? bestKey : Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
+                }
+                else
+                {
+                    result = Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
+                }
             }
 
             shellColorKeyCache[cacheKey] = result;
@@ -3014,6 +3024,11 @@ namespace LightmapUvTool
             public Vector3[] orphanNormals;
             public Vector4[] orphanTangents;
             public Vector2[] orphanUv0;
+            // Shell descriptors (v0.14.0+)
+            public ShellDescriptor[] shellDescriptors;
+            public int[] vertexToSourceShellDescriptor;
+            public int[] targetShellToSourceShellDescriptor;
+            public ShellDescriptor[] sourceShellDescriptors;
         }
 
         void ApplyUv2ToFbx()
@@ -3216,6 +3231,70 @@ namespace LightmapUvTool
                                 "reimport will use non-deterministic legacy path!");
                 }
 
+                // ── Shell descriptors: compute and persist stable shell identity ──
+                try
+                {
+                    // Compute target shell descriptors from the result mesh UV0
+                    var descUv0 = new List<Vector2>();
+                    resultMesh.GetUVs(0, descUv0);
+                    if (descUv0.Count == resultMesh.vertexCount)
+                    {
+                        var descTris = resultMesh.triangles;
+                        var descShells = UvShellExtractor.Extract(descUv0.ToArray(), descTris, computeDescriptors: true);
+                        sidecar.shellDescriptors = new ShellDescriptor[descShells.Count];
+                        for (int si = 0; si < descShells.Count; si++)
+                            sidecar.shellDescriptors[si] = descShells[si].descriptor;
+
+                        UvtLog.Verbose($"[Apply] '{meshName}': {descShells.Count} shell descriptors computed");
+                    }
+
+                    // Persist shell match mapping from transfer result (target LODs only)
+                    if (e.shellTransferResult != null)
+                    {
+                        var tr = e.shellTransferResult;
+
+                        // vertexToSourceShell → vertexToSourceShellDescriptor
+                        if (tr.vertexToSourceShell != null)
+                            sidecar.vertexToSourceShellDescriptor = (int[])tr.vertexToSourceShell.Clone();
+
+                        // targetShellToSourceShell → targetShellToSourceShellDescriptor
+                        if (tr.targetShellToSourceShell != null)
+                            sidecar.targetShellToSourceShellDescriptor = (int[])tr.targetShellToSourceShell.Clone();
+
+                        // Compute source shell descriptors from the source mesh used for transfer
+                        MeshEntry se = null;
+                        var srcE = ForLod(sourceLodIndex);
+                        if (!string.IsNullOrEmpty(e.meshGroupKey))
+                            se = srcE.FirstOrDefault(s => s.meshGroupKey == e.meshGroupKey);
+                        if (se == null)
+                        {
+                            int ti2 = ForLod(e.lodIndex).IndexOf(e);
+                            se = ti2 < srcE.Count ? srcE[ti2] : (srcE.Count > 0 ? srcE[0] : null);
+                        }
+                        if (se != null)
+                        {
+                            Mesh srcMesh = se.repackedMesh ?? se.originalMesh;
+                            if (srcMesh != null)
+                            {
+                                var srcUv0 = new List<Vector2>();
+                                srcMesh.GetUVs(0, srcUv0);
+                                if (srcUv0.Count == srcMesh.vertexCount)
+                                {
+                                    var srcTris = srcMesh.triangles;
+                                    var srcShells = UvShellExtractor.Extract(srcUv0.ToArray(), srcTris, computeDescriptors: true);
+                                    sidecar.sourceShellDescriptors = new ShellDescriptor[srcShells.Count];
+                                    for (int si = 0; si < srcShells.Count; si++)
+                                        sidecar.sourceShellDescriptors[si] = srcShells[si].descriptor;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    UvtLog.Warn($"[Apply] '{meshName}': shell descriptor computation failed: {ex.Message}");
+                }
+
                 fbxGroups[fbxPath].Add(sidecar);
             }
 
@@ -3269,6 +3348,10 @@ namespace LightmapUvTool
                             orphanNormals = entry.orphanNormals,
                             orphanTangents = entry.orphanTangents,
                             orphanUv0 = entry.orphanUv0,
+                            shellDescriptors = entry.shellDescriptors,
+                            vertexToSourceShellDescriptor = entry.vertexToSourceShellDescriptor,
+                            targetShellToSourceShellDescriptor = entry.targetShellToSourceShellDescriptor,
+                            sourceShellDescriptors = entry.sourceShellDescriptors,
                         });
                         totalMeshes++;
                     }

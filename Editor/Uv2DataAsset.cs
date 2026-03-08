@@ -161,6 +161,16 @@ namespace LightmapUvTool
         public Vector4[] orphanTangents;
         /// <summary>UV0 for orphan vertices (parallel to orphanIndices).</summary>
         public Vector2[] orphanUv0;
+
+        // ── Shell descriptors (v0.14.0+) ──
+        /// <summary>Stable shell descriptors for the target mesh UV0 shells.</summary>
+        public ShellDescriptor[] shellDescriptors;
+        /// <summary>Per-vertex mapping: vertex index → source shell descriptor index. -1 = unmapped.</summary>
+        public int[] vertexToSourceShellDescriptor;
+        /// <summary>Per-target-shell mapping: target shell index → source shell descriptor index. -1 = unmapped.</summary>
+        public int[] targetShellToSourceShellDescriptor;
+        /// <summary>Stable shell descriptors for the source mesh UV0 shells (at time of transfer).</summary>
+        public ShellDescriptor[] sourceShellDescriptors;
     }
 
     [CreateAssetMenu(menuName = "LightmapUvTool/UV2 Data (internal)", fileName = "uv2data")]
@@ -306,6 +316,10 @@ namespace LightmapUvTool
             dst.orphanNormals = src.orphanNormals;
             dst.orphanTangents = src.orphanTangents;
             dst.orphanUv0 = src.orphanUv0;
+            dst.shellDescriptors = src.shellDescriptors;
+            dst.vertexToSourceShellDescriptor = src.vertexToSourceShellDescriptor;
+            dst.targetShellToSourceShellDescriptor = src.targetShellToSourceShellDescriptor;
+            dst.sourceShellDescriptors = src.sourceShellDescriptors;
         }
 
         /// <summary>Remove entry by mesh name. Returns true if found.</summary>

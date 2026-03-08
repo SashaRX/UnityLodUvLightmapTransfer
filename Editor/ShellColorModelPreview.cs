@@ -51,16 +51,22 @@ namespace LightmapUvTool
                     return new int[faceCount];
 
                 List<UvShell> shells;
-                try { shells = UvShellExtractor.Extract(uv, tris); }
+                try { shells = UvShellExtractor.Extract(uv, tris, computeDescriptors: true); }
                 catch { return new int[faceCount]; }
 
                 var triangleToShell = new int[faceCount];
                 for (int i = 0; i < triangleToShell.Length; i++) triangleToShell[i] = -1;
 
                 foreach (var shell in shells)
+                {
+                    // Use stable descriptor hash instead of raw shellId for consistent colors
+                    int colorKey = shell.hasDescriptor
+                        ? Mathf.Abs(shell.descriptor.stableHash)
+                        : shell.shellId;
                     foreach (int faceIndex in shell.faceIndices)
                         if (faceIndex >= 0 && faceIndex < triangleToShell.Length)
-                            triangleToShell[faceIndex] = shell.shellId;
+                            triangleToShell[faceIndex] = colorKey;
+                }
 
                 return triangleToShell;
             }
