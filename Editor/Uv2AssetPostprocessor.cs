@@ -15,6 +15,14 @@ namespace LightmapUvTool
         // Run well after Bakery and other postprocessors (default order = 0).
         public override int GetPostprocessOrder() => 10000;
 
+        /// <summary>
+        /// Paths to bypass during the next reimport. When ApplyUv2ToFbx needs the
+        /// raw FBX mesh (before any postprocessor modifications), it adds the FBX
+        /// path here and reimports. Both OnPreprocessModel and OnPostprocessModel
+        /// skip processing for bypassed paths, yielding the untouched FBX mesh.
+        /// </summary>
+        internal static readonly HashSet<string> bypassPaths = new HashSet<string>();
+
         struct ApplyStats
         {
             public int fbxVerts;              // vertex count from fresh FBX import
@@ -33,6 +41,10 @@ namespace LightmapUvTool
             var modelImporter = assetImporter as ModelImporter;
             if (modelImporter == null) return;
 
+            // Bypass: ApplyUv2ToFbx needs the raw FBX mesh without any modifications.
+            if (bypassPaths.Contains(assetPath))
+                return;
+
             string sidecarPath = Uv2DataAsset.GetSidecarPath(assetPath);
             if (!System.IO.File.Exists(sidecarPath)) return;
 
@@ -44,11 +56,44 @@ namespace LightmapUvTool
                 modelImporter.generateSecondaryUV = false;
                 UvtLog.Info($"[UV2 Preprocess] Disabled generateSecondaryUV on '{assetPath}' (sidecar provides UV2)");
             }
+
+            // Disable Unity's post-import mesh processing that can modify our reconstructed mesh:
+            // - weldVertices: merges vertices at same position, destroying UV seams we need
+            // - meshCompression: quantizes positions, causing vertex shifts
+            // - optimizeMeshPolygons/Vertices: reorders data (usually harmless but disable to be safe)
+            if (modelImporter.weldVertices)
+            {
+                modelImporter.weldVertices = false;
+                UvtLog.Info($"[UV2 Preprocess] Disabled weldVertices on '{assetPath}' (postprocessor manages mesh topology)");
+            }
+            if (modelImporter.meshCompression != ModelImporterMeshCompression.Off)
+            {
+                UvtLog.Info($"[UV2 Preprocess] Disabled meshCompression ({modelImporter.meshCompression}) on '{assetPath}'");
+                modelImporter.meshCompression = ModelImporterMeshCompression.Off;
+            }
+            if (modelImporter.optimizeMeshPolygons)
+            {
+                modelImporter.optimizeMeshPolygons = false;
+                UvtLog.Info($"[UV2 Preprocess] Disabled optimizeMeshPolygons on '{assetPath}'");
+            }
+            if (modelImporter.optimizeMeshVertices)
+            {
+                modelImporter.optimizeMeshVertices = false;
+                UvtLog.Info($"[UV2 Preprocess] Disabled optimizeMeshVertices on '{assetPath}'");
+            }
         }
 
         void OnPostprocessModel(GameObject root)
         {
             string modelPath = assetPath;
+
+            // Bypass: ApplyUv2ToFbx needs the raw FBX mesh without any modifications.
+            if (bypassPaths.Remove(modelPath))
+            {
+                UvtLog.Verbose($"[UV2 Postprocess] Bypassed '{modelPath}' (raw FBX mesh requested)");
+                return;
+            }
+
             string sidecarPath = Uv2DataAsset.GetSidecarPath(modelPath);
 
             // Load sidecar without triggering import loop
@@ -106,6 +151,73 @@ namespace LightmapUvTool
                             $"{totalFbxVerts}→{totalFinalVerts} verts (−{saved}, −{pct:F1}%) | " +
                             $"replay={replayCount} legacy={legacyCount} remap={remapCount} " +
                             $"stale={staleCount} fallback={totalFallback}");
+
+                // ── POST-IMPORT VALIDATION ──
+                // Check mesh data AFTER Unity's import pipeline fully completes.
+                // If Unity modifies our mesh after OnPostprocessModel, we'll catch it here.
+                string capturedPath = modelPath;
+                string capturedSidecar = Uv2DataAsset.GetSidecarPath(modelPath);
+                EditorApplication.delayCall += () =>
+                {
+                    try
+                    {
+                        var sidecar = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(capturedSidecar);
+                        if (sidecar == null) return;
+
+                        var allMeshes = AssetDatabase.LoadAllAssetsAtPath(capturedPath);
+                        foreach (var obj in allMeshes)
+                        {
+                            var m = obj as Mesh;
+                            if (m == null) continue;
+
+                            var fp = MeshFingerprint.Compute(m);
+                            var e = sidecar.FindRobust(m.name, fp);
+                            if (e == null || e.optimizedPositions == null) continue;
+
+                            int expVerts = e.optimizedVertexCount;
+                            int actVerts = m.vertexCount;
+                            var actTris = m.triangles;
+                            var actPos = m.vertices;
+
+                            bool vertCountOk = actVerts == expVerts;
+                            bool triCountOk = actTris.Length == e.optimizedTriangles.Length;
+
+                            int posMismatch = 0;
+                            float maxDev = 0f;
+                            int maxDevIdx = -1;
+                            int cnt = System.Math.Min(actVerts, expVerts);
+                            for (int i = 0; i < cnt; i++)
+                            {
+                                float d = Vector3.Distance(actPos[i], e.optimizedPositions[i]);
+                                if (d > 1e-6f)
+                                {
+                                    posMismatch++;
+                                    if (d > maxDev) { maxDev = d; maxDevIdx = i; }
+                                }
+                            }
+
+                            int triMis = 0;
+                            int triCnt = System.Math.Min(actTris.Length, e.optimizedTriangles.Length);
+                            for (int i = 0; i < triCnt; i++)
+                                if (actTris[i] != e.optimizedTriangles[i]) triMis++;
+
+                            if (!vertCountOk || !triCountOk || posMismatch > 0 || triMis > 0)
+                            {
+                                UvtLog.Warn($"[UV2 POST-IMPORT] '{m.name}': Unity MODIFIED mesh after postprocessor! " +
+                                            $"verts={actVerts}(exp={expVerts}), tris={actTris.Length}(exp={e.optimizedTriangles.Length}), " +
+                                            $"posMismatch={posMismatch}(maxDev={maxDev:E3}@{maxDevIdx}), triMismatch={triMis}");
+                            }
+                            else
+                            {
+                                UvtLog.Info($"[UV2 POST-IMPORT] '{m.name}': OK — mesh unchanged after import ({actVerts} verts, {actTris.Length} tri-indices)");
+                            }
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        UvtLog.Warn($"[UV2 POST-IMPORT] validation failed: {ex.Message}");
+                    }
+                };
             }
         }
 
@@ -131,11 +243,30 @@ namespace LightmapUvTool
             {
                 if (!entry.sourceFingerprint.Matches(currentFp))
                 {
-                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': FBX geometry changed since sidecar was created " +
-                                $"(verts: {entry.sourceFingerprint.vertexCount}→{currentFp.vertexCount}, " +
-                                $"tris: {entry.sourceFingerprint.triangleCount}→{currentFp.triangleCount}). " +
-                                "Sidecar may be stale.");
-                    stats.stale = true;
+                    // Only mark stale if vertex/triangle counts actually differ.
+                    // Hash-only mismatches (same counts) are typically caused by
+                    // FBX importer floating-point non-determinism between reimports,
+                    // not real geometry changes. The original remap is still valid
+                    // in this case; marking stale would trigger RebuildRemapFromPositions
+                    // which can't cover all opt vertices (orphans + dedup collisions),
+                    // causing hundreds of unfilled vertices → mesh stretching to origin.
+                    bool countsChanged = entry.sourceFingerprint.vertexCount != currentFp.vertexCount
+                                      || entry.sourceFingerprint.triangleCount != currentFp.triangleCount;
+                    if (countsChanged)
+                    {
+                        UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': FBX geometry changed since sidecar was created " +
+                                    $"(verts: {entry.sourceFingerprint.vertexCount}→{currentFp.vertexCount}, " +
+                                    $"tris: {entry.sourceFingerprint.triangleCount}→{currentFp.triangleCount}). " +
+                                    "Sidecar may be stale.");
+                        stats.stale = true;
+                    }
+                    else
+                    {
+                        UvtLog.Verbose($"[UV2 Postprocess] '{mesh.name}': fingerprint hash mismatch but " +
+                                       $"vertex/triangle counts match ({currentFp.vertexCount} verts, " +
+                                       $"{currentFp.triangleCount} tris) — trusting original remap " +
+                                       "(likely FBX importer FP non-determinism).");
+                    }
                 }
             }
 
@@ -367,6 +498,11 @@ namespace LightmapUvTool
             }
 
             // ── Build optimized arrays via remap ──
+            // If ground-truth vertex data is available, use it DIRECTLY for positions/normals/tangents.
+            // This completely bypasses the remap for geometry, eliminating all remap-related vertex errors.
+            // The remap is only used for UV channels and colors (which aren't stored in ground truth).
+            bool hasGroundTruth = entry.optimizedPositions != null && entry.optimizedPositions.Length == optCount;
+
             var optPos = new Vector3[optCount];
             var optNormals = rawNormals != null && rawNormals.Length == rawCount ? new Vector3[optCount] : null;
             var optTangents = rawTangents != null && rawTangents.Length == rawCount ? new Vector4[optCount] : null;
@@ -382,66 +518,188 @@ namespace LightmapUvTool
                 }
             }
 
-            for (int i = 0; i < rawCount; i++)
+            if (hasGroundTruth)
             {
-                int dst = remap[i];
-                if (dst < 0) continue; // vertex was removed (shouldn't happen with valid remap)
+                // Positions/normals/tangents from ground truth — these don't change during
+                // weld (meshopt dedup is byte-exact, EdgeWeld only removes vertices at same pos).
+                System.Array.Copy(entry.optimizedPositions, optPos, optCount);
+                if (optNormals != null && entry.optimizedNormals != null && entry.optimizedNormals.Length == optCount)
+                    System.Array.Copy(entry.optimizedNormals, optNormals, optCount);
+                if (optTangents != null && entry.optimizedTangents != null && entry.optimizedTangents.Length == optCount)
+                    System.Array.Copy(entry.optimizedTangents, optTangents, optCount);
 
-                optPos[dst] = rawPos[i];
-                if (optNormals != null) optNormals[dst] = rawNormals[i];
-                if (optTangents != null) optTangents[dst] = rawTangents[i];
-                if (optColors != null) optColors[dst] = rawColors[i];
-
-                for (int ch = 0; ch < 8; ch++)
+                // UV channels, colors — from remap (UV0 is modified by weld, must come from raw FBX)
+                for (int i = 0; i < rawCount; i++)
                 {
-                    if (ch == 1 || optUvs[ch] == null) continue;
-                    optUvs[ch][dst] = rawUvs[ch][i];
-                }
-            }
-
-            // ── Fill orphan vertices (SymmetrySplit boundary verts, etc.) ──
-            if (entry.orphanIndices != null && entry.orphanIndices.Length > 0)
-            {
-                for (int k = 0; k < entry.orphanIndices.Length; k++)
-                {
-                    int dst = entry.orphanIndices[k];
-                    if (dst < 0 || dst >= optCount) continue;
-                    if (entry.orphanPositions != null && k < entry.orphanPositions.Length)
-                        optPos[dst] = entry.orphanPositions[k];
-                    if (optNormals != null && entry.orphanNormals != null && k < entry.orphanNormals.Length)
-                        optNormals[dst] = entry.orphanNormals[k];
-                    if (optTangents != null && entry.orphanTangents != null && k < entry.orphanTangents.Length)
-                        optTangents[dst] = entry.orphanTangents[k];
-                    if (optUvs[0] != null && entry.orphanUv0 != null && k < entry.orphanUv0.Length)
-                        optUvs[0][dst] = entry.orphanUv0[k];
-                }
-                UvtLog.Verbose($"[UV2 Postprocess] '{mesh.name}': filled {entry.orphanIndices.Length} orphan vertices from sidecar");
-            }
-
-            // ── Detect unfilled vertices (would cause 3D stretching to origin) ──
-            {
-                int unfilled = 0;
-                // Build set of indices actually referenced by triangles
-                var referenced = new HashSet<int>();
-                for (int i = 0; i < entry.optimizedTriangles.Length; i++)
-                    referenced.Add(entry.optimizedTriangles[i]);
-
-                foreach (int idx in referenced)
-                {
-                    if (idx < optCount && optPos[idx] == Vector3.zero)
+                    int dst = remap[i];
+                    if (dst < 0) continue;
+                    if (optColors != null) optColors[dst] = rawColors[i];
+                    for (int ch = 0; ch < 8; ch++)
                     {
-                        // Check if this is genuinely at origin or unfilled
-                        // by testing if ALL attributes are zero
-                        bool allZero = true;
-                        if (optNormals != null && optNormals[idx].sqrMagnitude > 0) allZero = false;
-                        if (allZero && optUvs[0] != null && optUvs[0][idx].sqrMagnitude > 0) allZero = false;
-                        if (allZero) unfilled++;
+                        if (ch == 1 || optUvs[ch] == null) continue;
+                        optUvs[ch][dst] = rawUvs[ch][i];
                     }
                 }
-                if (unfilled > 0)
-                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {unfilled} referenced vertices have zero " +
-                                $"position+normal+UV0 (likely unfilled — may cause 3D stretching)");
+
+                // Orphan UV0 fill (orphan positions/normals/tangents already in ground truth)
+                if (entry.orphanIndices != null && entry.orphanIndices.Length > 0)
+                {
+                    for (int k = 0; k < entry.orphanIndices.Length; k++)
+                    {
+                        int dst = entry.orphanIndices[k];
+                        if (dst < 0 || dst >= optCount) continue;
+                        if (optUvs[0] != null && entry.orphanUv0 != null && k < entry.orphanUv0.Length)
+                            optUvs[0][dst] = entry.orphanUv0[k];
+                    }
+                }
+
+                UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': ground-truth geometry + remap UV ({optCount} verts)");
             }
+            else
+            {
+                // Legacy path: all data from remap
+                for (int i = 0; i < rawCount; i++)
+                {
+                    int dst = remap[i];
+                    if (dst < 0) continue;
+
+                    optPos[dst] = rawPos[i];
+                    if (optNormals != null) optNormals[dst] = rawNormals[i];
+                    if (optTangents != null) optTangents[dst] = rawTangents[i];
+                    if (optColors != null) optColors[dst] = rawColors[i];
+
+                    for (int ch = 0; ch < 8; ch++)
+                    {
+                        if (ch == 1 || optUvs[ch] == null) continue;
+                        optUvs[ch][dst] = rawUvs[ch][i];
+                    }
+                }
+
+                // ── Fill orphan vertices (SymmetrySplit boundary verts, etc.) ──
+                if (entry.orphanIndices != null && entry.orphanIndices.Length > 0)
+                {
+                    for (int k = 0; k < entry.orphanIndices.Length; k++)
+                    {
+                        int dst = entry.orphanIndices[k];
+                        if (dst < 0 || dst >= optCount) continue;
+                        if (entry.orphanPositions != null && k < entry.orphanPositions.Length)
+                            optPos[dst] = entry.orphanPositions[k];
+                        if (optNormals != null && entry.orphanNormals != null && k < entry.orphanNormals.Length)
+                            optNormals[dst] = entry.orphanNormals[k];
+                        if (optTangents != null && entry.orphanTangents != null && k < entry.orphanTangents.Length)
+                            optTangents[dst] = entry.orphanTangents[k];
+                        if (optUvs[0] != null && entry.orphanUv0 != null && k < entry.orphanUv0.Length)
+                            optUvs[0][dst] = entry.orphanUv0[k];
+                    }
+                    UvtLog.Verbose($"[UV2 Postprocess] '{mesh.name}': filled {entry.orphanIndices.Length} orphan vertices from sidecar");
+                }
+
+                // ── Detect and fix unfilled vertices (would cause 3D stretching to origin) ──
+                // Unfilled vertices happen when BuildVertexRemap couldn't match some raw FBX
+                // vertices to optimized vertices (e.g. UvEdgeWeld averaged positions).
+                // Safety net: use stored vertPositions/vertUv0 from sidecar to fill them.
+                {
+                    // Build set of indices actually referenced by triangles
+                    var referenced = new HashSet<int>();
+                    for (int i = 0; i < entry.optimizedTriangles.Length; i++)
+                        referenced.Add(entry.optimizedTriangles[i]);
+
+                    // Find unfilled referenced vertices
+                    var unfilledIndices = new List<int>();
+                    foreach (int idx in referenced)
+                    {
+                        if (idx < optCount && optPos[idx] == Vector3.zero)
+                        {
+                            bool allZero = true;
+                            if (optNormals != null && optNormals[idx].sqrMagnitude > 0) allZero = false;
+                            if (allZero && optUvs[0] != null && optUvs[0][idx].sqrMagnitude > 0) allZero = false;
+                            if (allZero) unfilledIndices.Add(idx);
+                        }
+                    }
+
+                    if (unfilledIndices.Count > 0 &&
+                        entry.vertPositions != null && entry.vertPositions.Length > 0)
+                    {
+                        int fixed_ = 0;
+                        int[] origRemap = entry.vertexRemap;
+
+                        var optToRaw = new Dictionary<int, int>();
+                        if (origRemap != null)
+                        {
+                            for (int i = 0; i < origRemap.Length; i++)
+                            {
+                                int dst = origRemap[i];
+                                if (dst >= 0 && !optToRaw.ContainsKey(dst))
+                                    optToRaw[dst] = i;
+                            }
+                        }
+
+                        foreach (int idx in unfilledIndices)
+                        {
+                            if (optToRaw.TryGetValue(idx, out int rawIdx) && rawIdx < rawCount)
+                            {
+                                optPos[idx] = rawPos[rawIdx];
+                                if (optNormals != null && rawNormals != null && rawIdx < rawNormals.Length)
+                                    optNormals[idx] = rawNormals[rawIdx];
+                                if (optTangents != null && rawTangents != null && rawIdx < rawTangents.Length)
+                                    optTangents[idx] = rawTangents[rawIdx];
+                                if (optColors != null && rawColors != null && rawIdx < rawColors.Length)
+                                    optColors[idx] = rawColors[rawIdx];
+                                for (int ch = 0; ch < 8; ch++)
+                                {
+                                    if (ch == 1 || optUvs[ch] == null || rawUvs[ch] == null) continue;
+                                    if (rawIdx < rawUvs[ch].Count)
+                                        optUvs[ch][idx] = rawUvs[ch][rawIdx];
+                                }
+                                fixed_++;
+                                continue;
+                            }
+
+                            if (idx < entry.vertPositions.Length)
+                            {
+                                Vector3 targetPos = entry.vertPositions[idx];
+                                float bestDist = float.MaxValue;
+                                int bestRaw = -1;
+                                for (int r = 0; r < rawCount; r++)
+                                {
+                                    float d = Vector3.SqrMagnitude(rawPos[r] - targetPos);
+                                    if (d < bestDist) { bestDist = d; bestRaw = r; }
+                                }
+                                if (bestRaw >= 0 && bestDist < 1e-1f)
+                                {
+                                    optPos[idx] = rawPos[bestRaw];
+                                    if (optNormals != null && rawNormals != null && bestRaw < rawNormals.Length)
+                                        optNormals[idx] = rawNormals[bestRaw];
+                                    if (optTangents != null && rawTangents != null && bestRaw < rawTangents.Length)
+                                        optTangents[idx] = rawTangents[bestRaw];
+                                    if (optColors != null && rawColors != null && bestRaw < rawColors.Length)
+                                        optColors[idx] = rawColors[bestRaw];
+                                    for (int ch = 0; ch < 8; ch++)
+                                    {
+                                        if (ch == 1 || optUvs[ch] == null || rawUvs[ch] == null) continue;
+                                        if (bestRaw < rawUvs[ch].Count)
+                                            optUvs[ch][idx] = rawUvs[ch][bestRaw];
+                                    }
+                                    fixed_++;
+                                }
+                            }
+                        }
+
+                        if (fixed_ > 0)
+                            UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': fixed {fixed_}/{unfilledIndices.Count} " +
+                                        "unfilled vertices from raw FBX data (remap gap safety net)");
+                        int remaining = unfilledIndices.Count - fixed_;
+                        if (remaining > 0)
+                            UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {remaining} referenced vertices still unfilled " +
+                                        "(may cause 3D stretching)");
+                    }
+                    else if (unfilledIndices.Count > 0)
+                    {
+                        UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {unfilledIndices.Count} referenced vertices have zero " +
+                                    "position+normal+UV0 (likely unfilled — may cause 3D stretching)");
+                    }
+                }
+            } // end legacy path
 
             // ── Rebuild mesh ──
             // IMPORTANT: Do NOT use mesh.Clear() here. During OnPostprocessModel, Unity
@@ -495,6 +753,64 @@ namespace LightmapUvTool
             // NOTE: Do NOT call mesh.UploadMeshData() here — during OnPostprocessModel,
             // Unity manages GPU upload internally. Calling it here can cause the
             // verification pass to detect inconsistent state ("inconsistent result" error).
+
+            // ── DIAGNOSTIC: verify reconstruction quality ──
+            {
+                var finalPos = mesh.vertices;
+                int zeroCount = 0;
+                float maxPosDev = 0f;
+                int maxPosDevIdx = -1;
+                for (int i = 0; i < finalPos.Length && i < optCount; i++)
+                {
+                    if (finalPos[i] == Vector3.zero) zeroCount++;
+                    if (hasGroundTruth)
+                    {
+                        float dev = Vector3.Distance(finalPos[i], entry.optimizedPositions[i]);
+                        if (dev > maxPosDev) { maxPosDev = dev; maxPosDevIdx = i; }
+                    }
+                }
+
+                // Check UV0 — how many vertices have zero UV0?
+                var finalUv0 = new List<Vector2>();
+                mesh.GetUVs(0, finalUv0);
+                int zeroUv0 = 0;
+                for (int i = 0; i < finalUv0.Count; i++)
+                    if (finalUv0[i] == Vector2.zero) zeroUv0++;
+
+                // Check triangles — verify they match stored data
+                var finalTris = mesh.triangles;
+                int triMismatch = 0;
+                int triOutOfRange = 0;
+                for (int i = 0; i < finalTris.Length; i++)
+                {
+                    if (finalTris[i] < 0 || finalTris[i] >= mesh.vertexCount) triOutOfRange++;
+                    if (i < entry.optimizedTriangles.Length && finalTris[i] != entry.optimizedTriangles[i]) triMismatch++;
+                }
+                int triCountDiff = finalTris.Length - entry.optimizedTriangles.Length;
+
+                var sb = new System.Text.StringBuilder();
+                sb.Append($"[UV2 Postprocess] DIAG '{mesh.name}': {rawCount}→{optCount} verts (mesh.vertexCount={mesh.vertexCount}), ");
+                sb.Append($"groundTruth={hasGroundTruth}, ");
+                sb.Append($"zeroPos={zeroCount}, zeroUv0={zeroUv0}/{finalUv0.Count}");
+                if (hasGroundTruth)
+                    sb.Append($", maxPosDev={maxPosDev:E3} @idx{maxPosDevIdx}");
+                sb.Append($", tris={finalTris.Length}(expected={entry.optimizedTriangles.Length}, diff={triCountDiff}, mismatch={triMismatch}, OOB={triOutOfRange})");
+
+                // Sample a few positions for inspection
+                if (optCount > 0)
+                {
+                    int mid = optCount / 2;
+                    int last = optCount - 1;
+                    sb.Append($"\n  pos[0]={optPos[0]:F4}");
+                    if (hasGroundTruth) sb.Append($" gt={entry.optimizedPositions[0]:F4}");
+                    sb.Append($" raw[remap→0]?");
+                    sb.Append($"\n  pos[{mid}]={optPos[mid]:F4}");
+                    if (hasGroundTruth) sb.Append($" gt={entry.optimizedPositions[mid]:F4}");
+                    sb.Append($"\n  pos[{last}]={optPos[last]:F4}");
+                    if (hasGroundTruth) sb.Append($" gt={entry.optimizedPositions[last]:F4}");
+                }
+                UvtLog.Info(sb.ToString());
+            }
 
             UvtLog.Verbose($"[UV2 Postprocess] '{mesh.name}': replay {rawCount}→{optCount} verts " +
                           $"({entry.optimizedTriangles.Length / 3} tris, {subCount} submeshes)");
@@ -591,7 +907,11 @@ namespace LightmapUvTool
                     if (bestOld >= 0 && bestDist < 1e-4f)
                     {
                         newRemap[i] = origRemap[bestOld];
-                        if (origRemap[bestOld] >= 0) matched++;
+                        if (origRemap[bestOld] >= 0)
+                        {
+                            coveredOpt[origRemap[bestOld]] = true;
+                            matched++;
+                        }
                     }
                 }
             }
@@ -625,11 +945,10 @@ namespace LightmapUvTool
 
         /// <summary>
         /// Pick the best stored vertex candidate for a new raw vertex.
-        /// Priority: uncovered opt slot > already-covered opt slot > invalid (-1).
-        /// Among equal priority, prefer closest UV0.
-        /// Tracking coverage at OPTIMIZED level (not raw level) is critical:
-        /// - For true duplicates (same origRemap): all map to same opt slot, no penalty
-        /// - For seam splits (different origRemap): prefers uncovered opt slots
+        /// UV0 match is the PRIMARY signal (seam splits have very different UV0).
+        /// Coverage (uncovered opt slot) is a SECONDARY tiebreaker among UV0-close candidates.
+        /// This prevents duplicates (same UV0) from being pushed to wrong seam splits
+        /// just because their opt slot is already covered.
         /// </summary>
         static int PickBestCandidate(List<int> candidates, int newIdx, int[] origRemap, bool[] coveredOpt,
                                       List<Vector2> newUv0, Vector2[] storedUv0)
@@ -641,29 +960,55 @@ namespace LightmapUvTool
                 return candidates[0];
             }
 
+            bool hasUv = newUv0 != null && storedUv0 != null;
+
+            // Pass 1: find best UV0 distance among valid (non -1) candidates
+            float bestUv0Dist = float.MaxValue;
+            for (int k = 0; k < candidates.Count; k++)
+            {
+                int ci = candidates[k];
+                if (origRemap[ci] < 0) continue;
+                float d = hasUv ? Vector2.SqrMagnitude(newUv0[newIdx] - storedUv0[ci]) : 0f;
+                if (d < bestUv0Dist) bestUv0Dist = d;
+            }
+
+            // UV0 threshold: candidates within this range of the best are considered
+            // "UV0-equivalent" (same seam side). Seam splits differ by >> 0.01 in UV space.
+            // Use relative threshold so it works regardless of UV0 scale.
+            float uvThreshold = hasUv ? bestUv0Dist + 1e-6f : float.MaxValue;
+
+            // Pass 2: among UV0-close candidates, prefer uncovered opt slots
             int bestOld = -1;
             float bestScore = float.MaxValue;
-            int bestPriority = int.MaxValue; // 0=uncovered valid, 1=covered valid, 2=invalid(-1)
+            int bestPriority = int.MaxValue;
+            // Priority: 0=UV0 close + uncovered, 1=UV0 close + covered,
+            //           2=UV0 far + uncovered, 3=UV0 far + covered, 4=invalid(-1)
 
             for (int k = 0; k < candidates.Count; k++)
             {
                 int ci = candidates[k];
                 int opt = origRemap[ci];
+
+                float uvDist = hasUv ? Vector2.SqrMagnitude(newUv0[newIdx] - storedUv0[ci]) : 0f;
+                bool uvClose = uvDist <= uvThreshold;
+
                 int priority;
-                if (opt < 0) priority = 2; // invalid remap
-                else if (!coveredOpt[opt]) priority = 0; // uncovered opt slot — prefer this
-                else priority = 1; // already covered — OK but lower priority
+                if (opt < 0)
+                    priority = 4;
+                else if (uvClose && !coveredOpt[opt])
+                    priority = 0; // best: good UV0 match + uncovered
+                else if (uvClose)
+                    priority = 1; // good UV0 match + already covered (duplicate)
+                else if (!coveredOpt[opt])
+                    priority = 2; // bad UV0 match + uncovered (wrong seam side)
+                else
+                    priority = 3; // bad UV0 match + covered
 
                 if (priority > bestPriority) continue;
-
-                float score = 0f;
-                if (newUv0 != null && storedUv0 != null)
-                    score = Vector2.SqrMagnitude(newUv0[newIdx] - storedUv0[ci]);
-
-                if (priority < bestPriority || score < bestScore)
+                if (priority < bestPriority || uvDist < bestScore)
                 {
                     bestPriority = priority;
-                    bestScore = score;
+                    bestScore = uvDist;
                     bestOld = ci;
                 }
             }

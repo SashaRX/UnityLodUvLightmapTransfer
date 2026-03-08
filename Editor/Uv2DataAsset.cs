@@ -161,15 +161,62 @@ namespace LightmapUvTool
         public Vector4[] orphanTangents;
         /// <summary>UV0 for orphan vertices (parallel to orphanIndices).</summary>
         public Vector2[] orphanUv0;
+
+        // ── Optimized vertex positions (ground truth for replay validation) ──
+        /// <summary>All vertex positions from the optimized mesh at Apply time.
+        /// Used to validate and fix replay results — corrects any vertex that
+        /// deviates from its original position (dedup collisions, remap gaps, etc).</summary>
+        public Vector3[] optimizedPositions;
+        /// <summary>All vertex normals from the optimized mesh at Apply time.</summary>
+        public Vector3[] optimizedNormals;
+        /// <summary>All vertex tangents from the optimized mesh at Apply time.</summary>
+        public Vector4[] optimizedTangents;
+
+        // ── Shell descriptors (v0.14.0+) ──
+        /// <summary>Stable shell descriptors for the target mesh UV0 shells.</summary>
+        public ShellDescriptor[] shellDescriptors;
+        /// <summary>Per-vertex mapping: vertex index → source shell descriptor index. -1 = unmapped.</summary>
+        public int[] vertexToSourceShellDescriptor;
+        /// <summary>Per-target-shell mapping: target shell index → source shell descriptor index. -1 = unmapped.</summary>
+        public int[] targetShellToSourceShellDescriptor;
+        /// <summary>Stable shell descriptors for the source mesh UV0 shells (at time of transfer).</summary>
+        public ShellDescriptor[] sourceShellDescriptors;
+    }
+
+    /// <summary>
+    /// Per-model tool settings persisted in the sidecar asset.
+    /// Restored when the model is selected again.
+    /// </summary>
+    [Serializable]
+    public class ToolSettings
+    {
+        public int atlasResolution = 1024;
+        public int shellPaddingPx = 2;
+        public int borderPaddingPx = 0;
+        public bool repackPerMesh;
+        public int sourceLodIndex;
+
+        // Pipeline
+        public int sourceUvChannel = 1;
+        public int targetUvChannel = 1;
+        public float maxProjectionDistance = 0.5f;
+        public float maxNormalAngle = 80f;
+        public bool filterBySubmesh = true;
+        public bool enableBorderRepair = true;
+        public float perimeterTolerance = 0.05f;
+        public float borderFuseTolerance = 0.02f;
+        public bool saveNewMeshAssets = true;
+        public string savePath = "Assets/LightmapUvTool_Output";
     }
 
     [CreateAssetMenu(menuName = "LightmapUvTool/UV2 Data (internal)", fileName = "uv2data")]
     public class Uv2DataAsset : ScriptableObject
     {
         public const int CurrentSchemaVersion = 2;
-        public const string ToolVersionStr = "0.13.32";
+        public const string ToolVersionStr = "0.13.55";
 
         public List<MeshUv2Entry> entries = new List<MeshUv2Entry>();
+        public ToolSettings toolSettings;
 
         /// <summary>Find entry by mesh name, or null.</summary>
         public MeshUv2Entry Find(string meshName)
@@ -306,6 +353,13 @@ namespace LightmapUvTool
             dst.orphanNormals = src.orphanNormals;
             dst.orphanTangents = src.orphanTangents;
             dst.orphanUv0 = src.orphanUv0;
+            dst.optimizedPositions = src.optimizedPositions;
+            dst.optimizedNormals = src.optimizedNormals;
+            dst.optimizedTangents = src.optimizedTangents;
+            dst.shellDescriptors = src.shellDescriptors;
+            dst.vertexToSourceShellDescriptor = src.vertexToSourceShellDescriptor;
+            dst.targetShellToSourceShellDescriptor = src.targetShellToSourceShellDescriptor;
+            dst.sourceShellDescriptors = src.sourceShellDescriptors;
         }
 
         /// <summary>Remove entry by mesh name. Returns true if found.</summary>
