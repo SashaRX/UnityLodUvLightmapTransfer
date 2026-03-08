@@ -308,7 +308,7 @@ namespace LightmapUvTool
         [MenuItem("Tools/Lightmap UV Tool")]
         static void Open()
         {
-            var w = GetWindow<UvTransferWindow>("Lightmap UV Tool");
+            var w = GetWindow<UvTransferWindow>("Lightmap UV Tool v" + Uv2DataAsset.ToolVersionStr);
             w.minSize = new Vector2(800, 500);
         }
 
@@ -3120,7 +3120,7 @@ namespace LightmapUvTool
             var groupKeys = BuildGroupKeys(pvLod);
             if (groupKeys.Count <= 1) return;
 
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Width(meshGroupPanelW), GUILayout.MinWidth(60));
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.MaxWidth(meshGroupPanelW), GUILayout.MinWidth(40));
 
             // "All" button
             var bg = GUI.backgroundColor;
