@@ -1119,7 +1119,9 @@ namespace LightmapUvTool
                     GL.PushMatrix(); push = true;
                     GL.LoadPixelMatrix(0, rtW, rtH, 0);
 
-                    var occupiedTiles = GetOccupiedUdimTiles(draws, pvChannel);
+                    var occupiedTiles = (previewMode == PreviewMode.Lightmap)
+                        ? new HashSet<Vector2Int> { new Vector2Int(0, 0) }
+                        : GetOccupiedUdimTiles(draws, pvChannel);
 
                     // Draw background quads for all occupied tiles
                     GL.Begin(GL.QUADS);
@@ -1138,22 +1140,12 @@ namespace LightmapUvTool
                         float bgAlpha = checkerEnabled ? 0.33333f : (previewMode == PreviewMode.Lightmap ? 0.85f : 0.95f);
                         Vector2 bgTiling = new Vector2(1f, 1f);
                         Vector2 bgOffset = Vector2.zero;
-                        // For lightmap mode, use renderer's lightmapScaleOffset
-                        if (previewMode == PreviewMode.Lightmap)
-                        {
-                            foreach (var item in draws)
-                            {
-                                var renderer = item.Item2.renderer;
-                                if (renderer != null && renderer.lightmapIndex >= 0)
-                                {
-                                    var so = renderer.lightmapScaleOffset;
-                                    bgTiling = new Vector2(so.x, so.y);
-                                    bgOffset = new Vector2(so.z, so.w);
-                                    break;
-                                }
-                            }
-                        }
-                        GlTextureBg(cx, cy, sz, bgTex, bgTiling, bgOffset, bgAlpha, occupiedTiles);
+                        // Lightmap mode: show full atlas (tiling=1, offset=0) in tile (0,0) only.
+                        // Each mesh's UV1 is transformed by its renderer.lightmapScaleOffset below.
+                        var bgTiles = (previewMode == PreviewMode.Lightmap)
+                            ? new HashSet<Vector2Int> { new Vector2Int(0, 0) }
+                            : occupiedTiles;
+                        GlTextureBg(cx, cy, sz, bgTex, bgTiling, bgOffset, bgAlpha, bgTiles);
                         glMat.SetPass(0);
                     }
 
@@ -1177,6 +1169,17 @@ namespace LightmapUvTool
                         var uvs = RdUvCached(mesh, pvChannel);
                         var tri = GetTrianglesCached(mesh);
                         if (uvs == null || tri == null) continue;
+
+                        // Lightmap mode: transform UV1 to atlas space using renderer's lightmapScaleOffset
+                        if (previewMode == PreviewMode.Lightmap && pvChannel == 1 && entry.renderer != null && entry.renderer.lightmapIndex >= 0)
+                        {
+                            var so = entry.renderer.lightmapScaleOffset;
+                            var transformed = new Vector2[uvs.Length];
+                            for (int vi = 0; vi < uvs.Length; vi++)
+                                transformed[vi] = new Vector2(uvs[vi].x * so.x + so.z, uvs[vi].y * so.y + so.w);
+                            uvs = transformed;
+                        }
+
                         int uN = uvs.Length, fN = tri.Length / 3;
 
                         TriangleStatus[] stats = entry.transferState?.triangleStatus;
@@ -1203,7 +1206,8 @@ namespace LightmapUvTool
                                 GlFillSt(cx,cy,sz, uvs,tri,fN,uN, stats);
                                 break;
                             case FillMode.Shells:
-                                GlFillSh(cx,cy,sz, mesh, fN, uN, entry, hoverShellId, selectedShellId);
+                                GlFillSh(cx,cy,sz, mesh, fN, uN, entry, hoverShellId, selectedShellId,
+                                    previewMode == PreviewMode.Lightmap ? uvs : null);
                                 // Overlay validation problems on top of shell fill (skip clean triangles)
                                 if (hasValidation)
                                     GlFillValidationOverlay(cx,cy,sz, uvs,tri,fN,uN, entry.validationReport.perTriangle);
@@ -2413,11 +2417,11 @@ namespace LightmapUvTool
             return result;
         }
 
-        void GlFillSh(float ox, float oy, float sz, Mesh mesh, int fN, int uN, MeshEntry entry, int hoverShellId, int selectedShellId)
+        void GlFillSh(float ox, float oy, float sz, Mesh mesh, int fN, int uN, MeshEntry entry, int hoverShellId, int selectedShellId, Vector2[] uvOverride = null)
         {
             var cache = GetPreviewShellCache(mesh, pvChannel);
             if (cache == null || cache.shells == null) return;
-            var uv = cache.uvs;
+            var uv = uvOverride ?? cache.uvs;
             var t = cache.triangles;
 
             int tot=0, b=0;
