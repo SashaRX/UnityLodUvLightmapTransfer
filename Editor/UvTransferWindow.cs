@@ -1629,7 +1629,10 @@ namespace LightmapUvTool
                 }
                 // Pin shell debug on click
                 if (hoveredShellDebug != null)
+                {
                     selectedShellDebug = CloneHit(hoveredShellDebug);
+                    FocusSceneViewOnShell(selectedShellDebug);
+                }
                 else
                     selectedShellDebug = null;
                 e.Use();
@@ -1731,6 +1734,64 @@ namespace LightmapUvTool
             };
         }
 
+
+        /// <summary>
+        /// Move SceneView pivot to the 3D center of the selected shell (offset along normal).
+        /// After this, pressing F in Unity will frame the shell in 3D.
+        /// </summary>
+        void FocusSceneViewOnShell(ShellDebugHit hit)
+        {
+            if (hit?.shell == null || hit.entry?.renderer == null) return;
+
+            var mesh = hit.mesh ?? hit.entry.originalMesh;
+            if (mesh == null) return;
+
+            var verts = mesh.vertices;
+            var normals = mesh.normals;
+            var tris = mesh.triangles;
+            var tr = hit.entry.renderer.transform;
+
+            // Compute world-space bounds and average normal from shell faces
+            var bounds = new Bounds();
+            var avgNormal = Vector3.zero;
+            bool first = true;
+            int normalCount = 0;
+
+            foreach (int face in hit.shell.faceIndices)
+            {
+                int i0 = face * 3;
+                if (i0 + 2 >= tris.Length) continue;
+                for (int k = 0; k < 3; k++)
+                {
+                    int vi = tris[i0 + k];
+                    if (vi >= verts.Length) continue;
+                    var wp = tr.TransformPoint(verts[vi]);
+                    if (first) { bounds = new Bounds(wp, Vector3.zero); first = false; }
+                    else bounds.Encapsulate(wp);
+
+                    if (normals != null && vi < normals.Length)
+                    {
+                        avgNormal += tr.TransformDirection(normals[vi]);
+                        normalCount++;
+                    }
+                }
+            }
+            if (first) return; // no valid faces
+
+            if (normalCount > 0) avgNormal = (avgNormal / normalCount).normalized;
+            else avgNormal = Vector3.up;
+
+            // Pivot = center of shell + small offset along normal
+            float offset = bounds.extents.magnitude * 0.3f;
+            var pivot = bounds.center + avgNormal * offset;
+
+            var sv = SceneView.lastActiveSceneView;
+            if (sv == null) return;
+
+            sv.pivot = pivot;
+            sv.size = Mathf.Max(bounds.extents.magnitude * 1.5f, 0.5f);
+            sv.Repaint();
+        }
 
         static bool PointInTriangle(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
         {
