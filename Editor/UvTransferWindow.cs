@@ -3666,6 +3666,7 @@ namespace LightmapUvTool
             AssetDatabase.Refresh();
             UvtLog.Info($"[Apply] Done: {totalMeshes} mesh(es) across {fbxGroups.Count} FBX file(s)");
             CleanupWorkingMeshes();
+            fillMode = FillMode.Shells;
             Refresh();
             Repaint();
         }
