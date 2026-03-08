@@ -2186,40 +2186,53 @@ namespace LightmapUvTool
 
             int result;
 
-            // Priority 1: Use stable descriptor hash if available on the shell itself
-            if (shell.hasDescriptor)
+            // Priority 1: Source shell mapping — ensures fragments of split shells
+            // share the same color as their source. Uses source descriptor hash
+            // when available for stability across reimports.
+            var map = entry?.shellTransferResult?.vertexToSourceShell;
+            if (map != null && shell?.vertexIndices != null && shell.vertexIndices.Count > 0)
             {
-                result = Mathf.Abs(shell.descriptor.stableHash);
-            }
-            // Priority 2: Use source shell mapping from transfer result (in-memory)
-            else
-            {
-                var map = entry?.shellTransferResult?.vertexToSourceShell;
-                if (map != null && shell?.vertexIndices != null && shell.vertexIndices.Count > 0)
+                // Find most frequent source shell without LINQ
+                int bestKey = -1, bestCount = 0;
+                var freq = new Dictionary<int, int>();
+                foreach (int v in shell.vertexIndices)
                 {
-                    // Find most frequent source shell without LINQ
-                    int bestKey = -1, bestCount = 0;
-                    var freq = new Dictionary<int, int>();
-                    foreach (int v in shell.vertexIndices)
+                    if (v < 0 || v >= map.Length) continue;
+                    int srcShell = map[v];
+                    if (srcShell < 0) continue;
+                    freq.TryGetValue(srcShell, out int c);
+                    c++;
+                    freq[srcShell] = c;
+                    if (c > bestCount || (c == bestCount && srcShell < bestKey))
                     {
-                        if (v < 0 || v >= map.Length) continue;
-                        int srcShell = map[v];
-                        if (srcShell < 0) continue;
-                        freq.TryGetValue(srcShell, out int c);
-                        c++;
-                        freq[srcShell] = c;
-                        if (c > bestCount || (c == bestCount && srcShell < bestKey))
-                        {
-                            bestCount = c;
-                            bestKey = srcShell;
-                        }
+                        bestCount = c;
+                        bestKey = srcShell;
                     }
-                    result = bestKey >= 0 ? bestKey : Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
+                }
+                if (bestKey >= 0)
+                {
+                    // Map source shell index → source descriptor hash for stability
+                    var srcDescs = GetSourceDescriptors(entry);
+                    result = (srcDescs != null && bestKey < srcDescs.Length)
+                        ? Mathf.Abs(srcDescs[bestKey].stableHash)
+                        : bestKey;
                 }
                 else
                 {
-                    result = Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
+                    result = shell.hasDescriptor
+                        ? Mathf.Abs(shell.descriptor.stableHash)
+                        : Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
                 }
+            }
+            // Priority 2: Own descriptor hash (source LOD, or no transfer data)
+            else if (shell.hasDescriptor)
+            {
+                result = Mathf.Abs(shell.descriptor.stableHash);
+            }
+            // Fallback: hash-based on shellId
+            else
+            {
+                result = Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663));
             }
 
             shellColorKeyCache[cacheKey] = result;
