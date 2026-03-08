@@ -1937,16 +1937,12 @@ namespace LightmapUvTool
 
         void GlDrawUvSpot(float ox, float oy, float sz)
         {
-            // Приоритет как в OnSceneGUI: 3D hover > selected shell > hovered shell > canvas spot.
-            // Это важно при overlap/ре-проекции, чтобы UV spot не пропадал из-за устаревшего selected/hovered.
+            // Приоритет: 3D hover > hovered shell > canvas spot.
+            // Selected shell не фиксирует позицию спота — spot всегда следует за мышью.
             Vector2 drawUv;
             if (hoverHitValid)
             {
                 drawUv = uvSpot;
-            }
-            else if (hasSelectedShell)
-            {
-                drawUv = selectedShell.uvHit;
             }
             else if (hasHoveredShell)
             {
@@ -2654,7 +2650,7 @@ namespace LightmapUvTool
 
         void DrawShellDebugOverlay(Rect canvasRect)
         {
-            // Show selected (pinned by click), fall back to hovered
+            // Show selected (pinned) shell info; fall back to hovered
             var hit = selectedShellDebug ?? hoveredShellDebug;
             if (hit == null || hit.shell == null) return;
 
@@ -2672,49 +2668,84 @@ namespace LightmapUvTool
             if (ee.Count > 1)
                 lines.Add(hit.mesh?.name ?? "?");
 
-            lines.Add($"area {shell.bboxArea:F5}");
+            lines.Add($"bbox {shell.bboxArea:F5}  [{bmin.x:F3},{bmin.y:F3}]-[{bmax.x:F3},{bmax.y:F3}]");
+
+            // Descriptor info
+            if (shell.hasDescriptor)
+            {
+                var d = shell.descriptor;
+                lines.Add($"uv0Area {d.uv0Area:F5}  bndLen {d.boundaryLength:F4}");
+                lines.Add($"hash {d.stableHash}  colorKey {GetShellColorKey(shell, hit.entry)}");
+            }
 
             // Show UDIM only for non-default tiles
             if (hit.tileU != 0 || hit.tileV != 0)
                 lines.Add($"UDIM({hit.tileU},{hit.tileV})");
 
-            if (fillMode == FillMode.ShellMatch && hit.entry?.shellTransferResult?.vertexToSourceShell != null)
+            // Overlap detection: check if this shell's bbox intersects other shells
             {
-                var map = hit.entry.shellTransferResult.vertexToSourceShell;
-                var freq = new Dictionary<int, int>();
-                int total = 0;
-                foreach (int v in shell.vertexIndices)
+                var cache = GetPreviewShellCache(hit.mesh, pvChannel);
+                if (cache != null && cache.shells != null)
                 {
-                    if (v < 0 || v >= map.Length) continue;
-                    freq.TryGetValue(map[v], out int c); freq[map[v]] = c + 1; total++;
-                }
-                if (total > 0)
-                {
-                    lines.Add("---");
-                    foreach (var kv in freq.OrderByDescending(k => k.Value).Take(3))
-                        lines.Add($"src {kv.Key}: {kv.Value} ({kv.Value*100f/total:F0}%)");
+                    int overlapCount = 0;
+                    foreach (var other in cache.shells)
+                    {
+                        if (other.shellId == shell.shellId) continue;
+                        if (other.boundsMin.x < bmax.x && other.boundsMax.x > bmin.x &&
+                            other.boundsMin.y < bmax.y && other.boundsMax.y > bmin.y)
+                            overlapCount++;
+                    }
+                    if (overlapCount > 0)
+                        lines.Add($"overlap: {overlapCount} shell(s) bbox intersect");
                 }
             }
 
+            // Transfer mapping info
+            if (hit.entry?.shellTransferResult?.vertexToSourceShell != null)
+            {
+                var map = hit.entry.shellTransferResult.vertexToSourceShell;
+                var freq = new Dictionary<int, int>();
+                int total = 0, unmapped = 0;
+                foreach (int v in shell.vertexIndices)
+                {
+                    if (v < 0 || v >= map.Length) continue;
+                    int src = map[v];
+                    if (src < 0) { unmapped++; continue; }
+                    freq.TryGetValue(src, out int c); freq[src] = c + 1; total++;
+                }
+                if (total > 0 || unmapped > 0)
+                {
+                    lines.Add("---");
+                    foreach (var kv in freq.OrderByDescending(k => k.Value).Take(3))
+                        lines.Add($"src {kv.Key}: {kv.Value} ({kv.Value*100f/(total+unmapped):F0}%)");
+                    if (unmapped > 0)
+                        lines.Add($"unmapped: {unmapped} ({unmapped*100f/(total+unmapped):F0}%)");
+                }
+            }
+
+            // Validation issues
             if (hit.entry?.validationReport?.perTriangle != null)
             {
                 int issues = 0;
                 var perTri = hit.entry.validationReport.perTriangle;
                 foreach (int f in shell.faceIndices)
                     if (f >= 0 && f < perTri.Length && perTri[f] != TransferValidator.TriIssue.None) issues++;
-                if (issues > 0) lines.Add($"tri issues: {issues}");
+                if (issues > 0) lines.Add($"tri issues: {issues}/{shell.faceIndices.Count}");
             }
 
-            // Measure and draw overlay
+            // Measure and draw overlay — clamp to canvas bounds
             float lineH = 13f;
             float pad = 6f;
-            float w = 200f;
+            float w = 220f;
             float h = lines.Count * lineH + pad * 2f;
-            float x = canvasRect.xMax - w - 8f;
-            float y = canvasRect.yMin + 8f;
+            float x = canvasRect.xMax - w - 4f;
+            float y = canvasRect.yMin + 4f;
+            // Clamp to stay within canvas
+            if (x < canvasRect.xMin + 4f) x = canvasRect.xMin + 4f;
+            if (x + w > canvasRect.xMax) w = canvasRect.xMax - x;
             var bgRect = new Rect(x, y, w, h);
 
-            EditorGUI.DrawRect(bgRect, new Color(0f, 0f, 0f, 0.65f));
+            EditorGUI.DrawRect(bgRect, new Color(0f, 0f, 0f, 0.35f));
 
             var style = new GUIStyle(EditorStyles.miniLabel) { normal = { textColor = Color.white } };
             var pinnedStyle = new GUIStyle(style) { normal = { textColor = new Color(1f, .75f, .3f) } };
@@ -3905,6 +3936,7 @@ namespace LightmapUvTool
             occupiedTilesPerMesh.Clear();
             shellColorPreviewCache.Clear();
             shellColorKeyCache.Clear();
+            shellColorKeyCacheDirty = true;
             uv0ShellMapCache.Clear();
             ClearHoverState(false);
             UvtLog.Info("[Reset] All working copies destroyed and restored to FBX originals");
@@ -3936,10 +3968,8 @@ namespace LightmapUvTool
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Deleted sidecar for '{selectedResetLabel}', reimported FBX");
 
-            // Refresh loaded LODGroup if it references the same FBX
-            bool touchesLoaded = meshEntries.Any(e =>
-                e.fbxMesh != null && AssetDatabase.GetAssetPath(e.fbxMesh) == selectedFbxPath);
-            if (touchesLoaded)
+            // Always refresh: after reimport mesh references may be stale
+            if (lodGroup != null)
                 SwitchToPostApplyView();
 
             UpdateSelectedSidecar();
