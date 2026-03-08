@@ -77,6 +77,7 @@ namespace LightmapUvTool
             public Vector3[] targetShellCentroids;
             public float[] targetShellMatchDistSqr;
             public int dedupConflicts;       // shells reassigned by dedup
+            public int fragmentsMerged;      // target shell fragments merged pre-matching
 
             // ─── Cross-LOD overlap hints ───
             // Populated for merged shells to propagate source selection to subsequent LODs.
@@ -597,6 +598,19 @@ namespace LightmapUvTool
             var srcShells = UvShellExtractor.Extract(srcUv0, srcTris);
             var tgtTris = targetMesh.triangles;
             var tgtShells = UvShellExtractor.Extract(tUv0, tgtTris);
+
+            // ── Phase 1a: Merge fragment shells ──
+            // LOD simplification can split a source UV0 shell into fragments.
+            // Detect target shells whose UV0 bbox is fully contained within the
+            // same source shell and merge them into virtual shells to prevent
+            // same-source conflicts in Phase 2b dedup.
+            int fragMergeCount;
+            tgtShells = MergeFragmentShells(
+                tgtShells, tUv0, tgtTris, tVerts,
+                srcShells, srcUv0, srcTris, srcVerts,
+                out fragMergeCount);
+            if (fragMergeCount > 0)
+                result.fragmentsMerged = fragMergeCount;
 
             // Build face → source shell lookup
             var faceToSrcShell = new int[srcTriCount];
@@ -2588,6 +2602,209 @@ namespace LightmapUvTool
         public static TransferResult Transfer(Mesh targetMesh, SourceShellInfo[] sourceInfos)
         {
             return new TransferResult { uv2 = new Vector2[targetMesh.vertexCount], verticesTotal = targetMesh.vertexCount };
+        }
+
+        // ─── Pre-matching fragment merger ───────────────────────────────
+        // When LOD simplification splits a UV0 shell into fragments (e.g. a
+        // strip becomes two shorter strips), shell matching sees 2 targets →
+        // 1 source → same-source conflict. This method detects and merges
+        // such fragments into virtual shells BEFORE matching, eliminating the
+        // conflict at the source.
+
+        /// <summary>
+        /// Detect target shells that are UV0-contained fragments of a single source
+        /// shell and merge them into virtual shells. Returns a new shell list
+        /// (may be smaller than input). Sets mergeCount to number of fragments merged.
+        /// </summary>
+        static List<UvShell> MergeFragmentShells(
+            List<UvShell> tgtShells, Vector2[] tUv0, int[] tgtTris, Vector3[] tVerts,
+            List<UvShell> srcShells, Vector2[] srcUv0, int[] srcTris, Vector3[] srcVerts,
+            out int mergeCount)
+        {
+            mergeCount = 0;
+            int tgtCount = tgtShells.Count;
+            int srcCount = srcShells.Count;
+            if (tgtCount < 2 || srcCount == 0) return tgtShells;
+
+            // Precompute source 3D centroids + UV0 areas
+            var srcCentroid3D = new Vector3[srcCount];
+            var srcUv0Area = new float[srcCount];
+            for (int si = 0; si < srcCount; si++)
+            {
+                Vector3 c = Vector3.zero; int n = 0;
+                foreach (int vi in srcShells[si].vertexIndices)
+                    if (vi < srcVerts.Length) { c += srcVerts[vi]; n++; }
+                if (n > 0) srcCentroid3D[si] = c / n;
+
+                double area = 0;
+                foreach (int f in srcShells[si].faceIndices)
+                {
+                    int i0 = srcTris[f * 3], i1 = srcTris[f * 3 + 1], i2 = srcTris[f * 3 + 2];
+                    if (i0 >= srcUv0.Length || i1 >= srcUv0.Length || i2 >= srcUv0.Length) continue;
+                    float cross = (srcUv0[i1].x - srcUv0[i0].x) * (srcUv0[i2].y - srcUv0[i0].y)
+                                - (srcUv0[i2].x - srcUv0[i0].x) * (srcUv0[i1].y - srcUv0[i0].y);
+                    area += Mathf.Abs(cross) * 0.5f;
+                }
+                srcUv0Area[si] = (float)area;
+            }
+
+            // Precompute target 3D centroids + UV0 areas
+            var tgtCentroid3D = new Vector3[tgtCount];
+            var tgtUv0Area = new float[tgtCount];
+            for (int ti = 0; ti < tgtCount; ti++)
+            {
+                Vector3 c = Vector3.zero; int n = 0;
+                foreach (int vi in tgtShells[ti].vertexIndices)
+                    if (vi < tVerts.Length) { c += tVerts[vi]; n++; }
+                if (n > 0) tgtCentroid3D[ti] = c / n;
+
+                double area = 0;
+                foreach (int f in tgtShells[ti].faceIndices)
+                {
+                    int i0 = tgtTris[f * 3], i1 = tgtTris[f * 3 + 1], i2 = tgtTris[f * 3 + 2];
+                    if (i0 >= tUv0.Length || i1 >= tUv0.Length || i2 >= tUv0.Length) continue;
+                    float cross = (tUv0[i1].x - tUv0[i0].x) * (tUv0[i2].y - tUv0[i0].y)
+                                - (tUv0[i2].x - tUv0[i0].x) * (tUv0[i1].y - tUv0[i0].y);
+                    area += Mathf.Abs(cross) * 0.5f;
+                }
+                tgtUv0Area[ti] = (float)area;
+            }
+
+            // For each target shell, find the best-matching source shell whose UV0
+            // bbox fully contains the target's UV0 bbox. Use 3D centroid distance
+            // as tiebreaker when multiple sources contain the target.
+            const float bboxPad = 0.002f; // small padding for float imprecision
+            var tgtToSrcContainer = new int[tgtCount];
+            for (int ti = 0; ti < tgtCount; ti++) tgtToSrcContainer[ti] = -1;
+
+            for (int ti = 0; ti < tgtCount; ti++)
+            {
+                var t = tgtShells[ti];
+                int bestSrc = -1;
+                float bestDist = float.MaxValue;
+
+                for (int si = 0; si < srcCount; si++)
+                {
+                    var s = srcShells[si];
+                    // UV0 bbox containment: target fully inside source
+                    if (t.boundsMin.x < s.boundsMin.x - bboxPad) continue;
+                    if (t.boundsMin.y < s.boundsMin.y - bboxPad) continue;
+                    if (t.boundsMax.x > s.boundsMax.x + bboxPad) continue;
+                    if (t.boundsMax.y > s.boundsMax.y + bboxPad) continue;
+
+                    float dist = Vector3.SqrMagnitude(tgtCentroid3D[ti] - srcCentroid3D[si]);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        bestSrc = si;
+                    }
+                }
+                tgtToSrcContainer[ti] = bestSrc;
+            }
+
+            // Group target shells by their containing source shell
+            var srcToFragments = new Dictionary<int, List<int>>();
+            for (int ti = 0; ti < tgtCount; ti++)
+            {
+                int src = tgtToSrcContainer[ti];
+                if (src < 0) continue;
+                if (!srcToFragments.TryGetValue(src, out var list))
+                {
+                    list = new List<int>();
+                    srcToFragments[src] = list;
+                }
+                list.Add(ti);
+            }
+
+            // Identify mergeable groups: ≥2 target shells contained by the same source.
+            // Validate: combined UV0 area should be roughly comparable to source area.
+            // LOD simplification reduces geometry, so allow generous tolerance.
+            var mergeGroups = new List<(int srcIdx, List<int> fragments)>();
+            foreach (var kv in srcToFragments)
+            {
+                var group = kv.Value;
+                if (group.Count < 2) continue;
+
+                float combinedArea = 0;
+                for (int i = 0; i < group.Count; i++)
+                    combinedArea += tgtUv0Area[group[i]];
+
+                float srcArea = srcUv0Area[kv.Key];
+                if (srcArea > 1e-8f && combinedArea > 1e-8f)
+                {
+                    float ratio = combinedArea / srcArea;
+                    if (ratio < 0.15f || ratio > 3.0f) continue; // area mismatch → not fragments
+                }
+
+                mergeGroups.Add((kv.Key, group));
+            }
+
+            if (mergeGroups.Count == 0) return tgtShells;
+
+            // Build merged shell list
+            var mergedSet = new HashSet<int>();
+            var newShells = new List<UvShell>();
+
+            for (int gi = 0; gi < mergeGroups.Count; gi++)
+            {
+                int srcIdx = mergeGroups[gi].srcIdx;
+                var group = mergeGroups[gi].fragments;
+
+                // Create merged virtual shell from all fragments in this group
+                var merged = new UvShell();
+                merged.faceIndices = new List<int>();
+                merged.vertexIndices = new HashSet<int>();
+                Vector2 mn = new Vector2(float.MaxValue, float.MaxValue);
+                Vector2 mx = new Vector2(float.MinValue, float.MinValue);
+
+                float combinedArea = 0;
+                for (int i = 0; i < group.Count; i++)
+                {
+                    int ti = group[i];
+                    mergedSet.Add(ti);
+                    var frag = tgtShells[ti];
+                    merged.faceIndices.AddRange(frag.faceIndices);
+                    merged.vertexIndices.UnionWith(frag.vertexIndices);
+                    mn = Vector2.Min(mn, frag.boundsMin);
+                    mx = Vector2.Max(mx, frag.boundsMax);
+                    combinedArea += tgtUv0Area[ti];
+                }
+
+                merged.boundsMin = mn;
+                merged.boundsMax = mx;
+                merged.bboxArea = Mathf.Max(0f, (mx.x - mn.x) * (mx.y - mn.y));
+                newShells.Add(merged);
+                mergeCount += group.Count;
+
+                // Log fragment IDs being merged
+                var fragIds = new System.Text.StringBuilder();
+                for (int i = 0; i < group.Count; i++)
+                {
+                    if (i > 0) fragIds.Append(',');
+                    fragIds.Append(tgtShells[group[i]].shellId);
+                }
+                float areaRatio = srcUv0Area[srcIdx] > 1e-8f
+                    ? combinedArea / srcUv0Area[srcIdx] : 0f;
+                UvtLog.Info($"[GroupedTransfer] Merged {group.Count} fragment shells " +
+                    $"(IDs: {fragIds}) into virtual shell (src#{srcIdx}, " +
+                    $"area ratio: {areaRatio:F2})");
+            }
+
+            // Add unmerged shells
+            for (int ti = 0; ti < tgtCount; ti++)
+            {
+                if (!mergedSet.Contains(ti))
+                    newShells.Add(tgtShells[ti]);
+            }
+
+            // Reassign shell IDs for consistency
+            for (int i = 0; i < newShells.Count; i++)
+                newShells[i].shellId = i;
+
+            UvtLog.Info($"[GroupedTransfer] Fragment merge: {mergeGroups.Count} group(s), " +
+                $"{mergeCount} fragments merged, shells {tgtCount} → {newShells.Count}");
+
+            return newShells;
         }
     }
 }
