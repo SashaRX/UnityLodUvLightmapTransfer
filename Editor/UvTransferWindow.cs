@@ -1026,7 +1026,7 @@ namespace LightmapUvTool
             GUILayout.Space(6);
 
             // ── Zoom + Fit ──
-            canvasZoom = EditorGUILayout.Slider(canvasZoom, .1f, 20f, GUILayout.Width(90));
+            canvasZoom = EditorGUILayout.Slider(canvasZoom, .01f, 20f, GUILayout.Width(90));
             if (GUILayout.Button("Fit", EditorStyles.toolbarButton, GUILayout.Width(28)))
                 FitToUvBounds();
 
@@ -1507,7 +1507,7 @@ namespace LightmapUvTool
                 float oldZoom = canvasZoom;
                 float oldSz = baseSz * oldZoom;
                 float factor = e.delta.y > 0 ? 0.9f : 1.1f;
-                canvasZoom = Mathf.Clamp(canvasZoom * factor, 0.1f, 20f);
+                canvasZoom = Mathf.Clamp(canvasZoom * factor, 0.01f, 20f);
                 float newSz = baseSz * canvasZoom;
 
                 Vector2 local = e.mousePosition - canvasRect.position;
@@ -1529,6 +1529,10 @@ namespace LightmapUvTool
             if (e.rawType == EventType.MouseUp && (e.button == 2 || e.button == 0)) canvasPanning = false;
 
             if (e.type == EventType.MouseDown && e.button == 2 && e.clickCount == 2 && canvasRect.Contains(e.mousePosition))
+            { FitToUvBounds(); e.Use(); }
+
+            // F key = Fit (like Unity's Frame Selected)
+            if (e.type == EventType.KeyDown && e.keyCode == KeyCode.F && canvasRect.Contains(e.mousePosition))
             { FitToUvBounds(); e.Use(); }
 
             if (!spotMode)
@@ -1694,24 +1698,21 @@ namespace LightmapUvTool
             float rangeU = Mathf.Max(maxU - minU, 0.1f);
             float rangeV = Mathf.Max(maxV - minV, 0.1f);
             float W = lastCanvasRect.width, H = lastCanvasRect.height;
-            if (W < 1 || H < 1) { canvasZoom = 1f; canvasPan = Vector2.zero; return; }
-            // baseSz is min(W,H) — the 1:1 UV square side at zoom=1.
-            // To fit bounds, we need: baseSz * zoom * rangeU <= W and baseSz * zoom * rangeV <= H.
-            // Also account for non-square canvas: use the tighter constraint.
+            if (W < 64 || H < 64) { canvasZoom = 1f; canvasPan = Vector2.zero; Repaint(); return; }
+
+            // Canvas coordinate system: baseSz = min(W,H), sz = baseSz * zoom.
+            // UV point (u,v) maps to pixel (cx + u*sz, cy + (1-v)*sz).
+            // To fit UV bounds [minU..maxU] x [minV..maxV] into the canvas:
+            //   rangeU * sz <= W  →  zoom <= W / (baseSz * rangeU)
+            //   rangeV * sz <= H  →  zoom <= H / (baseSz * rangeV)
             float baseSz = Mathf.Max(64, Mathf.Min(W, H));
             float zoomU = W / (baseSz * rangeU);
             float zoomV = H / (baseSz * rangeV);
-            // Apply 95% margin so UV doesn't touch edges
-            canvasZoom = Mathf.Clamp(Mathf.Min(zoomU, zoomV) * 0.95f, 0.1f, 20f);
+            canvasZoom = Mathf.Clamp(Mathf.Min(zoomU, zoomV) * 0.92f, 0.01f, 20f);
+
             float sz = baseSz * canvasZoom;
             float centerU = (minU + maxU) * 0.5f;
             float centerV = (minV + maxV) * 0.5f;
-            // Center the bounds in the canvas. The canvas origin formula:
-            // cx = (W - sz) * 0.5 + panX, cy = (H - sz) * 0.5 + panY
-            // UV point at (u,v) maps to pixel: (cx + u*sz, cy + (1-v)*sz)
-            // We want center of bounds at center of canvas:
-            //   cx + centerU*sz = W/2 → panX = W/2 - (W-sz)/2 - centerU*sz = sz/2 - centerU*sz = sz*(0.5-centerU)
-            //   cy + (1-centerV)*sz = H/2 → panY = H/2 - (H-sz)/2 - (1-centerV)*sz = sz/2 - (1-centerV)*sz = sz*(centerV-0.5)
             canvasPan.x = sz * (0.5f - centerU);
             canvasPan.y = sz * (centerV - 0.5f);
             Repaint();
