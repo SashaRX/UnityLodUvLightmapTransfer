@@ -2795,7 +2795,7 @@ namespace LightmapUvTool
                 Mesh tempMesh = null;
                 if (srcMesh != null)
                 {
-                    tempMesh = Object.Instantiate(srcMesh);
+                    tempMesh = Instantiate(srcMesh);
                     tempMesh.name = srcMesh.name + "_LightmapPreview";
                     tempMesh.hideFlags = HideFlags.HideAndDontSave;
 
