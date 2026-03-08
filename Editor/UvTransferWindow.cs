@@ -976,12 +976,18 @@ namespace LightmapUvTool
             // ── UV channel toggle ──
             {
                 var bg = GUI.backgroundColor;
-                GUI.backgroundColor = new Color(.85f,.75f,.95f);
-                int ci = pvChannel == 0 ? 0 : 1;
-                ci = GUILayout.Toolbar(ci, new[]{"UV0 (MainTex)","UV1 (Lightmap)"}, EditorStyles.toolbarButton, GUILayout.Width(220));
-                int newChannel = ci == 0 ? 0 : 1;
-                if (newChannel != pvChannel)
-                    OnPreviewChannelChanged(newChannel);
+                for (int ch = 0; ch < 2; ch++)
+                {
+                    bool active = pvChannel == ch;
+                    GUI.backgroundColor = active
+                        ? new Color(.4f, .55f, 1f)
+                        : new Color(.65f, .65f, .7f);
+                    string lbl = ch == 0 ? "UV0" : "UV1";
+                    if (GUILayout.Button(lbl, EditorStyles.toolbarButton, GUILayout.Width(34)))
+                    {
+                        if (!active) OnPreviewChannelChanged(ch);
+                    }
+                }
                 GUI.backgroundColor = bg;
             }
 
@@ -1008,7 +1014,7 @@ namespace LightmapUvTool
             lockSelection = GUILayout.Toggle(lockSelection, "Lock", EditorStyles.toolbarButton, GUILayout.Width(40));
             using (new EditorGUI.DisabledScope(!hasSelectedShell))
             {
-                if (GUILayout.Button("Clear Selection", EditorStyles.toolbarButton, GUILayout.Width(96)))
+                if (GUILayout.Button("Clear", EditorStyles.toolbarButton, GUILayout.Width(42)))
                     hasSelectedShell = false;
             }
 
@@ -1038,8 +1044,8 @@ namespace LightmapUvTool
             {
                 var bg4 = GUI.backgroundColor;
                 if (shellColorPreviewEnabled) GUI.backgroundColor = new Color(.35f,.85f,.4f);
-                string shellLbl = shellColorPreviewEnabled ? "■ Color Shells on Model" : "▶ Color Shells on Model";
-                if (GUILayout.Button(shellLbl, EditorStyles.toolbarButton, GUILayout.Width(162)))
+                string shellLbl = shellColorPreviewEnabled ? "■ 3D Shells" : "▶ 3D Shells";
+                if (GUILayout.Button(shellLbl, EditorStyles.toolbarButton, GUILayout.Width(76)))
                     ToggleShellColorPreview();
                 GUI.backgroundColor = bg4;
             }
@@ -2542,7 +2548,7 @@ namespace LightmapUvTool
             string hoverInfo = hoverHitValid
                 ? $" | Hover UV: {uvSpot.x:F4},{uvSpot.y:F4} Shell:{hoveredShellId}"
                 : (spotMode ? " | Hover UV: --" : string.Empty);
-            EditorGUILayout.LabelField("LOD" + pvLod + " | " + ee.Count + " mesh | V:" + tV + " T:" + tT + " | " + (pvChannel == 0 ? "UV0 (MainTex)" : "UV1 (Lightmap)") + hoverInfo, EditorStyles.miniLabel);
+            EditorGUILayout.LabelField("LOD" + pvLod + " | " + ee.Count + " mesh | V:" + tV + " T:" + tT + " | " + (pvChannel == 0 ? "UV0" : "UV1") + hoverInfo, EditorStyles.miniLabel);
 
             GUILayout.FlexibleSpace();
 
