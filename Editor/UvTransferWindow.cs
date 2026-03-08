@@ -1031,25 +1031,20 @@ namespace LightmapUvTool
 
             GUILayout.Space(6);
 
-            // ── Checker ──
+            // ── 3D preview mode (mutually exclusive) ──
             {
+                int cur = checkerEnabled ? 1 : shellColorPreviewEnabled ? 2 : 0;
                 var bg2 = GUI.backgroundColor;
-                if (checkerEnabled) GUI.backgroundColor = new Color(1f,.4f,.3f);
-                string ckLbl = checkerEnabled ? "■ Checker" : "▶ Checker";
-                if (GUILayout.Button(ckLbl, EditorStyles.toolbarButton, GUILayout.Width(66)))
-                    ToggleChecker();
+                if (cur != 0) GUI.backgroundColor = cur == 1 ? new Color(1f,.4f,.3f) : new Color(.35f,.85f,.4f);
+                int next = GUILayout.Toolbar(cur, new[]{"Off","Checker","3D Shells"}, EditorStyles.toolbarButton, GUILayout.Width(150));
                 GUI.backgroundColor = bg2;
-            }
-
-            GUILayout.Space(4);
-
-            {
-                var bg4 = GUI.backgroundColor;
-                if (shellColorPreviewEnabled) GUI.backgroundColor = new Color(.35f,.85f,.4f);
-                string shellLbl = shellColorPreviewEnabled ? "■ 3D Shells" : "▶ 3D Shells";
-                if (GUILayout.Button(shellLbl, EditorStyles.toolbarButton, GUILayout.Width(76)))
-                    ToggleShellColorPreview();
-                GUI.backgroundColor = bg4;
+                if (next != cur)
+                {
+                    if (cur == 1) ToggleChecker();      // turn off checker
+                    else if (cur == 2) ToggleShellColorPreview(); // turn off shells
+                    if (next == 1) ToggleChecker();      // turn on checker
+                    else if (next == 2) ToggleShellColorPreview(); // turn on shells
+                }
             }
 
             // ── Right side ──
