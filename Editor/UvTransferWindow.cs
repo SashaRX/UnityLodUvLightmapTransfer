@@ -1835,11 +1835,44 @@ namespace LightmapUvTool
                 normal = tr.TransformDirection(localNormal).normalized;
             }
 
+            // Calculate shell world-space bbox for appropriate camera distance
+            float idealDist = 1f;
+            var cache = GetPreviewShellCache(mesh, pvChannel);
+            if (cache != null && cache.shellById != null && cache.shellById.TryGetValue(uvHit.shellId, out var shell))
+            {
+                bool first = true;
+                var shellBounds = new Bounds();
+                foreach (int face in shell.faceIndices)
+                {
+                    int fi = face * 3;
+                    if (fi + 2 >= tris.Length) continue;
+                    for (int k = 0; k < 3; k++)
+                    {
+                        int vi = tris[fi + k];
+                        if (vi >= verts.Length) continue;
+                        var wp = tr.TransformPoint(verts[vi]);
+                        if (first) { shellBounds = new Bounds(wp, Vector3.zero); first = false; }
+                        else shellBounds.Encapsulate(wp);
+                    }
+                }
+                if (!first)
+                    idealDist = Mathf.Max(shellBounds.extents.magnitude * 1.5f, 0.3f);
+            }
+
+            // Raycast along normal from spot to detect obstructions behind camera
+            float camDist = idealDist;
+            const float skinOffset = 0.05f;
+            if (Physics.Raycast(worldPos + normal * skinOffset, normal, out RaycastHit rayHit, idealDist + skinOffset))
+            {
+                // Place camera just before the obstruction (80% of hit distance)
+                camDist = Mathf.Min(camDist, Mathf.Max(rayHit.distance * 0.8f, 0.15f));
+            }
+
             var sv = SceneView.lastActiveSceneView;
             if (sv == null) return;
 
             sv.pivot = worldPos;
-            sv.size = 0.5f;
+            sv.size = camDist;
             sv.rotation = Quaternion.LookRotation(-normal);
             sv.Repaint();
         }
