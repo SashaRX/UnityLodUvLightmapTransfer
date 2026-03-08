@@ -3773,16 +3773,16 @@ namespace LightmapUvTool
                 "Delete", "Cancel"))
                 return;
 
+            // Restore previews BEFORE reimport — after reimport, mesh objects change
+            // and Restore() would put back stale mesh references on MeshFilters.
+            RestoreAllPreviews();
+
             if (AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(selectedSidecarPath) != null)
                 AssetDatabase.DeleteAsset(selectedSidecarPath);
 
             AssetDatabase.ImportAsset(selectedFbxPath, ImportAssetOptions.ForceUpdate);
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Deleted sidecar for '{selectedResetLabel}', reimported FBX");
-
-            // Update checker if it's still active
-            if (checkerEnabled) ReapplyCheckerToSelection();
-            if (shellColorPreviewEnabled) ReapplyShellColorPreview();
 
             // Refresh loaded LODGroup if it references the same FBX
             bool touchesLoaded = meshEntries.Any(e =>
@@ -3856,15 +3856,16 @@ namespace LightmapUvTool
                 _ = changed; // settings applied during reimport below
             }
 
+            // Restore previews BEFORE reimport — after reimport, mesh objects change
+            // and Restore() would put back stale mesh references on MeshFilters.
+            RestoreAllPreviews();
+
             // Now reimport FBXs — postprocessor will find no sidecars → no UV2 injection
             foreach (string fbxPath in fbxPaths)
                 AssetDatabase.ImportAsset(fbxPath, ImportAssetOptions.ForceUpdate);
 
             // Reset working copies
             ResetWorkingCopies();
-
-            // Clear checker
-            RestoreAllPreviews();
 
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Full pipeline state reset: {deleted} sidecar(s) deleted, {fbxPaths.Count} FBX reimported");
@@ -3891,6 +3892,10 @@ namespace LightmapUvTool
                 $"Delete UV2 sidecar data for {fbxPaths.Count} FBX file(s)?",
                 "Delete", "Cancel"))
                 return;
+
+            // Restore previews BEFORE reimport — after reimport, mesh objects change
+            // and Restore() would put back stale mesh references on MeshFilters.
+            RestoreAllPreviews();
 
             int deleted = 0;
             foreach (string fbxPath in fbxPaths)
