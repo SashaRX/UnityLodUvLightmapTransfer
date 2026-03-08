@@ -3551,6 +3551,9 @@ namespace LightmapUvTool
             }
 
             // Pass 2: nearest-neighbor fallback for bucket boundary misses
+            // and edge-welded vertices whose positions were averaged during optimization.
+            // Threshold 1e-2f (sqr) = ~0.1 unit max distance — generous enough for
+            // UvEdgeWeld position averaging while avoiding wrong matches.
             if (matched < rawCount)
             {
                 for (int i = 0; i < rawCount; i++)
@@ -3563,7 +3566,7 @@ namespace LightmapUvTool
                         float d = Vector3.SqrMagnitude(rawPos[i] - optPos[j]);
                         if (d < bestDist) { bestDist = d; bestIdx = j; }
                     }
-                    if (bestIdx >= 0 && bestDist < 1e-4f)
+                    if (bestIdx >= 0 && bestDist < 1e-2f)
                     {
                         remap[i] = bestIdx;
                         matched++;

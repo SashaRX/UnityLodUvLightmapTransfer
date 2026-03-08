@@ -457,29 +457,119 @@ namespace LightmapUvTool
                 UvtLog.Verbose($"[UV2 Postprocess] '{mesh.name}': filled {entry.orphanIndices.Length} orphan vertices from sidecar");
             }
 
-            // ── Detect unfilled vertices (would cause 3D stretching to origin) ──
+            // ── Detect and fix unfilled vertices (would cause 3D stretching to origin) ──
+            // Unfilled vertices happen when BuildVertexRemap couldn't match some raw FBX
+            // vertices to optimized vertices (e.g. UvEdgeWeld averaged positions).
+            // Safety net: use stored vertPositions/vertUv0 from sidecar to fill them.
             {
-                int unfilled = 0;
                 // Build set of indices actually referenced by triangles
                 var referenced = new HashSet<int>();
                 for (int i = 0; i < entry.optimizedTriangles.Length; i++)
                     referenced.Add(entry.optimizedTriangles[i]);
 
+                // Find unfilled referenced vertices
+                var unfilledIndices = new List<int>();
                 foreach (int idx in referenced)
                 {
                     if (idx < optCount && optPos[idx] == Vector3.zero)
                     {
-                        // Check if this is genuinely at origin or unfilled
-                        // by testing if ALL attributes are zero
                         bool allZero = true;
                         if (optNormals != null && optNormals[idx].sqrMagnitude > 0) allZero = false;
                         if (allZero && optUvs[0] != null && optUvs[0][idx].sqrMagnitude > 0) allZero = false;
-                        if (allZero) unfilled++;
+                        if (allZero) unfilledIndices.Add(idx);
                     }
                 }
-                if (unfilled > 0)
-                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {unfilled} referenced vertices have zero " +
-                                $"position+normal+UV0 (likely unfilled — may cause 3D stretching)");
+
+                if (unfilledIndices.Count > 0 &&
+                    entry.vertPositions != null && entry.vertPositions.Length > 0)
+                {
+                    // Try to fill unfilled vertices by nearest-neighbor from stored positions.
+                    // The stored positions are the optimized mesh's vertex positions at Apply time.
+                    // For each unfilled opt index, find the closest stored position and copy raw data
+                    // from whichever raw vertex maps to that stored index via the original remap.
+                    int fixed_ = 0;
+                    int[] origRemap = entry.vertexRemap;
+
+                    // Build reverse lookup: opt index → list of raw indices that map to it
+                    var optToRaw = new Dictionary<int, int>();
+                    if (origRemap != null)
+                    {
+                        for (int i = 0; i < origRemap.Length; i++)
+                        {
+                            int dst = origRemap[i];
+                            if (dst >= 0 && !optToRaw.ContainsKey(dst))
+                                optToRaw[dst] = i;
+                        }
+                    }
+
+                    foreach (int idx in unfilledIndices)
+                    {
+                        // Strategy 1: direct reverse lookup — if we have the raw index
+                        // for this opt index from the original remap, use it directly
+                        if (optToRaw.TryGetValue(idx, out int rawIdx) && rawIdx < rawCount)
+                        {
+                            optPos[idx] = rawPos[rawIdx];
+                            if (optNormals != null && rawNormals != null && rawIdx < rawNormals.Length)
+                                optNormals[idx] = rawNormals[rawIdx];
+                            if (optTangents != null && rawTangents != null && rawIdx < rawTangents.Length)
+                                optTangents[idx] = rawTangents[rawIdx];
+                            if (optColors != null && rawColors != null && rawIdx < rawColors.Length)
+                                optColors[idx] = rawColors[rawIdx];
+                            for (int ch = 0; ch < 8; ch++)
+                            {
+                                if (ch == 1 || optUvs[ch] == null || rawUvs[ch] == null) continue;
+                                if (rawIdx < rawUvs[ch].Count)
+                                    optUvs[ch][idx] = rawUvs[ch][rawIdx];
+                            }
+                            fixed_++;
+                            continue;
+                        }
+
+                        // Strategy 2: find nearest raw vertex by position from stored data
+                        // (stored vertPositions are the optimized vertex positions at Apply time)
+                        if (idx < entry.vertPositions.Length)
+                        {
+                            Vector3 targetPos = entry.vertPositions[idx];
+                            float bestDist = float.MaxValue;
+                            int bestRaw = -1;
+                            for (int r = 0; r < rawCount; r++)
+                            {
+                                float d = Vector3.SqrMagnitude(rawPos[r] - targetPos);
+                                if (d < bestDist) { bestDist = d; bestRaw = r; }
+                            }
+                            if (bestRaw >= 0 && bestDist < 1e-1f)
+                            {
+                                optPos[idx] = rawPos[bestRaw];
+                                if (optNormals != null && rawNormals != null && bestRaw < rawNormals.Length)
+                                    optNormals[idx] = rawNormals[bestRaw];
+                                if (optTangents != null && rawTangents != null && bestRaw < rawTangents.Length)
+                                    optTangents[idx] = rawTangents[bestRaw];
+                                if (optColors != null && rawColors != null && bestRaw < rawColors.Length)
+                                    optColors[idx] = rawColors[bestRaw];
+                                for (int ch = 0; ch < 8; ch++)
+                                {
+                                    if (ch == 1 || optUvs[ch] == null || rawUvs[ch] == null) continue;
+                                    if (bestRaw < rawUvs[ch].Count)
+                                        optUvs[ch][idx] = rawUvs[ch][bestRaw];
+                                }
+                                fixed_++;
+                            }
+                        }
+                    }
+
+                    if (fixed_ > 0)
+                        UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': fixed {fixed_}/{unfilledIndices.Count} " +
+                                    "unfilled vertices from raw FBX data (remap gap safety net)");
+                    int remaining = unfilledIndices.Count - fixed_;
+                    if (remaining > 0)
+                        UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {remaining} referenced vertices still unfilled " +
+                                    "(may cause 3D stretching)");
+                }
+                else if (unfilledIndices.Count > 0)
+                {
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {unfilledIndices.Count} referenced vertices have zero " +
+                                "position+normal+UV0 (likely unfilled — may cause 3D stretching)");
+                }
             }
 
             // ── Rebuild mesh ──
