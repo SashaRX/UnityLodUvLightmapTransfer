@@ -662,6 +662,52 @@ namespace LightmapUvTool
             // Unity manages GPU upload internally. Calling it here can cause the
             // verification pass to detect inconsistent state ("inconsistent result" error).
 
+            // ── DIAGNOSTIC: verify reconstruction quality ──
+            {
+                var finalPos = mesh.vertices;
+                int zeroCount = 0;
+                float maxPosDev = 0f;
+                int maxPosDevIdx = -1;
+                for (int i = 0; i < finalPos.Length && i < optCount; i++)
+                {
+                    if (finalPos[i] == Vector3.zero) zeroCount++;
+                    if (hasGroundTruth)
+                    {
+                        float dev = Vector3.Distance(finalPos[i], entry.optimizedPositions[i]);
+                        if (dev > maxPosDev) { maxPosDev = dev; maxPosDevIdx = i; }
+                    }
+                }
+
+                // Check UV0 — how many vertices have zero UV0?
+                var finalUv0 = new List<Vector2>();
+                mesh.GetUVs(0, finalUv0);
+                int zeroUv0 = 0;
+                for (int i = 0; i < finalUv0.Count; i++)
+                    if (finalUv0[i] == Vector2.zero) zeroUv0++;
+
+                var sb = new System.Text.StringBuilder();
+                sb.Append($"[UV2 Postprocess] DIAG '{mesh.name}': {rawCount}→{optCount} verts, ");
+                sb.Append($"groundTruth={hasGroundTruth}, ");
+                sb.Append($"zeroPos={zeroCount}, zeroUv0={zeroUv0}/{finalUv0.Count}");
+                if (hasGroundTruth)
+                    sb.Append($", maxPosDev={maxPosDev:E3} @idx{maxPosDevIdx}");
+
+                // Sample a few positions for inspection
+                if (optCount > 0)
+                {
+                    int mid = optCount / 2;
+                    int last = optCount - 1;
+                    sb.Append($"\n  pos[0]={optPos[0]:F4}");
+                    if (hasGroundTruth) sb.Append($" gt={entry.optimizedPositions[0]:F4}");
+                    sb.Append($" raw[remap→0]?");
+                    sb.Append($"\n  pos[{mid}]={optPos[mid]:F4}");
+                    if (hasGroundTruth) sb.Append($" gt={entry.optimizedPositions[mid]:F4}");
+                    sb.Append($"\n  pos[{last}]={optPos[last]:F4}");
+                    if (hasGroundTruth) sb.Append($" gt={entry.optimizedPositions[last]:F4}");
+                }
+                UvtLog.Info(sb.ToString());
+            }
+
             UvtLog.Verbose($"[UV2 Postprocess] '{mesh.name}': replay {rawCount}→{optCount} verts " +
                           $"({entry.optimizedTriangles.Length / 3} tris, {subCount} submeshes)");
             return true;
