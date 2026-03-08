@@ -138,6 +138,8 @@ namespace LightmapUvTool
         // Shell color key cache: (meshInstanceId, shellId) -> colorKey
         readonly Dictionary<long, int> shellColorKeyCache = new Dictionary<long, int>();
         bool shellColorKeyCacheDirty = true;
+        // After Reset UV2 — use sequential shell coloring so fills visually change
+        bool postResetColoring;
 
         // UV0 shell mapping cache: meshInstanceId -> (vertexToUv0Shell, uv0ShellDescs)
         // Used to map any shell (UV0 or UV1) back to UV0 shell descriptors for consistent coloring
@@ -2310,6 +2312,15 @@ namespace LightmapUvTool
 
             int result;
 
+            // After Reset UV2: use sequential shell coloring so fill colors
+            // visually change (otherwise UV0 descriptors produce identical hashes).
+            if (postResetColoring)
+            {
+                result = Mathf.Abs((shell.shellId * 73856093) ^ (meshId * 19349663) ^ 0x5F3759DF);
+                shellColorKeyCache[cacheKey] = result;
+                return result;
+            }
+
             // Priority 1: Transfer mapping (target LODs) — uses source shell index
             // from transfer result, then maps to source UV0 descriptor hash.
             // Cleared by SwitchToPostApplyView after Apply/Reset.
@@ -3260,6 +3271,7 @@ namespace LightmapUvTool
                     TransferValidator.DetectUv2Overlaps(tM, tr.uv2, te.validationReport, tr);
                 }
                 hasTransfer = tgtE.Any(e => e.transferredMesh != null);
+                postResetColoring = false; // clear reset coloring on new transfer
             }
             catch (Exception ex) { UvtLog.Error("[Transfer] LOD" + tLod + ": " + ex); }
             finally { EditorUtility.ClearProgressBar(); }
@@ -3484,6 +3496,17 @@ namespace LightmapUvTool
             int faceCount = tris != null ? tris.Length / 3 : 0;
             if (faceCount == 0) return new int[0];
 
+            var faceKeys = new int[faceCount];
+
+            // After Reset UV2: use sequential face-index coloring
+            if (postResetColoring)
+            {
+                int meshId = mesh.GetInstanceID();
+                for (int face = 0; face < faceCount; face++)
+                    faceKeys[face] = Mathf.Abs((face * 73856093) ^ (meshId * 19349663) ^ 0x5F3759DF);
+                return faceKeys;
+            }
+
             // Extract UV0 shells for this mesh
             var (v2s, descs) = GetUv0ShellMap(mesh);
 
@@ -3491,7 +3514,6 @@ namespace LightmapUvTool
             var map = entry?.shellTransferResult?.vertexToSourceShell;
             ShellDescriptor[] srcDescs = (map != null) ? GetSourceDescriptors(entry) : null;
 
-            var faceKeys = new int[faceCount];
             for (int face = 0; face < faceCount; face++)
             {
                 int triBase = face * 3;
@@ -4204,6 +4226,11 @@ namespace LightmapUvTool
             // 5. Full refresh: rebuild meshEntries from fresh meshes, clear all caches
             if (lodGroup != null)
                 SwitchToPostApplyView();
+
+            // 6. Enable post-reset coloring so fill colors visually change
+            postResetColoring = true;
+            shellColorKeyCache.Clear();
+            shellColorKeyCacheDirty = true;
 
             UpdateSelectedSidecar();
             Repaint();
