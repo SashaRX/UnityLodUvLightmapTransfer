@@ -1859,14 +1859,12 @@ namespace LightmapUvTool
                     idealDist = Mathf.Max(shellBounds.extents.magnitude * 1.5f, 0.3f);
             }
 
-            // Raycast along normal from spot to detect obstructions behind camera
+            // Mesh raycast along normal from spot to detect obstructions behind camera
             float camDist = idealDist;
             const float skinOffset = 0.05f;
-            if (Physics.Raycast(worldPos + normal * skinOffset, normal, out RaycastHit rayHit, idealDist + skinOffset))
-            {
-                // Place camera just before the obstruction (80% of hit distance)
-                camDist = Mathf.Min(camDist, Mathf.Max(rayHit.distance * 0.8f, 0.15f));
-            }
+            float meshHitDist = MeshRaycastAll(worldPos + normal * skinOffset, normal, idealDist + skinOffset);
+            if (meshHitDist < float.MaxValue)
+                camDist = Mathf.Min(camDist, Mathf.Max(meshHitDist * 0.8f, 0.15f));
 
             var sv = SceneView.lastActiveSceneView;
             if (sv == null) return;
@@ -1875,6 +1873,66 @@ namespace LightmapUvTool
             sv.size = camDist;
             sv.rotation = Quaternion.LookRotation(-normal);
             sv.Repaint();
+        }
+
+        /// <summary>
+        /// Raycast against all visible MeshRenderers in the scene (no colliders needed).
+        /// Returns closest hit distance, or float.MaxValue if nothing hit.
+        /// </summary>
+        static float MeshRaycastAll(Vector3 origin, Vector3 dir, float maxDist)
+        {
+            float closest = float.MaxValue;
+            var renderers = Object.FindObjectsOfType<MeshRenderer>();
+            foreach (var mr in renderers)
+            {
+                if (!mr.enabled || !mr.gameObject.activeInHierarchy) continue;
+                // Quick AABB check
+                if (!mr.bounds.IntersectRay(new Ray(origin, dir), out float bDist) || bDist > maxDist)
+                    continue;
+                var mf = mr.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+
+                var m = mf.sharedMesh;
+                var v = m.vertices;
+                var t = m.triangles;
+                var toLocal = mr.transform.worldToLocalMatrix;
+                var localOrigin = toLocal.MultiplyPoint3x4(origin);
+                var localDir = toLocal.MultiplyVector(dir).normalized;
+
+                for (int i = 0; i + 2 < t.Length; i += 3)
+                {
+                    int ti0 = t[i], ti1 = t[i + 1], ti2 = t[i + 2];
+                    if (ti0 >= v.Length || ti1 >= v.Length || ti2 >= v.Length) continue;
+                    float hitT = RayTriangleIntersect(localOrigin, localDir, v[ti0], v[ti1], v[ti2]);
+                    if (hitT <= 0f) continue;
+                    // Convert local-space distance to world-space
+                    var worldHit = mr.transform.TransformPoint(localOrigin + localDir * hitT);
+                    float wDist = Vector3.Distance(origin, worldHit);
+                    if (wDist > 0.001f && wDist < closest && wDist <= maxDist)
+                        closest = wDist;
+                }
+            }
+            return closest;
+        }
+
+        /// <summary>Möller–Trumbore ray-triangle intersection. Returns distance or -1.</summary>
+        static float RayTriangleIntersect(Vector3 orig, Vector3 dir, Vector3 v0, Vector3 v1, Vector3 v2)
+        {
+            const float eps = 1e-7f;
+            var e1 = v1 - v0;
+            var e2 = v2 - v0;
+            var h = Vector3.Cross(dir, e2);
+            float a = Vector3.Dot(e1, h);
+            if (a > -eps && a < eps) return -1f;
+            float f = 1f / a;
+            var s = orig - v0;
+            float u = f * Vector3.Dot(s, h);
+            if (u < 0f || u > 1f) return -1f;
+            var q = Vector3.Cross(s, e1);
+            float v = f * Vector3.Dot(dir, q);
+            if (v < 0f || u + v > 1f) return -1f;
+            float t = f * Vector3.Dot(e2, q);
+            return t > eps ? t : -1f;
         }
 
         static bool PointInTriangle(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
