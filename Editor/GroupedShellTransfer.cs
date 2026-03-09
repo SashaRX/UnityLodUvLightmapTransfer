@@ -2736,6 +2736,68 @@ namespace LightmapUvTool
                     if (ratio < 0.15f || ratio > 3.0f) continue; // area mismatch → not fragments
                 }
 
+                // Guard against tiling/symmetric geometry: if ANY individual target
+                // shell has UV0 area ≥ 85% of the source, it's a complete shell,
+                // not a fragment. True fragments (created by LOD splitting a shell)
+                // have area significantly less than their parent source shell.
+                const float kMaxIndividualAreaRatio = 0.85f;
+                bool hasTilingShell = false;
+                if (srcArea > 1e-8f)
+                {
+                    for (int i = 0; i < group.Count; i++)
+                    {
+                        float indivRatio = tgtUv0Area[group[i]] / srcArea;
+                        if (indivRatio >= kMaxIndividualAreaRatio)
+                        {
+                            hasTilingShell = true;
+                            break;
+                        }
+                    }
+                }
+                if (hasTilingShell)
+                {
+                    UvtLog.Info($"[GroupedTransfer] Fragment merge: skipping src#{kv.Key} group " +
+                        $"({group.Count} shells) — individual area ratio ≥ {kMaxIndividualAreaRatio:F2} " +
+                        $"(tiling/symmetric, not fragments)");
+                    continue;
+                }
+
+                // Guard against merging spatially distant shells: true fragments
+                // of the same shell should be physically close. Compute max pairwise
+                // 3D distance between fragment centroids and reject if too large
+                // relative to the source shell's 3D extent.
+                float maxFragDist = 0;
+                for (int i = 0; i < group.Count; i++)
+                    for (int j = i + 1; j < group.Count; j++)
+                    {
+                        float d = Vector3.Distance(tgtCentroid3D[group[i]], tgtCentroid3D[group[j]]);
+                        if (d > maxFragDist) maxFragDist = d;
+                    }
+                // Compute source shell 3D extent (bounding sphere diameter)
+                float srcExtent = 0;
+                {
+                    var srcShell = srcShells[kv.Key];
+                    Vector3 srcC = srcCentroid3D[kv.Key];
+                    float maxR = 0;
+                    foreach (int vi in srcShell.vertexIndices)
+                    {
+                        if (vi < srcVerts.Length)
+                        {
+                            float r = Vector3.Distance(srcVerts[vi], srcC);
+                            if (r > maxR) maxR = r;
+                        }
+                    }
+                    srcExtent = maxR * 2f;
+                }
+                // Fragments should be within ~2x the source shell's diameter
+                if (srcExtent > 1e-6f && maxFragDist > srcExtent * 2f)
+                {
+                    UvtLog.Info($"[GroupedTransfer] Fragment merge: skipping src#{kv.Key} group " +
+                        $"({group.Count} shells) — fragment spread {maxFragDist:F4} > " +
+                        $"2× source extent {srcExtent:F4} (spatially distant)");
+                    continue;
+                }
+
                 mergeGroups.Add((kv.Key, group));
             }
 
