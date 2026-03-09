@@ -125,6 +125,11 @@ namespace LightmapUvTool
             Dictionary<int, Dictionary<int, ShellVertexEntry>> dict,
             int vertId, Vector2 uv, float weight, int shellId, float uv0Proximity)
         {
+            // Guard against NaN/Infinity from degenerate projections
+            if (float.IsNaN(uv.x) || float.IsNaN(uv.y) ||
+                float.IsInfinity(uv.x) || float.IsInfinity(uv.y))
+                return;
+
             if (!dict.TryGetValue(vertId, out var shellMap))
             {
                 shellMap = new Dictionary<int, ShellVertexEntry>();
@@ -530,6 +535,103 @@ namespace LightmapUvTool
             if (rejectedSharedCount > 0)
             {
                 UvtLog.Verbose($"[InitialUvTransfer] Post-validation rejected {rejectedSharedCount} repairs due to shared vertices");
+            }
+
+            // ── Pass 2: Single-vertex outlier repair via nearest source vertex ──
+            // Catches vertices projected onto 3D-close but UV-distant source triangles
+            int vertexOutlierFixed = 0;
+            var fixedVertices = new HashSet<int>();
+
+            for (int f = 0; f < target.faceCount; f++)
+            {
+                int assignedShell = target.triangleShellAssignments[f];
+                if (assignedShell < 0 || assignedShell >= source.uvShells.Count) continue;
+                if (target.triangleStatus[f] == TriangleStatus.Rejected) continue;
+
+                var shell = source.uvShells[assignedShell];
+                float shellSpanX = shell.uvBoundsMax.x - shell.uvBoundsMin.x;
+                float shellSpanY = shell.uvBoundsMax.y - shell.uvBoundsMin.y;
+                float shellSpan = Mathf.Max(shellSpanX, shellSpanY);
+                if (shellSpan < 1e-6f) continue;
+
+                float margin = shellSpan * 0.3f;
+
+                // Check each vertex: is it inside the shell bbox (with margin)?
+                int outlierIdx = -1;
+                int insideCount = 0;
+
+                for (int j = 0; j < 3; j++)
+                {
+                    int vi = target.triangles[f * 3 + j];
+                    Vector2 uv = target.targetUv[vi];
+
+                    bool bad = float.IsNaN(uv.x) || float.IsNaN(uv.y) ||
+                               float.IsInfinity(uv.x) || float.IsInfinity(uv.y) ||
+                               uv.x < shell.uvBoundsMin.x - margin ||
+                               uv.x > shell.uvBoundsMax.x + margin ||
+                               uv.y < shell.uvBoundsMin.y - margin ||
+                               uv.y > shell.uvBoundsMax.y + margin;
+
+                    if (!bad) insideCount++;
+                    else outlierIdx = j;
+                }
+
+                // Only fix if exactly one vertex is the outlier and the other two are OK
+                if (insideCount != 2 || outlierIdx < 0) continue;
+
+                int outlierVi = target.triangles[f * 3 + outlierIdx];
+                if (fixedVertices.Contains(outlierVi)) continue;
+
+                // Find nearest source vertex in 3D within the assigned shell
+                Vector3 vPos = target.vertices[outlierVi];
+                float bestDistSq = float.MaxValue;
+                int bestSrcVert = -1;
+
+                foreach (int srcVi in shell.vertexIds)
+                {
+                    float dSq = (source.vertices[srcVi] - vPos).sqrMagnitude;
+                    if (dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        bestSrcVert = srcVi;
+                    }
+                }
+
+                if (bestSrcVert < 0) continue;
+
+                Vector2 candidateUv = source.uvSource[bestSrcVert];
+
+                // Verify candidate is within shell bbox
+                if (candidateUv.x < shell.uvBoundsMin.x - 0.01f ||
+                    candidateUv.x > shell.uvBoundsMax.x + 0.01f ||
+                    candidateUv.y < shell.uvBoundsMin.y - 0.01f ||
+                    candidateUv.y > shell.uvBoundsMax.y + 0.01f)
+                    continue;
+
+                // Topology safety: check one-ring metric for shared vertices
+                if (topologySafeRepairOnly && vertexUseCount[outlierVi] > 1)
+                {
+                    var proposal = new Dictionary<int, Vector2>(1) { [outlierVi] = candidateUv };
+                    int vi0 = target.triangles[f * 3];
+                    int vi1 = target.triangles[f * 3 + 1];
+                    int vi2 = target.triangles[f * 3 + 2];
+
+                    float metricBefore = EvaluateOneRingImpactMetric(
+                        source, target, vertexToFaces, vi0, vi1, vi2, null);
+                    float metricAfter = EvaluateOneRingImpactMetric(
+                        source, target, vertexToFaces, vi0, vi1, vi2, proposal);
+
+                    if (metricAfter >= metricBefore) continue;
+                }
+
+                target.targetUv[outlierVi] = candidateUv;
+                fixedVertices.Add(outlierVi);
+                vertexOutlierFixed++;
+            }
+
+            if (vertexOutlierFixed > 0)
+            {
+                UvtLog.Info($"[InitialUvTransfer] Fixed {vertexOutlierFixed} outlier vertices (nearest source vertex fallback)");
             }
         }
 
