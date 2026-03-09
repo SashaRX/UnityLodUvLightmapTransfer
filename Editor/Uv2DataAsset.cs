@@ -213,7 +213,20 @@ namespace LightmapUvTool
     public class Uv2DataAsset : ScriptableObject
     {
         public const int CurrentSchemaVersion = 2;
-        public const string ToolVersionStr = "0.13.55";
+        public static string ToolVersionStr
+        {
+            get
+            {
+                if (_cachedVersion == null)
+                {
+                    var info = UnityEditor.PackageManager.PackageInfo.FindForAssembly(
+                        typeof(Uv2DataAsset).Assembly);
+                    _cachedVersion = info?.version ?? "0.0.0";
+                }
+                return _cachedVersion;
+            }
+        }
+        static string _cachedVersion;
 
         public List<MeshUv2Entry> entries = new List<MeshUv2Entry>();
         public ToolSettings toolSettings;
