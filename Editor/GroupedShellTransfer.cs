@@ -876,6 +876,99 @@ namespace LightmapUvTool
                 $"uv0BadThresh={kUv0BadThreshold:F6}, maxRetries={kMaxRetries}, " +
                 $"overlapGroups={overlapGroups.Count}(maxSize={maxOverlapGroupSize})");
 
+            // ── Tiling bypass: per-vertex 3D raycast when UV0 is heavily overlapping ──
+            // When most source shells overlap in UV0 (tiling/symmetric geometry),
+            // shell matching is unreliable. Bypass it entirely: for each target vertex,
+            // raycast along its normal to find the nearest source triangle and
+            // interpolate UV2 directly via barycentric coordinates.
+            {
+                int overlappingShellCount = 0;
+                foreach (var group in overlapGroups)
+                    overlappingShellCount += group.Count;
+                float overlapRatio = srcShells.Count > 0
+                    ? (float)overlappingShellCount / srcShells.Count : 0f;
+                const float kTilingThreshold = 0.5f;
+
+                if (overlapRatio >= kTilingThreshold)
+                {
+                    UvtLog.Info($"[GroupedTransfer] Tiling bypass: {overlappingShellCount}/{srcShells.Count} " +
+                        $"source shells overlap (ratio {overlapRatio:F2} ≥ {kTilingThreshold:F2}). " +
+                        $"Using per-vertex 3D raycast.");
+
+                    // Build global 3D BVH from all source triangles
+                    var globalBvh3D = new TriangleBvh(srcVerts, srcTris);
+                    float rayMaxDist = Mathf.Max(meshDiagonal * 0.5f, 0.1f);
+
+                    int hitByRay = 0, hitByNearest = 0, missed = 0;
+
+                    for (int vi = 0; vi < vertCount; vi++)
+                    {
+                        Vector3 tPos = tVerts[vi];
+                        Vector3 tNrm = vi < tNormals.Length && tNormals[vi].sqrMagnitude > 1e-8f
+                            ? tNormals[vi].normalized : Vector3.up;
+
+                        // Primary: raycast along vertex normal (bidirectional)
+                        var rayHit = globalBvh3D.RaycastBidirectional(tPos, tNrm, rayMaxDist);
+                        if (rayHit.triangleIndex >= 0)
+                        {
+                            int f = rayHit.triangleIndex;
+                            result.uv2[vi] = triUv2A[f] * rayHit.barycentric.x
+                                           + triUv2B[f] * rayHit.barycentric.y
+                                           + triUv2C[f] * rayHit.barycentric.z;
+                            result.vertexToSourceShell[vi] = faceToSrcShell[f];
+                            hitByRay++;
+                            continue;
+                        }
+
+                        // Fallback: nearest triangle by 3D distance (no normal filter)
+                        var nearHit = globalBvh3D.FindNearest(tPos);
+                        if (nearHit.triangleIndex >= 0)
+                        {
+                            int f = nearHit.triangleIndex;
+                            result.uv2[vi] = triUv2A[f] * nearHit.barycentric.x
+                                           + triUv2B[f] * nearHit.barycentric.y
+                                           + triUv2C[f] * nearHit.barycentric.z;
+                            result.vertexToSourceShell[vi] = faceToSrcShell[f];
+                            hitByNearest++;
+                            continue;
+                        }
+
+                        missed++;
+                    }
+
+                    result.verticesTransferred = hitByRay + hitByNearest;
+                    result.shellsMatched = tgtShells.Count;
+
+                    // Fill shell diagnostic arrays for validator
+                    result.targetShellToSourceShell = new int[tgtShells.Count];
+                    result.targetShellMethod = new int[tgtShells.Count];
+                    result.targetShellCentroids = new Vector3[tgtShells.Count];
+                    result.targetShellMatchDistSqr = new float[tgtShells.Count];
+                    for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+                    {
+                        // Determine source shell from first vertex in the target shell
+                        int firstVi = -1;
+                        foreach (int v in tgtShells[tsi].vertexIndices)
+                            { firstVi = v; break; }
+                        result.targetShellToSourceShell[tsi] = firstVi >= 0
+                            ? result.vertexToSourceShell[firstVi] : -1;
+                        result.targetShellMethod[tsi] = 2; // merged (3D projected)
+
+                        // Compute centroid
+                        Vector3 c = Vector3.zero; int cn = 0;
+                        foreach (int v in tgtShells[tsi].vertexIndices)
+                            if (v < tVerts.Length) { c += tVerts[v]; cn++; }
+                        result.targetShellCentroids[tsi] = cn > 0 ? c / cn : Vector3.zero;
+                        result.targetShellMatchDistSqr[tsi] = 0f;
+                    }
+
+                    UvtLog.Info($"[GroupedTransfer] Tiling bypass: {hitByRay} ray + " +
+                        $"{hitByNearest} nearest + {missed} missed = {vertCount} verts");
+
+                    return result;
+                }
+            }
+
             // ── Phase 2a: Match each target shell → best source shell ──
             result.targetShellToSourceShell = new int[tgtShells.Count];
             result.targetShellMethod = new int[tgtShells.Count]; // 0=interp, 1=xform, 2=merged
