@@ -1006,6 +1006,11 @@ namespace LightmapUvTool
                     if (src < 0) continue;
                     // Skip merged shells that are NOT in overlap groups (no benefit)
                     if (tgtIsMerged[tsi] && srcShellOverlapMembers[src] == null) continue;
+                    // Fragment-merged shells must keep their original source —
+                    // they were identified by UV0 bbox containment in that specific
+                    // source. Reassigning breaks the merge and produces garbage UV2.
+                    if (tgtIsFragmentMerged != null && tsi < tgtIsFragmentMerged.Length
+                        && tgtIsFragmentMerged[tsi]) continue;
                     if (!srcClaimants.TryGetValue(src, out var list))
                     {
                         list = new List<(int, float)>();
@@ -1404,22 +1409,50 @@ namespace LightmapUvTool
                             bool bestIsVoteWinner = (bestOverlapSrc == voteSrc && voteCount > 0);
                             bool closerCentroid = centroidDistSq < bestOverlapCentroidDistSq - 1e-8f;
 
-                            bool wins = betterIssues
-                                || (sameIssues && isUnclaimed && !bestIsUnclaimed)
-                                || (sameIssues && isUnclaimed == bestIsUnclaimed
-                                    && isHintMatch && !bestIsHintMatch)
-                                || (sameIssues && isUnclaimed == bestIsUnclaimed
-                                    && isHintMatch == bestIsHintMatch
-                                    && isVoteWinner && !bestIsVoteWinner)
-                                || (sameIssues && isUnclaimed == bestIsUnclaimed
-                                    && isHintMatch == bestIsHintMatch
-                                    && isVoteWinner == bestIsVoteWinner
-                                    && votes > srcVoteCount[bestOverlapSrc])
-                                || (sameIssues && isUnclaimed == bestIsUnclaimed
-                                    && isHintMatch == bestIsHintMatch
-                                    && isVoteWinner == bestIsVoteWinner
-                                    && votes == srcVoteCount[bestOverlapSrc]
-                                    && closerCentroid);
+                            // Strong vote: >50% of votes → prioritize over unclaimed/hint
+                            bool strongVote = voteCount > 0 && voteCount * 2 > totalVotes;
+
+                            bool wins = betterIssues;
+                            if (!wins && sameIssues)
+                            {
+                                if (strongVote)
+                                {
+                                    // Strong vote winner takes priority over unclaimed/hint
+                                    wins = isVoteWinner && !bestIsVoteWinner;
+                                    if (!wins)
+                                    {
+                                        wins = isVoteWinner == bestIsVoteWinner
+                                            && isUnclaimed && !bestIsUnclaimed;
+                                        if (!wins)
+                                            wins = isVoteWinner == bestIsVoteWinner
+                                                && isUnclaimed == bestIsUnclaimed
+                                                && closerCentroid;
+                                    }
+                                }
+                                else
+                                {
+                                    // Weak/no vote: original priority order
+                                    wins = isUnclaimed && !bestIsUnclaimed;
+                                    if (!wins)
+                                        wins = isUnclaimed == bestIsUnclaimed
+                                            && isHintMatch && !bestIsHintMatch;
+                                    if (!wins)
+                                        wins = isUnclaimed == bestIsUnclaimed
+                                            && isHintMatch == bestIsHintMatch
+                                            && isVoteWinner && !bestIsVoteWinner;
+                                    if (!wins)
+                                        wins = isUnclaimed == bestIsUnclaimed
+                                            && isHintMatch == bestIsHintMatch
+                                            && isVoteWinner == bestIsVoteWinner
+                                            && votes > srcVoteCount[bestOverlapSrc];
+                                    if (!wins)
+                                        wins = isUnclaimed == bestIsUnclaimed
+                                            && isHintMatch == bestIsHintMatch
+                                            && isVoteWinner == bestIsVoteWinner
+                                            && votes == srcVoteCount[bestOverlapSrc]
+                                            && closerCentroid;
+                                }
+                            }
 
                             if (wins)
                             {
@@ -1506,6 +1539,44 @@ namespace LightmapUvTool
                             if (!compositeUv2.ContainsKey(kv.Key))
                                 compositeUv2[kv.Key] = kv.Value;
 
+                        // ── Spatial coherence check for composite UV2 ──
+                        // If the composite UV2 AABB is much larger than the best single
+                        // source's UV2 region, the composite is placing faces in different
+                        // UV2 regions — this breaks lightmap continuity. Reject and
+                        // fall through to single-source transfer.
+                        bool compositeSpatiallyBroken = false;
+                        if (compositeUsedSources.Count > 1 && compositeUv2.Count > 0)
+                        {
+                            Vector2 compMin = new Vector2(float.MaxValue, float.MaxValue);
+                            Vector2 compMax = new Vector2(float.MinValue, float.MinValue);
+                            foreach (var kv in compositeUv2)
+                            {
+                                compMin = Vector2.Min(compMin, kv.Value);
+                                compMax = Vector2.Max(compMax, kv.Value);
+                            }
+                            float compArea = (compMax.x - compMin.x) * (compMax.y - compMin.y);
+
+                            // Best source's UV2 AABB area
+                            Vector2 bsMin = srcUv2Min[bestOverlapSrc];
+                            Vector2 bsMax = srcUv2Max[bestOverlapSrc];
+                            float bestSrcUv2Area = (bsMax.x - bsMin.x) * (bsMax.y - bsMin.y);
+
+                            // If composite AABB > 2× best source UV2 AABB, it's spanning
+                            // multiple UV2 regions → reject
+                            if (bestSrcUv2Area > 1e-8f && compArea > bestSrcUv2Area * 2.0f)
+                            {
+                                compositeSpatiallyBroken = true;
+                                UvtLog.Info($"[GroupedTransfer]   t{tsi}: composite spatially broken " +
+                                    $"(compArea={compArea:F6} > 2×srcArea={bestSrcUv2Area:F6}), " +
+                                    $"falling back to single-source");
+
+                                // Replace composite with best single-source UV2
+                                compositeUv2 = bestOverlapUv2;
+                                compositeUsedSources.Clear();
+                                compositeUsedSources.Add(bestOverlapSrc);
+                            }
+                        }
+
                         // Determine primary source (most faces contributed) for hint/log
                         int primarySrc = bestOverlapSrc;
 
@@ -1517,6 +1588,7 @@ namespace LightmapUvTool
                             ? $", composite={compositeUsedSources.Count}src/{compositeFaces}f"
                             : "";
                         string fragInfo = isFragMergedShell ? ", fragMerged" : "";
+                        string coherenceInfo = compositeSpatiallyBroken ? ", spatial-fix" : "";
                         UvtLog.Info($"[GroupedTransfer]   t{tsi}: overlap unified " +
                             $"(best src{bestOverlapSrc}, {bestOverlapCoverage} cov, " +
                             $"{bestOverlapIssues} issues, " +
@@ -1525,7 +1597,7 @@ namespace LightmapUvTool
                             $"method={bestOverlapMethod}, " +
                             $"tried {groupMembers.Count} shells" +
                             (hintSrc >= 0 ? $", hint=src{hintSrc}" : "") +
-                            compositeInfo + fragInfo +
+                            compositeInfo + fragInfo + coherenceInfo +
                             (tooManyIssues ? " → fall-through" : "") + ")");
 
                         if (!tooManyIssues)
