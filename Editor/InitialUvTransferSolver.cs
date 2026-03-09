@@ -537,8 +537,9 @@ namespace LightmapUvTool
                 UvtLog.Verbose($"[InitialUvTransfer] Post-validation rejected {rejectedSharedCount} repairs due to shared vertices");
             }
 
-            // ── Pass 2: Single-vertex outlier repair via nearest source vertex ──
-            // Catches vertices projected onto 3D-close but UV-distant source triangles
+            // ── Pass 2: Single-vertex outlier repair ──
+            // Detects outliers via: (a) UV outside shell bbox, (b) UV/3D edge ratio inconsistency
+            // Repairs via UV-aware source triangle search (3D-close AND UV-close to neighbors)
             int vertexOutlierFixed = 0;
             var fixedVertices = new HashSet<int>();
 
@@ -549,77 +550,47 @@ namespace LightmapUvTool
                 if (target.triangleStatus[f] == TriangleStatus.Rejected) continue;
 
                 var shell = source.uvShells[assignedShell];
-                float shellSpanX = shell.uvBoundsMax.x - shell.uvBoundsMin.x;
-                float shellSpanY = shell.uvBoundsMax.y - shell.uvBoundsMin.y;
-                float shellSpan = Mathf.Max(shellSpanX, shellSpanY);
+                float shellSpan = Mathf.Max(
+                    shell.uvBoundsMax.x - shell.uvBoundsMin.x,
+                    shell.uvBoundsMax.y - shell.uvBoundsMin.y);
                 if (shellSpan < 1e-6f) continue;
 
-                float margin = shellSpan * 0.3f;
-
-                // Check each vertex: is it inside the shell bbox (with margin)?
-                int outlierIdx = -1;
-                int insideCount = 0;
+                int[] vis = new int[3];
+                Vector3[] pos = new Vector3[3];
+                Vector2[] uvs = new Vector2[3];
 
                 for (int j = 0; j < 3; j++)
                 {
-                    int vi = target.triangles[f * 3 + j];
-                    Vector2 uv = target.targetUv[vi];
-
-                    bool bad = float.IsNaN(uv.x) || float.IsNaN(uv.y) ||
-                               float.IsInfinity(uv.x) || float.IsInfinity(uv.y) ||
-                               uv.x < shell.uvBoundsMin.x - margin ||
-                               uv.x > shell.uvBoundsMax.x + margin ||
-                               uv.y < shell.uvBoundsMin.y - margin ||
-                               uv.y > shell.uvBoundsMax.y + margin;
-
-                    if (!bad) insideCount++;
-                    else outlierIdx = j;
+                    vis[j] = target.triangles[f * 3 + j];
+                    pos[j] = target.vertices[vis[j]];
+                    uvs[j] = target.targetUv[vis[j]];
                 }
 
-                // Only fix if exactly one vertex is the outlier and the other two are OK
-                if (insideCount != 2 || outlierIdx < 0) continue;
+                int outlierIdx = DetectOutlierVertex(uvs, pos, shell, shellSpan);
+                if (outlierIdx < 0) continue;
 
-                int outlierVi = target.triangles[f * 3 + outlierIdx];
+                int outlierVi = vis[outlierIdx];
                 if (fixedVertices.Contains(outlierVi)) continue;
 
-                // Find nearest source vertex in 3D within the assigned shell
-                Vector3 vPos = target.vertices[outlierVi];
-                float bestDistSq = float.MaxValue;
-                int bestSrcVert = -1;
+                // Repair: UV-aware projection — find source triangle that is
+                // both 3D-close to the outlier AND UV-close to its two neighbors
+                Vector2 neighborCenter = (uvs[(outlierIdx + 1) % 3] + uvs[(outlierIdx + 2) % 3]) * 0.5f;
+                Vector3 vPos = pos[outlierIdx];
 
-                foreach (int srcVi in shell.vertexIds)
-                {
-                    float dSq = (source.vertices[srcVi] - vPos).sqrMagnitude;
-                    if (dSq < bestDistSq)
-                    {
-                        bestDistSq = dSq;
-                        bestSrcVert = srcVi;
-                    }
-                }
+                Vector2 candidateUv = RepairOutlierVertex(
+                    vPos, neighborCenter, shell, source);
 
-                if (bestSrcVert < 0) continue;
-
-                Vector2 candidateUv = source.uvSource[bestSrcVert];
-
-                // Verify candidate is within shell bbox
-                if (candidateUv.x < shell.uvBoundsMin.x - 0.01f ||
-                    candidateUv.x > shell.uvBoundsMax.x + 0.01f ||
-                    candidateUv.y < shell.uvBoundsMin.y - 0.01f ||
-                    candidateUv.y > shell.uvBoundsMax.y + 0.01f)
-                    continue;
+                if (float.IsNaN(candidateUv.x)) continue; // repair failed
 
                 // Topology safety: check one-ring metric for shared vertices
                 if (topologySafeRepairOnly && vertexUseCount[outlierVi] > 1)
                 {
                     var proposal = new Dictionary<int, Vector2>(1) { [outlierVi] = candidateUv };
-                    int vi0 = target.triangles[f * 3];
-                    int vi1 = target.triangles[f * 3 + 1];
-                    int vi2 = target.triangles[f * 3 + 2];
 
                     float metricBefore = EvaluateOneRingImpactMetric(
-                        source, target, vertexToFaces, vi0, vi1, vi2, null);
+                        source, target, vertexToFaces, vis[0], vis[1], vis[2], null);
                     float metricAfter = EvaluateOneRingImpactMetric(
-                        source, target, vertexToFaces, vi0, vi1, vi2, proposal);
+                        source, target, vertexToFaces, vis[0], vis[1], vis[2], proposal);
 
                     if (metricAfter >= metricBefore) continue;
                 }
@@ -631,8 +602,165 @@ namespace LightmapUvTool
 
             if (vertexOutlierFixed > 0)
             {
-                UvtLog.Info($"[InitialUvTransfer] Fixed {vertexOutlierFixed} outlier vertices (nearest source vertex fallback)");
+                UvtLog.Info($"[InitialUvTransfer] Fixed {vertexOutlierFixed} outlier vertices via UV-aware re-projection");
             }
+        }
+
+        /// <summary>
+        /// Detect which vertex (if any) is an outlier in a triangle.
+        /// Returns vertex local index (0-2) or -1 if no outlier.
+        /// Uses two methods: (a) bbox check, (b) UV/3D edge ratio consistency.
+        /// </summary>
+        static int DetectOutlierVertex(Vector2[] uvs, Vector3[] pos, UvShellData shell, float shellSpan)
+        {
+            // ── Method A: NaN / Infinity / outside shell bbox ──
+            float margin = shellSpan * 0.3f;
+            int bboxOutlier = -1;
+            int insideCount = 0;
+
+            for (int j = 0; j < 3; j++)
+            {
+                bool bad = float.IsNaN(uvs[j].x) || float.IsNaN(uvs[j].y) ||
+                           float.IsInfinity(uvs[j].x) || float.IsInfinity(uvs[j].y) ||
+                           uvs[j].x < shell.uvBoundsMin.x - margin ||
+                           uvs[j].x > shell.uvBoundsMax.x + margin ||
+                           uvs[j].y < shell.uvBoundsMin.y - margin ||
+                           uvs[j].y > shell.uvBoundsMax.y + margin;
+
+                if (!bad) insideCount++;
+                else bboxOutlier = j;
+            }
+
+            if (insideCount == 2 && bboxOutlier >= 0)
+                return bboxOutlier;
+
+            // ── Method B: UV/3D edge ratio inconsistency ──
+            // Edge j connects vertex j → (j+1)%3
+            float[] edgeLenUV = new float[3];
+            float[] edgeLen3D = new float[3];
+
+            for (int j = 0; j < 3; j++)
+            {
+                int j2 = (j + 1) % 3;
+                edgeLenUV[j] = (uvs[j] - uvs[j2]).magnitude;
+                edgeLen3D[j] = (pos[j] - pos[j2]).magnitude;
+            }
+
+            // Compute UV/3D ratios
+            float[] ratios = new float[3];
+            int validCount = 0;
+            for (int j = 0; j < 3; j++)
+            {
+                if (edgeLen3D[j] > 1e-6f)
+                {
+                    ratios[j] = edgeLenUV[j] / edgeLen3D[j];
+                    validCount++;
+                }
+            }
+
+            if (validCount < 3) return -1;
+
+            // Find the edge with the smallest ratio (most "correct")
+            // The outlier vertex is opposite this edge (it's the one NOT on the good edge)
+            float minRatio = Mathf.Min(ratios[0], Mathf.Min(ratios[1], ratios[2]));
+            float maxRatio = Mathf.Max(ratios[0], Mathf.Max(ratios[1], ratios[2]));
+
+            // Threshold: if the worst edge has 5x the ratio of the best, flag it
+            if (minRatio < 1e-8f || maxRatio < minRatio * 5f) return -1;
+
+            // The "good" edge has the smallest ratio — outlier is the vertex opposite it
+            int minEdge = 0;
+            if (ratios[1] < ratios[0] && ratios[1] <= ratios[2]) minEdge = 1;
+            else if (ratios[2] < ratios[0] && ratios[2] <= ratios[1]) minEdge = 2;
+
+            // Vertex opposite edge j is vertex (j+2)%3
+            return (minEdge + 2) % 3;
+        }
+
+        /// <summary>
+        /// Repair an outlier vertex by finding a source triangle that is both
+        /// 3D-close to the vertex AND UV-close to its neighbors.
+        /// Falls back to nearest source vertex if triangle search fails.
+        /// Returns NaN vector if repair fails entirely.
+        /// </summary>
+        static Vector2 RepairOutlierVertex(
+            Vector3 vertexPos, Vector2 neighborUvCenter,
+            UvShellData shell, SourceMeshData source)
+        {
+            float bestScore = float.MaxValue;
+            Vector2 bestUv = new Vector2(float.NaN, float.NaN);
+
+            // First pass: search all source triangles in the shell
+            // Score = 3D distance + UV distance to neighbor center (weighted)
+            float bestDist3DSq = float.MaxValue;
+
+            foreach (int sf in shell.triangleIds)
+            {
+                int si0 = source.triangles[sf * 3];
+                int si1 = source.triangles[sf * 3 + 1];
+                int si2 = source.triangles[sf * 3 + 2];
+
+                var cp = TriangleBvh.ClosestPointOnTriangle(
+                    vertexPos,
+                    source.vertices[si0], source.vertices[si1], source.vertices[si2],
+                    out Vector3 bary);
+
+                float dSq3D = (cp - vertexPos).sqrMagnitude;
+
+                // Track best 3D distance for threshold
+                if (dSq3D < bestDist3DSq) bestDist3DSq = dSq3D;
+            }
+
+            // Allow search within 4x the nearest 3D distance (or a minimum radius)
+            float maxDist3DSq = Mathf.Max(bestDist3DSq * 16f, 0.001f);
+
+            foreach (int sf in shell.triangleIds)
+            {
+                int si0 = source.triangles[sf * 3];
+                int si1 = source.triangles[sf * 3 + 1];
+                int si2 = source.triangles[sf * 3 + 2];
+
+                var cp = TriangleBvh.ClosestPointOnTriangle(
+                    vertexPos,
+                    source.vertices[si0], source.vertices[si1], source.vertices[si2],
+                    out Vector3 bary);
+
+                float dSq3D = (cp - vertexPos).sqrMagnitude;
+                if (dSq3D > maxDist3DSq) continue;
+
+                Vector2 uvCandidate = source.uvSource[si0] * bary.x +
+                                      source.uvSource[si1] * bary.y +
+                                      source.uvSource[si2] * bary.z;
+
+                float uvDistSq = (uvCandidate - neighborUvCenter).sqrMagnitude;
+
+                // Combined score: prioritize UV proximity, with 3D as tiebreaker
+                // Normalize 3D distance by maxDist3DSq so both terms are comparable
+                float score = uvDistSq + (dSq3D / Mathf.Max(maxDist3DSq, 1e-10f)) * 0.01f;
+
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    bestUv = uvCandidate;
+                }
+            }
+
+            // Fallback: nearest source vertex if triangle search gave nothing
+            if (float.IsNaN(bestUv.x))
+            {
+                float nearestSq = float.MaxValue;
+                foreach (int srcVi in shell.vertexIds)
+                {
+                    float dSq = (source.vertices[srcVi] - vertexPos).sqrMagnitude;
+                    if (dSq < nearestSq)
+                    {
+                        nearestSq = dSq;
+                        bestUv = source.uvSource[srcVi];
+                    }
+                }
+            }
+
+            return bestUv;
         }
 
         static float EvaluateOneRingImpactMetric(
