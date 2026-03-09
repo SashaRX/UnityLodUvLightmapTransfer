@@ -618,10 +618,12 @@ namespace LightmapUvTool
             // same-source conflicts in Phase 2b dedup.
             int fragMergeCount;
             bool[] tgtIsFragmentMerged;
+            int[] tgtFragmentMergeSource;
             tgtShells = MergeFragmentShells(
                 tgtShells, tUv0, tgtTris, tVerts,
                 srcShells, srcUv0, srcTris, srcVerts,
-                out fragMergeCount, out tgtIsFragmentMerged);
+                out fragMergeCount, out tgtIsFragmentMerged,
+                out tgtFragmentMergeSource);
             if (fragMergeCount > 0)
                 result.fragmentsMerged = fragMergeCount;
 
@@ -943,12 +945,29 @@ namespace LightmapUvTool
                 if (tN > 0) tCentroid /= tN;
                 result.targetShellCentroids[tsi] = tCentroid;
 
-                // Find best source shell (with BVH acceleration + subsampling)
-                FindBestSourceShell(tShell, tVerts, srcShells, srcCentroid3D,
-                    triPosA, triPosB, triPosC,
-                    shellBvh3D, shellBvh3DFaceMap,
-                    tCentroid, kMaxRetries, kGoodDistSq, null,
-                    out int chosenSrc, out float chosenDistSq, out float chosenAvg3D);
+                // Fragment-merged shells: force to their merge source instead of
+                // searching by 3D centroid. The merge was identified by UV0 bbox
+                // containment — using a different source breaks the merge logic.
+                int chosenSrc;
+                float chosenDistSq;
+                float chosenAvg3D;
+                if (tgtIsFragmentMerged != null && tgtIsFragmentMerged[tsi]
+                    && tgtFragmentMergeSource != null && tgtFragmentMergeSource[tsi] >= 0)
+                {
+                    chosenSrc = tgtFragmentMergeSource[tsi];
+                    chosenDistSq = (tCentroid - srcCentroid3D[chosenSrc]).sqrMagnitude;
+                    chosenAvg3D = chosenDistSq; // approximate
+                    UvtLog.Info($"[GroupedTransfer] Phase2a: t{tsi} forced to merge source src{chosenSrc}");
+                }
+                else
+                {
+                    // Find best source shell (with BVH acceleration + subsampling)
+                    FindBestSourceShell(tShell, tVerts, srcShells, srcCentroid3D,
+                        triPosA, triPosB, triPosC,
+                        shellBvh3D, shellBvh3DFaceMap,
+                        tCentroid, kMaxRetries, kGoodDistSq, null,
+                        out chosenSrc, out chosenDistSq, out chosenAvg3D);
+                }
 
                 if (chosenSrc < 0) continue;
 
@@ -995,6 +1014,18 @@ namespace LightmapUvTool
             // Hoisted: used by Phase 3 overlap guard for merged shells
             var claimed = new HashSet<int>();
             {
+                // Pre-claim sources used by fragment-merged shells — these are
+                // locked to their merge source and must not be taken by others.
+                for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+                {
+                    if (tgtIsFragmentMerged != null && tsi < tgtIsFragmentMerged.Length
+                        && tgtIsFragmentMerged[tsi])
+                    {
+                        int src = result.targetShellToSourceShell[tsi];
+                        if (src >= 0) claimed.Add(src);
+                    }
+                }
+
                 // Build reverse map: source → list of target claimants
                 // Include merged shells in overlap groups to prevent same-src UV2 overlap:
                 // merged shells use per-face voting in Phase 3 and can work with any
@@ -1029,7 +1060,21 @@ namespace LightmapUvTool
                 foreach (int srcKey in sortedSrcKeys)
                 {
                     var claimants = srcClaimants[srcKey];
+                    bool preClaimed = claimed.Contains(srcKey); // pre-claimed by fragment-merged
                     claimed.Add(srcKey); // source is claimed regardless
+
+                    if (preClaimed)
+                    {
+                        // Source already locked by fragment-merged shell — evict ALL
+                        // non-merged claimants (they must find a different source)
+                        foreach (var (tsi, _) in claimants)
+                        {
+                            needsRematch.Add(tsi);
+                            dedupConflicts++;
+                        }
+                        continue;
+                    }
+
                     if (claimants.Count <= 1) continue;
 
                     // Multiple non-merged targets claim same source — keep best
@@ -2813,10 +2858,12 @@ namespace LightmapUvTool
         static List<UvShell> MergeFragmentShells(
             List<UvShell> tgtShells, Vector2[] tUv0, int[] tgtTris, Vector3[] tVerts,
             List<UvShell> srcShells, Vector2[] srcUv0, int[] srcTris, Vector3[] srcVerts,
-            out int mergeCount, out bool[] isFragmentMerged)
+            out int mergeCount, out bool[] isFragmentMerged,
+            out int[] fragmentMergeSource)
         {
             mergeCount = 0;
             isFragmentMerged = null;
+            fragmentMergeSource = null;
             int tgtCount = tgtShells.Count;
             int srcCount = srcShells.Count;
             if (tgtCount < 2 || srcCount == 0) return tgtShells;
@@ -3028,9 +3075,16 @@ namespace LightmapUvTool
                 $"{mergeCount} fragments merged, shells {tgtCount} → {newShells.Count}");
 
             // Mark which output shells are fragment-merged (they appear first)
+            // and record which source shell each merged group belongs to.
             isFragmentMerged = new bool[newShells.Count];
+            fragmentMergeSource = new int[newShells.Count];
+            for (int i = 0; i < newShells.Count; i++)
+                fragmentMergeSource[i] = -1;
             for (int i = 0; i < mergeGroups.Count; i++)
+            {
                 isFragmentMerged[i] = true;
+                fragmentMergeSource[i] = mergeGroups[i].srcIdx;
+            }
 
             return newShells;
         }
