@@ -1282,15 +1282,18 @@ namespace LightmapUvTool
                 // ── Unified overlap transfer for overlapping UV0 shells ──
                 // Only for MERGED shells — non-merged shells use standard interp/xform
                 // which stays within source UV2 convex hull and works better for normal geometry.
-                // Fragment-merged shells skip this: their fragments all come from ONE source,
-                // so composite UV2 from multiple sources creates discontinuous UV2 mapping.
                 bool isFragMergedShell = tgtIsFragmentMerged != null
                     && tsi < tgtIsFragmentMerged.Length
                     && tgtIsFragmentMerged[tsi];
-                if (tgtIsMerged[tsi] && chosenSrc >= 0 && srcShellOverlapMembers[chosenSrc] != null
-                    && !isFragMergedShell)
+                if (tgtIsMerged[tsi] && chosenSrc >= 0 && srcShellOverlapMembers[chosenSrc] != null)
                 {
-                    var groupMembers = srcShellOverlapMembers[chosenSrc];
+                    // Fragment-merged shells: restrict to ONLY their merge source.
+                    // They need the overlap path's partition-aware candidate generation
+                    // (GenerateOverlapCandidates handles front/back UV0 overlap correctly),
+                    // but must NOT try other group members or build composite UV2.
+                    var groupMembers = isFragMergedShell
+                        ? new List<int> { chosenSrc }
+                        : srcShellOverlapMembers[chosenSrc];
 
                     Dictionary<int, Vector2> bestOverlapUv2 = null;
                     int bestOverlapIssues = int.MaxValue;
