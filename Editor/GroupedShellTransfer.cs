@@ -1625,8 +1625,17 @@ namespace LightmapUvTool
                         // Shared vertices at source boundaries may get reassigned — lightmap
                         // padding handles the resulting micro-seams.
                         var compositeUv2 = new Dictionary<int, Vector2>();
+                        var compositeVertSrc = new Dictionary<int, int>(); // vertex → source that set it
                         var compositeUsedSources = new HashSet<int>();
                         int compositeFaces = 0;
+
+                        // Compute max allowed UV2 displacement for shared vertex overwrites.
+                        // Vertices shared between faces from different sources should not jump
+                        // across UV2 regions — that creates triangular protrusions.
+                        Vector2 bsMinC = srcUv2Min[bestOverlapSrc];
+                        Vector2 bsMaxC = srcUv2Max[bestOverlapSrc];
+                        float bsDiag = (bsMaxC - bsMinC).magnitude;
+                        float maxVertJump = bsDiag * 0.5f;
 
                         foreach (int tfi in tShell.faceIndices)
                         {
@@ -1653,9 +1662,21 @@ namespace LightmapUvTool
                                 var srcUv2Map = validCandidates[src].uv2;
                                 if (srcUv2Map.ContainsKey(ti0) && srcUv2Map.ContainsKey(ti1) && srcUv2Map.ContainsKey(ti2))
                                 {
-                                    compositeUv2[ti0] = srcUv2Map[ti0];
-                                    compositeUv2[ti1] = srcUv2Map[ti1];
-                                    compositeUv2[ti2] = srcUv2Map[ti2];
+                                    // Write vertex UV2, but protect against cross-region jumps:
+                                    // if a vertex was already set by a different source and the
+                                    // new UV2 is far away, keep the old value to prevent protrusions.
+                                    int[] vis = { ti0, ti1, ti2 };
+                                    foreach (int vi in vis)
+                                    {
+                                        if (compositeVertSrc.TryGetValue(vi, out int prevSrc) && prevSrc != src)
+                                        {
+                                            float jump = (compositeUv2[vi] - srcUv2Map[vi]).magnitude;
+                                            if (jump > maxVertJump)
+                                                continue; // keep old value
+                                        }
+                                        compositeUv2[vi] = srcUv2Map[vi];
+                                        compositeVertSrc[vi] = src;
+                                    }
                                     compositeUsedSources.Add(src);
                                     compositeFaces++;
                                     assigned = true;
@@ -1666,9 +1687,12 @@ namespace LightmapUvTool
                             // Last resort: use best overall even if it doesn't have all 3 verts
                             if (!assigned && bestOverlapUv2 != null)
                             {
-                                if (bestOverlapUv2.ContainsKey(ti0)) compositeUv2[ti0] = bestOverlapUv2[ti0];
-                                if (bestOverlapUv2.ContainsKey(ti1)) compositeUv2[ti1] = bestOverlapUv2[ti1];
-                                if (bestOverlapUv2.ContainsKey(ti2)) compositeUv2[ti2] = bestOverlapUv2[ti2];
+                                if (bestOverlapUv2.ContainsKey(ti0) && !compositeUv2.ContainsKey(ti0))
+                                    { compositeUv2[ti0] = bestOverlapUv2[ti0]; compositeVertSrc[ti0] = bestOverlapSrc; }
+                                if (bestOverlapUv2.ContainsKey(ti1) && !compositeUv2.ContainsKey(ti1))
+                                    { compositeUv2[ti1] = bestOverlapUv2[ti1]; compositeVertSrc[ti1] = bestOverlapSrc; }
+                                if (bestOverlapUv2.ContainsKey(ti2) && !compositeUv2.ContainsKey(ti2))
+                                    { compositeUv2[ti2] = bestOverlapUv2[ti2]; compositeVertSrc[ti2] = bestOverlapSrc; }
                                 compositeUsedSources.Add(bestOverlapSrc);
                             }
                         }
