@@ -971,12 +971,17 @@ namespace LightmapUvTool
             // Hoisted: used by Phase 3 overlap guard for merged shells
             var claimed = new HashSet<int>();
             {
-                // Build reverse map: source → list of non-merged target claimants
+                // Build reverse map: source → list of target claimants
+                // Include merged shells in overlap groups to prevent same-src UV2 overlap:
+                // merged shells use per-face voting in Phase 3 and can work with any
+                // source in their overlap group, so they can be safely reassigned.
                 var srcClaimants = new Dictionary<int, List<(int tsi, float avg3D)>>();
                 for (int tsi = 0; tsi < tgtShells.Count; tsi++)
                 {
                     int src = result.targetShellToSourceShell[tsi];
-                    if (src < 0 || tgtIsMerged[tsi]) continue; // skip unmatched & merged
+                    if (src < 0) continue;
+                    // Skip merged shells that are NOT in overlap groups (no benefit)
+                    if (tgtIsMerged[tsi] && srcShellOverlapMembers[src] == null) continue;
                     if (!srcClaimants.TryGetValue(src, out var list))
                     {
                         list = new List<(int, float)>();
@@ -1038,12 +1043,14 @@ namespace LightmapUvTool
                                     srcShells[newSrc].faceIndices, triUv0A, triUv0B, triUv0C,
                                     shellUv0Bvh[newSrc], kUv0BadThreshold);
 
+                                bool wasMerged = tgtIsMerged[tsi];
+
                                 // If reassignment would make a non-merged shell become merged,
                                 // force 3D-primary merged mode instead of reverting to
                                 // overlapping source. 3D projection naturally separates
                                 // targets at different 3D positions, avoiding same-source
                                 // UV2 overlap that causes lightmap seams.
-                                if (newIsMerged && !tgtIsMerged[tsi] && oldSrc >= 0)
+                                if (newIsMerged && !wasMerged && oldSrc >= 0)
                                 {
                                     UvtLog.Info($"[GroupedTransfer] Dedup: t{tsi} → merged+3D " +
                                         $"(src{oldSrc}, new src{newSrc} would force merged)");
@@ -1053,6 +1060,10 @@ namespace LightmapUvTool
                                 }
                                 else
                                 {
+                                    if (wasMerged)
+                                        UvtLog.Info($"[GroupedTransfer] Dedup: merged t{tsi} " +
+                                            $"reassigned src{oldSrc}→src{newSrc} " +
+                                            $"(merged={newIsMerged})");
                                     result.targetShellToSourceShell[tsi] = newSrc;
                                     result.targetShellMatchDistSqr[tsi] = newDistSq;
                                     tgtChosenAvg3D[tsi] = newAvg3D;
