@@ -2671,45 +2671,32 @@ namespace LightmapUvTool
             }
 
             // For each target shell, find the best-matching source shell whose UV0
-            // bbox significantly overlaps the target's UV0 bbox.
-            // Use adaptive padding based on source shell size, and require ≥70%
-            // overlap of the target bbox area. This catches fragments that extend
-            // slightly beyond source bounds due to LOD simplification vertex
-            // interpolation. 3D centroid distance is used as tiebreaker.
-            const float kBboxOverlapMin = 0.70f; // target bbox must overlap ≥70% with source
+            // bbox fully contains the target's UV0 bbox. Use adaptive padding
+            // based on source shell size to handle LOD simplification artifacts
+            // where fragment vertices extend slightly beyond source bounds.
+            // 3D centroid distance is used as tiebreaker.
             var tgtToSrcContainer = new int[tgtCount];
             for (int ti = 0; ti < tgtCount; ti++) tgtToSrcContainer[ti] = -1;
 
             for (int ti = 0; ti < tgtCount; ti++)
             {
                 var t = tgtShells[ti];
-                float tW = t.boundsMax.x - t.boundsMin.x;
-                float tH = t.boundsMax.y - t.boundsMin.y;
-                float tArea = Mathf.Max(tW * tH, 1e-12f);
-
                 int bestSrc = -1;
                 float bestDist = float.MaxValue;
 
                 for (int si = 0; si < srcCount; si++)
                 {
                     var s = srcShells[si];
-                    // Adaptive padding: 5% of source shell bbox diagonal
+                    // Adaptive padding: 2% of source shell bbox diagonal, min 0.002
                     float sW = s.boundsMax.x - s.boundsMin.x;
                     float sH = s.boundsMax.y - s.boundsMin.y;
-                    float pad = Mathf.Max(Mathf.Sqrt(sW * sW + sH * sH) * 0.05f, 0.002f);
+                    float pad = Mathf.Max(Mathf.Sqrt(sW * sW + sH * sH) * 0.02f, 0.002f);
 
-                    // Compute AABB intersection area
-                    float ix0 = Mathf.Max(t.boundsMin.x, s.boundsMin.x - pad);
-                    float iy0 = Mathf.Max(t.boundsMin.y, s.boundsMin.y - pad);
-                    float ix1 = Mathf.Min(t.boundsMax.x, s.boundsMax.x + pad);
-                    float iy1 = Mathf.Min(t.boundsMax.y, s.boundsMax.y + pad);
-                    float overlapW = ix1 - ix0;
-                    float overlapH = iy1 - iy0;
-                    if (overlapW <= 0 || overlapH <= 0) continue; // no overlap
-
-                    float overlapArea = overlapW * overlapH;
-                    float overlapRatio = overlapArea / tArea;
-                    if (overlapRatio < kBboxOverlapMin) continue; // insufficient overlap
+                    // UV0 bbox containment: target fully inside source (with adaptive padding)
+                    if (t.boundsMin.x < s.boundsMin.x - pad) continue;
+                    if (t.boundsMin.y < s.boundsMin.y - pad) continue;
+                    if (t.boundsMax.x > s.boundsMax.x + pad) continue;
+                    if (t.boundsMax.y > s.boundsMax.y + pad) continue;
 
                     float dist = Vector3.SqrMagnitude(tgtCentroid3D[ti] - srcCentroid3D[si]);
                     if (dist < bestDist)
