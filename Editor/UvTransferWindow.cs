@@ -222,6 +222,7 @@ namespace LightmapUvTool
             public TransferQualityEvaluator.TransferReport? report;
             public GroupedShellTransfer.TransferResult shellTransferResult;
             public TransferValidator.ValidationReport validationReport;
+            public BorderRepairAdapter.AdapterReport? borderRepairReport;
             public bool hasExistingUv2; // cached: FBX mesh already has UV2 (post-Apply)
             /// <summary>
             /// Name with LOD/COL suffixes stripped — used to isolate source↔target
@@ -1027,6 +1028,21 @@ namespace LightmapUvTool
                                     var r2 = GUILayoutUtility.GetRect(GUIContent.none, EditorStyles.miniLabel, GUILayout.Height(14));
                                     EditorGUI.LabelField(r2, $"Ov(same-src): {vr.overlapSameSrcTriCount} ({vr.overlapSameSrcPairs} pairs, ok)",
                                         EditorStyles.miniLabel);
+                                }
+                            }
+
+                            // Border Repair stats
+                            if (e.borderRepairReport.HasValue)
+                            {
+                                var br = e.borderRepairReport.Value;
+                                var rr = br.repairReport;
+                                if (rr.totalBorderPrims > 0)
+                                {
+                                    Bar("BdrFix", rr.repairedCount, rr.totalBorderPrims, new Color(.4f,.8f,.5f));
+                                    if (rr.skippedAlreadyMatching > 0)
+                                        Bar("BdrOK", rr.skippedAlreadyMatching, rr.totalBorderPrims, cAccept);
+                                    if (rr.markedBorderRisk > 0)
+                                        Bar("BdrRsk", rr.markedBorderRisk, rr.totalBorderPrims, new Color(.9f,.6f,.2f));
                                 }
                             }
                         }
@@ -3707,6 +3723,20 @@ namespace LightmapUvTool
                     if (tr.overlapHints != null && tr.overlapHints.Count > 0)
                         accumulatedOverlapHints.AddRange(tr.overlapHints);
 
+                    // ── Border Repair (Stages 4-6) ──
+                    // Runs after GroupedShellTransfer, modifies tr.uv2 in-place for border prims only.
+                    te.borderRepairReport = null;
+                    if (pipeSettings.enableBorderRepair)
+                    {
+                        var brSettings = new BorderRepairAdapter.Settings
+                        {
+                            perimeterTolerance = pipeSettings.perimeterTolerance,
+                            borderFuseTolerance = pipeSettings.borderFuseTolerance,
+                            maxNormalAngle = pipeSettings.maxNormalAngle
+                        };
+                        te.borderRepairReport = BorderRepairAdapter.Repair(tM, sM, tr.uv2, brSettings);
+                    }
+
                     var om = Instantiate(tM); om.name = tM.name + "_uvTransfer";
                     om.SetUVs(pipeSettings.targetUvChannel, new List<Vector2>(tr.uv2));
                     te.transferredMesh = om;
@@ -4023,6 +4053,7 @@ namespace LightmapUvTool
             foreach (var e in meshEntries)
             {
                 e.shellTransferResult = null;
+                e.borderRepairReport = null;
                 e.restoredSourceDescriptors = null;
             }
             shellColorKeyCache.Clear();
@@ -4594,6 +4625,7 @@ namespace LightmapUvTool
 
                 if (e.fbxMesh != null) e.originalMesh = e.fbxMesh;
                 e.shellTransferResult = null;
+                e.borderRepairReport = null;
                 e.restoredSourceDescriptors = null;
                 e.wasWelded = false;
                 e.wasEdgeWelded = false;
