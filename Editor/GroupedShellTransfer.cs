@@ -2842,6 +2842,8 @@ namespace LightmapUvTool
                 bool partXfRejected = false;
                 if (uv2Map.Count > 0)
                 {
+                    Vector2 pxMin = new Vector2(float.MaxValue, float.MaxValue);
+                    Vector2 pxMax = new Vector2(float.MinValue, float.MinValue);
                     foreach (var kv in uv2Map)
                     {
                         Vector2 uv = kv.Value;
@@ -2849,6 +2851,37 @@ namespace LightmapUvTool
                         {
                             partXfRejected = true;
                             break;
+                        }
+                        pxMin = Vector2.Min(pxMin, uv);
+                        pxMax = Vector2.Max(pxMax, uv);
+                    }
+
+                    // Reject if result extends too far beyond source's UV2 AABB.
+                    // Transform can extrapolate when target UV0 differs from source UV0,
+                    // placing vertices outside the source's UV2 region → protrusions.
+                    if (!partXfRejected && srcUv2Min != null && srcUv2Max != null)
+                    {
+                        Vector2 sMin = srcUv2Min[srcIdx];
+                        Vector2 sMax = srcUv2Max[srcIdx];
+                        Vector2 sSize = sMax - sMin;
+                        float margin = Mathf.Max(sSize.x, sSize.y) * 0.3f;
+                        if (pxMin.x < sMin.x - margin || pxMax.x > sMax.x + margin ||
+                            pxMin.y < sMin.y - margin || pxMax.y > sMax.y + margin)
+                            partXfRejected = true;
+                    }
+
+                    // Reject if result overlaps another overlap-group member's UV2 region
+                    if (!partXfRejected && overlapGroupMembers != null)
+                    {
+                        foreach (int si in overlapGroupMembers)
+                        {
+                            if (si == srcIdx) continue;
+                            if (pxMin.x < srcUv2Max[si].x && pxMax.x > srcUv2Min[si].x &&
+                                pxMin.y < srcUv2Max[si].y && pxMax.y > srcUv2Min[si].y)
+                            {
+                                partXfRejected = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -2905,6 +2938,18 @@ namespace LightmapUvTool
                     if (xfMin.x < -0.01f || xfMax.x > 1.01f ||
                         xfMin.y < -0.01f || xfMax.y > 1.01f)
                         rejected = true;
+
+                    // Reject if result extends too far beyond source's UV2 AABB
+                    if (!rejected && srcUv2Min != null && srcUv2Max != null)
+                    {
+                        Vector2 sMin = srcUv2Min[srcIdx];
+                        Vector2 sMax = srcUv2Max[srcIdx];
+                        Vector2 sSize = sMax - sMin;
+                        float margin = Mathf.Max(sSize.x, sSize.y) * 0.3f;
+                        if (xfMin.x < sMin.x - margin || xfMax.x > sMax.x + margin ||
+                            xfMin.y < sMin.y - margin || xfMax.y > sMax.y + margin)
+                            rejected = true;
+                    }
 
                     // Reject if result overlaps another overlap-group member's UV2 region.
                     // Only check shells in same overlap group (same UV0, different UV2) —
