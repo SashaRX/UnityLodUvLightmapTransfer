@@ -3572,13 +3572,43 @@ namespace LightmapUvTool
                 var group = kv.Value;
                 if (group.Count < 2) continue;
 
-                // Skip source shells with UV0 overlap — fragments may be
-                // on different physical sides (front/back belt, tiling panels)
+                // Source UV0 overlaps with other source shells — fragments
+                // may be on different physical sides (front/back belt, tiling).
+                // Instead of skipping entirely, validate using 3D normals:
+                // if all fragments face the same direction they're on one side
+                // and can be safely merged. Only skip if normals diverge.
                 if (srcHasUv0Overlap[kv.Key])
                 {
-                    UvtLog.Info($"[GroupedTransfer] Fragment merge: skipping src#{kv.Key} group " +
-                        $"({group.Count} shells) — source has UV0 overlap with other shells");
-                    continue;
+                    bool normalsConsistent = true;
+                    Vector3 refNormal = Vector3.zero;
+                    bool hasRef = false;
+
+                    for (int i = 0; i < group.Count && normalsConsistent; i++)
+                    {
+                        int ti = group[i];
+                        Vector3 avgN = Vector3.zero;
+                        foreach (int f in tgtShells[ti].faceIndices)
+                        {
+                            int i0 = tgtTris[f * 3], i1 = tgtTris[f * 3 + 1], i2 = tgtTris[f * 3 + 2];
+                            if (i0 >= tVerts.Length || i1 >= tVerts.Length || i2 >= tVerts.Length) continue;
+                            avgN += Vector3.Cross(tVerts[i1] - tVerts[i0], tVerts[i2] - tVerts[i0]);
+                        }
+                        if (avgN.sqrMagnitude < 1e-12f) continue;
+                        avgN.Normalize();
+
+                        if (!hasRef) { refNormal = avgN; hasRef = true; }
+                        else if (Vector3.Dot(refNormal, avgN) < 0.5f)
+                            normalsConsistent = false;
+                    }
+
+                    if (!normalsConsistent)
+                    {
+                        UvtLog.Info($"[GroupedTransfer] Fragment merge: skipping src#{kv.Key} group " +
+                            $"({group.Count} shells) — UV0 overlap + divergent normals (front/back)");
+                        continue;
+                    }
+                    UvtLog.Info($"[GroupedTransfer] Fragment merge: src#{kv.Key} group " +
+                        $"({group.Count} shells) — UV0 overlap but normals consistent, allowing merge");
                 }
 
                 float combinedArea = 0;
