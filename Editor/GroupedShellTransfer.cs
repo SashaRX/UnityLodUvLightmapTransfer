@@ -1084,10 +1084,14 @@ namespace LightmapUvTool
                                 }
                                 else
                                 {
+                                    bool isFragMergedLog = tgtIsFragmentMerged != null
+                                        && tsi < tgtIsFragmentMerged.Length
+                                        && tgtIsFragmentMerged[tsi];
                                     if (wasMerged)
                                         UvtLog.Info($"[GroupedTransfer] Dedup: merged t{tsi} " +
                                             $"reassigned src{oldSrc}→src{newSrc} " +
-                                            $"(merged={newIsMerged})");
+                                            $"(merged={isFragMergedLog || newIsMerged}" +
+                                            (isFragMergedLog ? ", fragMerged" : "") + ")");
                                     result.targetShellToSourceShell[tsi] = newSrc;
                                     result.targetShellMatchDistSqr[tsi] = newDistSq;
                                     tgtChosenAvg3D[tsi] = newAvg3D;
