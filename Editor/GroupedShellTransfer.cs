@@ -1435,7 +1435,15 @@ namespace LightmapUvTool
 
                     if (bestOverlapUv2 != null && bestOverlapUv2.Count > 0)
                     {
-                        bool tooManyIssues = bestOverlapIssues > tShell.faceIndices.Count / 2;
+                        bool isFragMergedShell = tgtIsFragmentMerged != null
+                            && tsi < tgtIsFragmentMerged.Length
+                            && tgtIsFragmentMerged[tsi];
+
+                        // Fragment-merged shells: each source covers only its fragment
+                        // (~1/N of faces), so global issue count is always high.
+                        // Per-face composite handles this — don't reject the entire path.
+                        bool tooManyIssues = !isFragMergedShell
+                            && bestOverlapIssues > tShell.faceIndices.Count / 2;
 
                         // ── Build composite UV2 from per-face voting ──
                         // On lower LODs, one target shell can span multiple source shells
@@ -1465,7 +1473,11 @@ namespace LightmapUvTool
                             foreach (int src in tryOrder)
                             {
                                 if (src < 0 || !validCandidates.ContainsKey(src)) continue;
-                                if (validCandidates[src].issues > tShell.faceIndices.Count / 2) continue;
+                                // Skip high-issue sources unless fragment-merged (each
+                                // source covers only its fragment → high global issues expected)
+                                if (!isFragMergedShell
+                                    && validCandidates[src].issues > tShell.faceIndices.Count / 2)
+                                    continue;
                                 var srcUv2Map = validCandidates[src].uv2;
                                 if (srcUv2Map.ContainsKey(ti0) && srcUv2Map.ContainsKey(ti1) && srcUv2Map.ContainsKey(ti2))
                                 {
@@ -1502,8 +1514,9 @@ namespace LightmapUvTool
                             ? Mathf.Min(srcGroupArea[bestOverlapSrc], tgt3DArea) / Mathf.Max(srcGroupArea[bestOverlapSrc], tgt3DArea)
                             : 0f;
                         string compositeInfo = compositeUsedSources.Count > 1
-                            ? $", composite={compositeUsedSources.Count}src"
+                            ? $", composite={compositeUsedSources.Count}src/{compositeFaces}f"
                             : "";
+                        string fragInfo = isFragMergedShell ? ", fragMerged" : "";
                         UvtLog.Info($"[GroupedTransfer]   t{tsi}: overlap unified " +
                             $"(best src{bestOverlapSrc}, {bestOverlapCoverage} cov, " +
                             $"{bestOverlapIssues} issues, " +
@@ -1512,7 +1525,7 @@ namespace LightmapUvTool
                             $"method={bestOverlapMethod}, " +
                             $"tried {groupMembers.Count} shells" +
                             (hintSrc >= 0 ? $", hint=src{hintSrc}" : "") +
-                            compositeInfo +
+                            compositeInfo + fragInfo +
                             (tooManyIssues ? " → fall-through" : "") + ")");
 
                         if (!tooManyIssues)
