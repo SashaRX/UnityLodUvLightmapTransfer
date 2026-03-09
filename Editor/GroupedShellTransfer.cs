@@ -956,10 +956,20 @@ namespace LightmapUvTool
                 result.targetShellMatchDistSqr[tsi] = chosenDistSq;
                 tgtChosenAvg3D[tsi] = chosenAvg3D;
 
-                // Detect merged shell via UV0 coverage (BVH + adaptive threshold)
-                tgtIsMerged[tsi] = DetectMergedShell(tShell, tUv0,
-                    srcShells[chosenSrc].faceIndices, triUv0A, triUv0B, triUv0C,
-                    shellUv0Bvh[chosenSrc], kUv0BadThreshold);
+                // Fragment-merged shells must stay merged: they combine tiling
+                // copies with identical UV0, so single-source interp would produce
+                // duplicate UV2 for each fragment part.
+                if (tgtIsFragmentMerged != null && tgtIsFragmentMerged[tsi])
+                {
+                    tgtIsMerged[tsi] = true;
+                }
+                else
+                {
+                    // Detect merged shell via UV0 coverage (BVH + adaptive threshold)
+                    tgtIsMerged[tsi] = DetectMergedShell(tShell, tUv0,
+                        srcShells[chosenSrc].faceIndices, triUv0A, triUv0B, triUv0C,
+                        shellUv0Bvh[chosenSrc], kUv0BadThreshold);
+                }
             }
 
             // ── Phase 2a+: Rescore merged shells with multi-criteria matching ──
@@ -1082,7 +1092,12 @@ namespace LightmapUvTool
                                     result.targetShellMatchDistSqr[tsi] = newDistSq;
                                     tgtChosenAvg3D[tsi] = newAvg3D;
                                     claimed.Add(newSrc);
-                                    tgtIsMerged[tsi] = newIsMerged;
+                                    // Preserve merged status for fragment-merged shells:
+                                    // they need per-face voting regardless of UV0 coverage
+                                    bool isFragMerged = tgtIsFragmentMerged != null
+                                        && tsi < tgtIsFragmentMerged.Length
+                                        && tgtIsFragmentMerged[tsi];
+                                    tgtIsMerged[tsi] = isFragMerged || newIsMerged;
                                 }
                             }
                             else
