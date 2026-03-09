@@ -1049,7 +1049,11 @@ namespace LightmapUvTool
                                         $"(src{oldSrc}, new src{newSrc} would force merged)");
                                     tgtIsMerged[tsi] = true;
                                     tgtForce3DFallback[tsi] = true;
-                                    if (oldSrc >= 0) claimed.Add(oldSrc); // guard against -1 pollution
+                                    // Clear source so Phase 3 merged path uses all-source only
+                                    // (constrained on oldSrc would land in the same UV2 region
+                                    // as the dedup winner, recreating the same-src overlap).
+                                    result.targetShellToSourceShell[tsi] = -1;
+                                    claimed.Add(oldSrc);
                                 }
                                 else
                                 {
@@ -1069,10 +1073,12 @@ namespace LightmapUvTool
                         needsRematch = stillNeedsRematch;
                     }
 
-                    // Any remaining unmatched — force to merged mode
+                    // Any remaining unmatched — force to merged mode with no source
+                    // (all-source BVH will find UV2 from nearest 3D geometry)
                     foreach (int tsi in needsRematch)
                     {
                         tgtIsMerged[tsi] = true;
+                        result.targetShellToSourceShell[tsi] = -1;
                     }
 
                     result.dedupConflicts = dedupConflicts;
@@ -1080,6 +1086,45 @@ namespace LightmapUvTool
                         UvtLog.Info($"[GroupedTransfer] Dedup: {dedupConflicts} same-source conflicts, " +
                             $"{needsRematch.Count} forced merged");
                 }
+            }
+
+            // ── Phase 2c: Post-dedup sweep — eliminate ALL remaining same-source pairs ──
+            // Dedup (Phase 2b) only checks non-merged shells. This sweep catches:
+            // - merged vs non-merged pairs sharing the same source
+            // - any residual same-source pairs from rescore or overlap assignment
+            {
+                // Build source → owner (first target that claims it)
+                var srcOwner = new Dictionary<int, int>();
+                int sweepFixed = 0;
+                for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+                {
+                    int src = result.targetShellToSourceShell[tsi];
+                    if (src < 0) continue;
+
+                    if (srcOwner.TryGetValue(src, out int existing))
+                    {
+                        // Same-source conflict — force the shell with worse 3D distance to merged+3D
+                        float distExisting = tgtChosenAvg3D[existing];
+                        float distCurrent = tgtChosenAvg3D[tsi];
+                        int victim = distCurrent > distExisting ? tsi : existing;
+                        int keeper = victim == tsi ? existing : tsi;
+
+                        if (!tgtIsMerged[victim] || result.targetShellToSourceShell[victim] >= 0)
+                        {
+                            tgtIsMerged[victim] = true;
+                            tgtForce3DFallback[victim] = true;
+                            result.targetShellToSourceShell[victim] = -1;
+                            srcOwner[src] = keeper;
+                            sweepFixed++;
+                        }
+                    }
+                    else
+                    {
+                        srcOwner[src] = tsi;
+                    }
+                }
+                if (sweepFixed > 0)
+                    UvtLog.Info($"[GroupedTransfer] Post-dedup sweep: {sweepFixed} same-source pairs fixed");
             }
 
             // ── Phase 3: Transfer UV2 using final source assignments ──
@@ -2671,10 +2716,9 @@ namespace LightmapUvTool
             }
 
             // For each target shell, find the best-matching source shell whose UV0
-            // bbox fully contains the target's UV0 bbox. Use adaptive padding
-            // based on source shell size to handle LOD simplification artifacts
-            // where fragment vertices extend slightly beyond source bounds.
-            // 3D centroid distance is used as tiebreaker.
+            // bbox fully contains the target's UV0 bbox. Use 3D centroid distance
+            // as tiebreaker when multiple sources contain the target.
+            const float bboxPad = 0.002f; // small padding for float imprecision
             var tgtToSrcContainer = new int[tgtCount];
             for (int ti = 0; ti < tgtCount; ti++) tgtToSrcContainer[ti] = -1;
 
@@ -2687,16 +2731,11 @@ namespace LightmapUvTool
                 for (int si = 0; si < srcCount; si++)
                 {
                     var s = srcShells[si];
-                    // Adaptive padding: 2% of source shell bbox diagonal, min 0.002
-                    float sW = s.boundsMax.x - s.boundsMin.x;
-                    float sH = s.boundsMax.y - s.boundsMin.y;
-                    float pad = Mathf.Max(Mathf.Sqrt(sW * sW + sH * sH) * 0.02f, 0.002f);
-
-                    // UV0 bbox containment: target fully inside source (with adaptive padding)
-                    if (t.boundsMin.x < s.boundsMin.x - pad) continue;
-                    if (t.boundsMin.y < s.boundsMin.y - pad) continue;
-                    if (t.boundsMax.x > s.boundsMax.x + pad) continue;
-                    if (t.boundsMax.y > s.boundsMax.y + pad) continue;
+                    // UV0 bbox containment: target fully inside source
+                    if (t.boundsMin.x < s.boundsMin.x - bboxPad) continue;
+                    if (t.boundsMin.y < s.boundsMin.y - bboxPad) continue;
+                    if (t.boundsMax.x > s.boundsMax.x + bboxPad) continue;
+                    if (t.boundsMax.y > s.boundsMax.y + bboxPad) continue;
 
                     float dist = Vector3.SqrMagnitude(tgtCentroid3D[ti] - srcCentroid3D[si]);
                     if (dist < bestDist)
