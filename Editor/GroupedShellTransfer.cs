@@ -1181,7 +1181,78 @@ namespace LightmapUvTool
                         needsRematch = stillNeedsRematch;
                     }
 
-                    // Any remaining unmatched — force to merged mode
+                    // Any remaining unmatched — try spreading across overlap group
+                    // before falling back to forced merged on original (duplicate) source.
+                    int spreadCount = 0;
+                    if (needsRematch.Count > 0)
+                    {
+                        // Count how many targets currently use each source
+                        var srcUsage = new Dictionary<int, int>();
+                        for (int tsi2 = 0; tsi2 < tgtShells.Count; tsi2++)
+                        {
+                            int s = result.targetShellToSourceShell[tsi2];
+                            if (s >= 0)
+                            {
+                                srcUsage.TryGetValue(s, out int cnt);
+                                srcUsage[s] = cnt + 1;
+                            }
+                        }
+
+                        var stillUnresolved = new List<int>();
+                        foreach (int tsi in needsRematch)
+                        {
+                            int curSrc = result.targetShellToSourceShell[tsi];
+                            if (curSrc < 0 || srcShellOverlapMembers[curSrc] == null)
+                            {
+                                stillUnresolved.Add(tsi);
+                                continue;
+                            }
+
+                            // Find overlap group member with minimum usage
+                            var group = srcShellOverlapMembers[curSrc];
+                            int bestAlt = -1;
+                            int bestUsage = int.MaxValue;
+                            float bestDist = float.MaxValue;
+                            Vector3 tCent = result.targetShellCentroids[tsi];
+                            foreach (int gsi in group)
+                            {
+                                int usage = 0;
+                                srcUsage.TryGetValue(gsi, out usage);
+                                float dist = (tCent - srcCentroid3D[gsi]).sqrMagnitude;
+                                // Prefer lower usage, then closer distance
+                                if (usage < bestUsage || (usage == bestUsage && dist < bestDist))
+                                {
+                                    bestAlt = gsi;
+                                    bestUsage = usage;
+                                    bestDist = dist;
+                                }
+                            }
+
+                            if (bestAlt >= 0 && bestAlt != curSrc)
+                            {
+                                UvtLog.Info($"[GroupedTransfer] Dedup spread: t{tsi} " +
+                                    $"src{curSrc}→src{bestAlt} (usage {bestUsage}, overlap group)");
+                                // Update usage counts
+                                srcUsage.TryGetValue(curSrc, out int oldCnt);
+                                srcUsage[curSrc] = Mathf.Max(0, oldCnt - 1);
+                                srcUsage.TryGetValue(bestAlt, out int newCnt);
+                                srcUsage[bestAlt] = newCnt + 1;
+
+                                result.targetShellToSourceShell[tsi] = bestAlt;
+                                result.targetShellMatchDistSqr[tsi] = bestDist;
+                                claimed.Add(bestAlt);
+                                tgtIsMerged[tsi] = true;
+                                spreadCount++;
+                            }
+                            else
+                            {
+                                stillUnresolved.Add(tsi);
+                            }
+                        }
+                        needsRematch = stillUnresolved;
+                    }
+
+                    // Any truly remaining unmatched — force to merged mode
                     foreach (int tsi in needsRematch)
                     {
                         tgtIsMerged[tsi] = true;
@@ -1190,7 +1261,7 @@ namespace LightmapUvTool
                     result.dedupConflicts = dedupConflicts;
                     if (dedupConflicts > 0)
                         UvtLog.Info($"[GroupedTransfer] Dedup: {dedupConflicts} same-source conflicts, " +
-                            $"{needsRematch.Count} forced merged");
+                            $"{spreadCount} spread, {needsRematch.Count} forced merged");
                 }
             }
 
