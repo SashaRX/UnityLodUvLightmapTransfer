@@ -1067,16 +1067,15 @@ namespace LightmapUvTool
                 }
 
                 // Build reverse map: source → list of target claimants
-                // Include merged shells in overlap groups to prevent same-src UV2 overlap:
-                // merged shells use per-face voting in Phase 3 and can work with any
-                // source in their overlap group, so they can be safely reassigned.
+                // Include ALL shells (merged or not) so their sources get claimed
+                // and other shells can't be rematched onto the same source.
+                // Merged shells use 3D voting and can work with any source,
+                // so they can be safely reassigned if evicted.
                 var srcClaimants = new Dictionary<int, List<(int tsi, float avg3D)>>();
                 for (int tsi = 0; tsi < tgtShells.Count; tsi++)
                 {
                     int src = result.targetShellToSourceShell[tsi];
                     if (src < 0) continue;
-                    // Skip merged shells that are NOT in overlap groups (no benefit)
-                    if (tgtIsMerged[tsi] && srcShellOverlapMembers[src] == null) continue;
                     // Fragment-merged shells must keep their original source —
                     // they were identified by UV0 bbox containment in that specific
                     // source. Reassigning breaks the merge and produces garbage UV2.
@@ -1117,8 +1116,16 @@ namespace LightmapUvTool
 
                     if (claimants.Count <= 1) continue;
 
-                    // Multiple non-merged targets claim same source — keep best
-                    claimants.Sort((a, b) => a.avg3D.CompareTo(b.avg3D));
+                    // Multiple targets claim same source — keep the best.
+                    // Non-merged shells get priority (they need the specific UV0→UV2
+                    // mapping); merged shells use 3D voting and work with any source.
+                    claimants.Sort((a, b) =>
+                    {
+                        bool aM = tgtIsMerged[a.tsi];
+                        bool bM = tgtIsMerged[b.tsi];
+                        if (aM != bM) return aM ? 1 : -1; // non-merged first
+                        return a.avg3D.CompareTo(b.avg3D);
+                    });
                     for (int i = 1; i < claimants.Count; i++)
                     {
                         needsRematch.Add(claimants[i].tsi);
@@ -1172,11 +1179,16 @@ namespace LightmapUvTool
 
                                 if (newIsMerged && !wasMerged && oldSrc >= 0 && !newSrcInOverlapGroup)
                                 {
+                                    // Use the new (unclaimed) source instead of the
+                                    // conflicting old one — merged+3D works from any source.
                                     UvtLog.Info($"[GroupedTransfer] Dedup: t{tsi} → merged+3D " +
-                                        $"(src{oldSrc}, new src{newSrc} would force merged)");
+                                        $"(src{oldSrc}→src{newSrc}, forced merged)");
+                                    result.targetShellToSourceShell[tsi] = newSrc;
+                                    result.targetShellMatchDistSqr[tsi] = newDistSq;
+                                    tgtChosenAvg3D[tsi] = newAvg3D;
+                                    claimed.Add(newSrc);
                                     tgtIsMerged[tsi] = true;
                                     tgtForce3DFallback[tsi] = true;
-                                    claimed.Add(oldSrc);
                                 }
                                 else if (newIsMerged && !wasMerged && oldSrc >= 0 && newSrcInOverlapGroup)
                                 {
@@ -1293,9 +1305,28 @@ namespace LightmapUvTool
                         needsRematch = stillUnresolved;
                     }
 
-                    // Any truly remaining unmatched — force to merged mode
+                    // Any truly remaining unmatched — try to find an unclaimed
+                    // source to avoid same-source duplicates, then force merged.
                     foreach (int tsi in needsRematch)
                     {
+                        Vector3 tCent = result.targetShellCentroids[tsi];
+                        int bestUnclaimed = -1;
+                        float bestDist = float.MaxValue;
+                        for (int s = 0; s < srcShells.Count; s++)
+                        {
+                            if (claimed.Contains(s)) continue;
+                            float d = (tCent - srcCentroid3D[s]).sqrMagnitude;
+                            if (d < bestDist) { bestUnclaimed = s; bestDist = d; }
+                        }
+                        if (bestUnclaimed >= 0)
+                        {
+                            int oldSrc2 = result.targetShellToSourceShell[tsi];
+                            UvtLog.Info($"[GroupedTransfer] Dedup forced-merged: t{tsi} " +
+                                $"src{oldSrc2}→src{bestUnclaimed} (unclaimed)");
+                            result.targetShellToSourceShell[tsi] = bestUnclaimed;
+                            result.targetShellMatchDistSqr[tsi] = bestDist;
+                            claimed.Add(bestUnclaimed);
+                        }
                         tgtIsMerged[tsi] = true;
                     }
 
