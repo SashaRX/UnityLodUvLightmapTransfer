@@ -348,13 +348,15 @@ namespace LightmapUvTool
 
                 // Composite score: surface distance + normal penalty.
                 // normalDot ∈ [-1,1]: 1 = same direction, -1 = opposite.
-                // Penalty = (1 - normalDot) * avgDist scales with geometry size,
-                // so wrong-side shells (dot ≈ -1) get ~2× distance penalty.
+                // Additive penalty ensures wrong-side shells are penalized even
+                // when surface distance is near zero (thin belts/straps where
+                // front and back are equidistant in 3D).
                 float score = avgDist;
                 if (useNormal && si < srcAvgNormal.Length)
                 {
                     float dot = Vector3.Dot(tgtNormal, srcAvgNormal[si]);
-                    score = avgDist * (1f + (1f - dot));
+                    float normalPenalty = Mathf.Max(0f, 1f - dot); // 0 for same dir, 2 for opposite
+                    score = avgDist + normalPenalty * goodDistSq * 10f;
                 }
 
                 if (score < bestScore)
@@ -364,7 +366,10 @@ namespace LightmapUvTool
                     chosenDistSq = ranked[attempt].distSq;
                     chosenAvg3D = avgDist;
                 }
-                if (chosenAvg3D < goodDistSq) break;
+                // Early exit only when SCORE (including normal penalty) is good.
+                // Using raw avgDist would skip wrong-side shells that are close
+                // in 3D but have opposing normals (common with thin belts/straps).
+                if (bestScore < goodDistSq) break;
             }
         }
 
