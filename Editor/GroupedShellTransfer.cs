@@ -1139,7 +1139,40 @@ namespace LightmapUvTool
 
                     if (claimants.Count <= 1) continue;
 
-                    // Multiple targets claim same source — keep the best.
+                    // Multiple targets claim same source. Check if they are
+                    // non-overlapping UV0 fragments (LOD polygon deletion splits
+                    // a shell into pieces that cover different UV0 sub-regions).
+                    // If their UV0 bboxes don't overlap, each can independently
+                    // use standard UV0→UV2 interpolation from the same source —
+                    // no conflict, no eviction needed.
+                    bool hasUv0Overlap = false;
+                    for (int i = 0; i < claimants.Count && !hasUv0Overlap; i++)
+                    {
+                        var shellA = tgtShells[claimants[i].tsi];
+                        for (int j = i + 1; j < claimants.Count && !hasUv0Overlap; j++)
+                        {
+                            var shellB = tgtShells[claimants[j].tsi];
+                            if (shellA.boundsMin.x < shellB.boundsMax.x &&
+                                shellA.boundsMax.x > shellB.boundsMin.x &&
+                                shellA.boundsMin.y < shellB.boundsMax.y &&
+                                shellA.boundsMax.y > shellB.boundsMin.y)
+                            {
+                                hasUv0Overlap = true;
+                            }
+                        }
+                    }
+
+                    if (!hasUv0Overlap)
+                    {
+                        // Non-overlapping UV0 fragments sharing a source — allow all
+                        // to stay. Each fragment covers a distinct UV0 sub-region,
+                        // so standard interpolation produces correct UV2 per fragment.
+                        UvtLog.Info($"[GroupedTransfer] Dedup: src{srcKey} has " +
+                            $"{claimants.Count} non-overlapping UV0 fragments — allowing shared source");
+                        continue;
+                    }
+
+                    // Truly overlapping UV0 (tiling/symmetric) — evict as before.
                     // Non-merged shells get priority (they need the specific UV0→UV2
                     // mapping); merged shells use 3D voting and work with any source.
                     claimants.Sort((a, b) =>
@@ -1360,10 +1393,10 @@ namespace LightmapUvTool
                 }
             }
 
-            // Post-dedup diagnostic: check for remaining same-source duplicates
-            // Also build duplicateSources set for Phase 3 — these sources are shared
-            // by multiple targets, so merged shells must stay constrained to avoid
-            // wandering into the sibling target's UV2 region.
+            // Post-dedup diagnostic: check for remaining same-source duplicates.
+            // Distinguish allowed shared-source fragments (non-overlapping UV0)
+            // from true duplicates (overlapping UV0 — tiling/symmetric).
+            // Only true duplicates go into duplicateSources for Phase 3 constraint.
             var duplicateSources = new HashSet<int>();
             {
                 var srcToTargets = new Dictionary<int, List<int>>();
@@ -1380,14 +1413,42 @@ namespace LightmapUvTool
                 }
                 foreach (var kv in srcToTargets)
                 {
-                    if (kv.Value.Count > 1)
+                    if (kv.Value.Count <= 1) continue;
+
+                    // Check if these targets have overlapping UV0 bboxes
+                    bool hasOverlap = false;
+                    for (int i = 0; i < kv.Value.Count && !hasOverlap; i++)
                     {
+                        var sA = tgtShells[kv.Value[i]];
+                        for (int j = i + 1; j < kv.Value.Count && !hasOverlap; j++)
+                        {
+                            var sB = tgtShells[kv.Value[j]];
+                            if (sA.boundsMin.x < sB.boundsMax.x &&
+                                sA.boundsMax.x > sB.boundsMin.x &&
+                                sA.boundsMin.y < sB.boundsMax.y &&
+                                sA.boundsMax.y > sB.boundsMin.y)
+                            {
+                                hasOverlap = true;
+                            }
+                        }
+                    }
+
+                    var labels = new List<string>();
+                    foreach (int tsi in kv.Value)
+                        labels.Add($"t{tsi}(merged={tgtIsMerged[tsi]})");
+
+                    if (hasOverlap)
+                    {
+                        // True overlap — constrain Phase 3
                         duplicateSources.Add(kv.Key);
-                        var merged = new List<string>();
-                        foreach (int tsi in kv.Value)
-                            merged.Add($"t{tsi}(merged={tgtIsMerged[tsi]})");
                         UvtLog.Warn($"[GroupedTransfer] POST-DEDUP DUPLICATE: src{kv.Key} " +
-                            $"claimed by {string.Join(", ", merged)}");
+                            $"claimed by {string.Join(", ", labels)}");
+                    }
+                    else
+                    {
+                        // Non-overlapping UV0 fragments sharing a source — expected
+                        UvtLog.Info($"[GroupedTransfer] Shared source (fragments): src{kv.Key} " +
+                            $"used by {string.Join(", ", labels)} — non-overlapping UV0, OK");
                     }
                 }
             }
