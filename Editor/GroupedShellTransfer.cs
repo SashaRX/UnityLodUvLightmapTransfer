@@ -1031,6 +1031,29 @@ namespace LightmapUvTool
                 }
             }
 
+            // ── Phase 2a-cov: 3D reverse-projection coverage check ──
+            // Дополняет UV0-based DetectMergedShell: проверяет, что геометрия
+            // target shell'а реально проецируется обратно на matched source shell в 3D.
+            // Шеллы с плохим 3D покрытием апгрейдятся в merged, чтобы использовать
+            // per-face 3D voting вместо UV0 интерполяции.
+            {
+                var srcNormals = sourceMesh.normals;
+                float coverageMaxDist = Mathf.Max(meshDiagonal * 0.05f, 0.01f);
+                float coverageMinDot = 0.5f; // ~60°
+
+                var cov3D = CoverageSplitSolver.ComputeShellCoverage3D(
+                    tgtShells, tVerts, tNormals, tgtTris,
+                    srcShells, srcVerts, srcNormals, srcTris,
+                    result.targetShellToSourceShell,
+                    coverageMaxDist, coverageMinDot);
+
+                int upgradedCount = CoverageSplitSolver.UpgradePoorCoverageToMerged(
+                    cov3D, tgtIsMerged, tgtIsFragmentMerged, 0.7f);
+
+                if (upgradedCount > 0)
+                    result.shellsMerged += upgradedCount;
+            }
+
             // ── Phase 2a+: Rescore merged shells with multi-criteria matching ──
             RescoreMergedShells(
                 tgtShells, srcShells,
