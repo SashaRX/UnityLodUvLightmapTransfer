@@ -1361,6 +1361,10 @@ namespace LightmapUvTool
             }
 
             // Post-dedup diagnostic: check for remaining same-source duplicates
+            // Also build duplicateSources set for Phase 3 — these sources are shared
+            // by multiple targets, so merged shells must stay constrained to avoid
+            // wandering into the sibling target's UV2 region.
+            var duplicateSources = new HashSet<int>();
             {
                 var srcToTargets = new Dictionary<int, List<int>>();
                 for (int tsi = 0; tsi < tgtShells.Count; tsi++)
@@ -1378,6 +1382,7 @@ namespace LightmapUvTool
                 {
                     if (kv.Value.Count > 1)
                     {
+                        duplicateSources.Add(kv.Key);
                         var merged = new List<string>();
                         foreach (int tsi in kv.Value)
                             merged.Add($"t{tsi}(merged={tgtIsMerged[tsi]})");
@@ -1471,11 +1476,14 @@ namespace LightmapUvTool
                     && tgtIsFragmentMerged[tsi];
                 if (tgtIsMerged[tsi] && chosenSrc >= 0 && srcShellOverlapMembers[chosenSrc] != null)
                 {
-                    // Fragment-merged shells: restrict to ONLY their merge source.
-                    // They need the overlap path's partition-aware candidate generation
-                    // (GenerateOverlapCandidates handles front/back UV0 overlap correctly),
-                    // but must NOT try other group members or build composite UV2.
-                    var groupMembers = isFragMergedShell
+                    // Fragment-merged shells OR duplicate-source shells: restrict to
+                    // ONLY their merge source. Fragment-merged need partition-aware
+                    // candidate generation but must not try other group members.
+                    // Duplicate-source shells share their source with a non-merged
+                    // sibling — trying other group members risks mixing UV2 regions
+                    // and creating cross-shell stretching artifacts.
+                    bool isDuplicateSrc = duplicateSources.Contains(chosenSrc);
+                    var groupMembers = (isFragMergedShell || isDuplicateSrc)
                         ? new List<int> { chosenSrc }
                         : srcShellOverlapMembers[chosenSrc];
 
@@ -2070,7 +2078,11 @@ namespace LightmapUvTool
                     // force3D: try all-source first (to find UV2 space in a different
                     // source region), fall back to constrained if overlap guard rejects.
                     // Normal merged: constrained first, all-source fallback (unchanged).
+                    // Exception: duplicate-source shells must stay constrained even in
+                    // force3D mode — all-source would match the sibling target's faces.
                     bool force3D = tgtForce3DFallback[tsi];
+                    bool isDupSrc = chosenSrc >= 0 && duplicateSources.Contains(chosenSrc);
+                    if (isDupSrc) force3D = false; // force constrained-first for dup sources
 
                     for (int pass = 0; pass < 2; pass++)
                     {
@@ -2103,6 +2115,10 @@ namespace LightmapUvTool
                                 // Small/degenerate shells: stay constrained to avoid
                                 // wandering into wrong source's UV2 region
                                 if (tShell.faceIndices.Count <= 4) break;
+                                // Duplicate-source shells share their source with a
+                                // sibling target — all-source would find faces from
+                                // other shells and drag vertices to wrong UV2 regions.
+                                if (chosenSrc >= 0 && duplicateSources.Contains(chosenSrc)) break;
                                 constrained = false;               // all-source
                             }
                         }
