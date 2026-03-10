@@ -4738,6 +4738,12 @@ namespace LightmapUvTool
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Full pipeline state reset: {deleted} sidecar(s) deleted, {fbxPaths.Count} FBX reimported");
             SwitchToPostApplyView();
+
+            // Enable post-reset coloring so fill colors visually change
+            postResetColoring = true;
+            shellColorKeyCache.Clear();
+            shellColorKeyCacheDirty = true;
+
             Repaint();
         }
 
@@ -4786,6 +4792,12 @@ namespace LightmapUvTool
             AssetDatabase.Refresh();
             UvtLog.Info($"[Reset] Deleted {deleted} sidecar(s), reimported {fbxPaths.Count} FBX");
             SwitchToPostApplyView();
+
+            // Enable post-reset coloring so fill colors visually change
+            postResetColoring = true;
+            shellColorKeyCache.Clear();
+            shellColorKeyCacheDirty = true;
+
             Repaint();
         }
 
