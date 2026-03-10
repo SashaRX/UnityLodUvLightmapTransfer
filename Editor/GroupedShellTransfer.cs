@@ -351,12 +351,15 @@ namespace LightmapUvTool
                 // Additive penalty ensures wrong-side shells are penalized even
                 // when surface distance is near zero (thin belts/straps where
                 // front and back are equidistant in 3D).
+                // Weight of 2× goodDistSq is enough to separate same-side from
+                // opposite for thin geometry, but won't overpower 3D distance
+                // for boxy models where correct source is clearly nearest.
                 float score = avgDist;
                 if (useNormal && si < srcAvgNormal.Length)
                 {
                     float dot = Vector3.Dot(tgtNormal, srcAvgNormal[si]);
                     float normalPenalty = Mathf.Max(0f, 1f - dot); // 0 for same dir, 2 for opposite
-                    score = avgDist + normalPenalty * goodDistSq * 10f;
+                    score = avgDist + normalPenalty * goodDistSq * 2f;
                 }
 
                 if (score < bestScore)
