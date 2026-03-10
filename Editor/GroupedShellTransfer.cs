@@ -2728,20 +2728,31 @@ namespace LightmapUvTool
 
                         if (bestF >= 0)
                         {
-                            // Compute unclamped (affine) barycentric for UV2.
-                            // Allows slight extrapolation but limits it to prevent
-                            // thin-shell UV2 from crossing into neighboring shells.
+                            // Compute UV2 via affine UV0→UV2 mapping, but detect
+                            // thin source triangles and fall back to clamped barycentrics.
                             Vector2 sA0 = triUv0A[bestF], sB0 = triUv0B[bestF], sC0 = triUv0C[bestF];
                             float det = (sB0.x - sA0.x) * (sC0.y - sA0.y)
                                       - (sC0.x - sA0.x) * (sB0.y - sA0.y);
-                            if (Mathf.Abs(det) > 1e-12f)
+
+                            // Aspect ratio: |det|/maxEdge² ≈ height/base.
+                            // Equilateral ≈ 0.87, thin strip (h/L=0.01) ≈ 0.01.
+                            float maxEdgeSq = Mathf.Max(
+                                (sB0 - sA0).sqrMagnitude,
+                                Mathf.Max((sC0 - sA0).sqrMagnitude, (sC0 - sB0).sqrMagnitude));
+                            float detNorm = maxEdgeSq > 1e-20f
+                                ? Mathf.Abs(det) / maxEdgeSq : 0f;
+
+                            if (detNorm > 0.05f && Mathf.Abs(det) > 1e-12f)
                             {
+                                // Normal triangle — unclamped affine with extrapolation limit
                                 uv2_interp[vi] = AffineUv0ToUv2(tUv, sA0, sB0, sC0,
                                     triUv2A[bestF], triUv2B[bestF], triUv2C[bestF], 1f / det);
                             }
                             else
                             {
-                                // Degenerate source face — use clamped fallback
+                                // Thin/degenerate source face — use clamped barycentrics
+                                // from PointToTri2D. Keeps UV2 within the correct source
+                                // triangle, avoiding wild extrapolation for thin strips.
                                 uv2_interp[vi] = triUv2A[bestF] * bestU
                                                + triUv2B[bestF] * bestV
                                                + triUv2C[bestF] * bestW;
@@ -2824,13 +2835,20 @@ namespace LightmapUvTool
                             }
                             if (srcF < 0) continue;
 
-                            // Affine UV0→UV2 through the single source face (unclamped bary)
+                            // Affine UV0→UV2 through the single source face
                             Vector2 sA0 = triUv0A[srcF], sB0 = triUv0B[srcF], sC0 = triUv0C[srcF];
                             float det = (sB0.x - sA0.x) * (sC0.y - sA0.y) - (sC0.x - sA0.x) * (sB0.y - sA0.y);
                             if (Mathf.Abs(det) < 1e-12f) continue;
-                            float invDet = 1f / det;
                             Vector2 sA2 = triUv2A[srcF], sB2 = triUv2B[srcF], sC2 = triUv2C[srcF];
 
+                            // Check source face aspect ratio — skip affine for thin triangles
+                            float rMaxEdgeSq = Mathf.Max(
+                                (sB0 - sA0).sqrMagnitude,
+                                Mathf.Max((sC0 - sA0).sqrMagnitude, (sC0 - sB0).sqrMagnitude));
+                            float rDetNorm = rMaxEdgeSq > 1e-20f ? Mathf.Abs(det) / rMaxEdgeSq : 0f;
+                            if (rDetNorm < 0.05f) continue; // thin source face — affine unreliable
+
+                            float invDet = 1f / det;
                             Vector2 na2 = AffineUv0ToUv2(a0, sA0, sB0, sC0, sA2, sB2, sC2, invDet);
                             Vector2 nb2 = AffineUv0ToUv2(b0, sA0, sB0, sC0, sA2, sB2, sC2, invDet);
                             Vector2 nc2 = AffineUv0ToUv2(c0, sA0, sB0, sC0, sA2, sB2, sC2, invDet);
