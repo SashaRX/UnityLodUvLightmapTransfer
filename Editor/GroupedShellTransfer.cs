@@ -286,7 +286,8 @@ namespace LightmapUvTool
             int maxRetries, float goodDistSq,
             HashSet<int> excludeSources,
             out int chosenSrc, out float chosenDistSq, out float chosenAvg3D,
-            Vector3 tgtNormal = default, Vector3[] srcAvgNormal = null)
+            Vector3 tgtNormal = default, Vector3[] srcAvgNormal = null,
+            float meshDiag = 0f)
         {
             chosenSrc = -1;
             chosenDistSq = float.MaxValue;
@@ -352,12 +353,13 @@ namespace LightmapUvTool
                 // when surface distance is near zero (thin belts/straps where
                 // front and back are equidistant in 3D).
                 float score = avgDist;
-                // Normal penalty temporarily disabled — testing PR46 parity.
-                // PR46 had no normal penalty; PR47's penalty changed matching
-                // for shells with moderate normal mismatch (e.g. box corners),
-                // causing 8 shells to be falsely detected as merged then rescued
-                // to wrong sources.
-                // TODO: re-enable with smarter gating (only for thin geometry)
+                if (useNormal && si < srcAvgNormal.Length)
+                {
+                    float dot = Vector3.Dot(tgtNormal, srcAvgNormal[si]);
+                    // Penalty: 0 when aligned (dot=1), meshDiagonal when opposite (dot=-1)
+                    float normalPenalty = meshDiag * (1f - dot) * 0.5f;
+                    score += normalPenalty;
+                }
 
                 if (score < bestScore)
                 {
@@ -1011,7 +1013,7 @@ namespace LightmapUvTool
                         shellBvh3D, shellBvh3DFaceMap,
                         tCentroid, kMaxRetries, kGoodDistSq, null,
                         out chosenSrc, out chosenDistSq, out chosenAvg3D,
-                        tgtAvgNormal[tsi], srcAvgNormal);
+                        tgtAvgNormal[tsi], srcAvgNormal, meshDiagonal);
                 }
 
                 if (chosenSrc < 0) continue;
@@ -1219,7 +1221,7 @@ namespace LightmapUvTool
                                 result.targetShellCentroids[tsi],
                                 kMaxRetries * 3, kGoodDistSq, claimed,
                                 out int newSrc, out float newDistSq, out float newAvg3D,
-                                tgtAvgNormal[tsi], srcAvgNormal);
+                                tgtAvgNormal[tsi], srcAvgNormal, meshDiagonal);
 
                             if (newSrc >= 0)
                             {
