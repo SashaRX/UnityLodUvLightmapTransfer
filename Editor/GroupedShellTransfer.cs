@@ -2729,6 +2729,29 @@ namespace LightmapUvTool
                     }
                     int issuesInterp = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_interp);
 
+                    // Diagnostic: break down issue types for debugging
+                    if (issuesInterp > 0)
+                    {
+                        int degCount = 0, flipCount = 0, missCount = 0;
+                        foreach (int fIdx in tShell.faceIndices)
+                        {
+                            int di0 = tgtTris[fIdx * 3], di1 = tgtTris[fIdx * 3 + 1], di2 = tgtTris[fIdx * 3 + 2];
+                            if (!uv2_interp.TryGetValue(di0, out var da2) ||
+                                !uv2_interp.TryGetValue(di1, out var db2) ||
+                                !uv2_interp.TryGetValue(di2, out var dc2))
+                            { missCount++; continue; }
+                            float dsa2 = SignedArea2D(da2, db2, dc2);
+                            if (Mathf.Abs(dsa2) < 1e-10f) { degCount++; continue; }
+                            if (di0 < tUv0.Length && di1 < tUv0.Length && di2 < tUv0.Length)
+                            {
+                                float dsa0 = SignedArea2D(tUv0[di0], tUv0[di1], tUv0[di2]);
+                                if (dsa0 * dsa2 < 0f) flipCount++;
+                            }
+                        }
+                        UvtLog.Info($"[GroupedTransfer]   t{tsi}: interp {issuesInterp}/{tShell.faceIndices.Count}f " +
+                            $"issues (degen={degCount} flip={flipCount} miss={missCount})");
+                    }
+
                     // ── Per-face repair for non-merged interpolation ──
                     // Per-vertex interpolation can produce issues when adjacent target vertices
                     // project to different source triangles: winding flips (sign mismatch) or
