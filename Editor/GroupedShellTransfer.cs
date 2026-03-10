@@ -2728,9 +2728,9 @@ namespace LightmapUvTool
 
                         if (bestF >= 0)
                         {
-                            // Use unclamped (affine) barycentric for UV2 to avoid
-                            // edge-clamping degeneracy when target vertex is outside
-                            // the source triangle in UV0 space.
+                            // Compute unclamped (affine) barycentric for UV2.
+                            // Allows slight extrapolation but limits it to prevent
+                            // thin-shell UV2 from crossing into neighboring shells.
                             Vector2 sA0 = triUv0A[bestF], sB0 = triUv0B[bestF], sC0 = triUv0C[bestF];
                             float det = (sB0.x - sA0.x) * (sC0.y - sA0.y)
                                       - (sC0.x - sA0.x) * (sB0.y - sA0.y);
@@ -2749,38 +2749,10 @@ namespace LightmapUvTool
                         }
                     }
 
-                    // ── Clamp interp UV2 to source shell AABB ──
-                    // Unclamped affine UV0→UV2 can extrapolate beyond the source shell's
-                    // UV2 region, especially for thin shells with small UV0 area.
-                    // This causes cross-shell UV2 overlaps visible as line-shells
-                    // crossing through neighboring rectangular shells.
-                    {
-                        Vector2 sMin = srcUv2Min[chosenSrc];
-                        Vector2 sMax = srcUv2Max[chosenSrc];
-                        Vector2 sSize = sMax - sMin;
-                        float padX = sSize.x * 0.005f;
-                        float padY = sSize.y * 0.005f;
-                        Vector2 clampMin = sMin - new Vector2(padX, padY);
-                        Vector2 clampMax = sMax + new Vector2(padX, padY);
-
-                        var clamped = new List<int>();
-                        foreach (var kv in uv2_interp)
-                        {
-                            Vector2 uv = kv.Value;
-                            if (uv.x < clampMin.x || uv.x > clampMax.x ||
-                                uv.y < clampMin.y || uv.y > clampMax.y)
-                                clamped.Add(kv.Key);
-                        }
-                        foreach (int vi in clamped)
-                        {
-                            Vector2 uv = uv2_interp[vi];
-                            uv.x = Mathf.Clamp(uv.x, clampMin.x, clampMax.x);
-                            uv.y = Mathf.Clamp(uv.y, clampMin.y, clampMax.y);
-                            uv2_interp[vi] = uv;
-                        }
-                        if (clamped.Count > 0)
-                            UvtLog.Verbose($"[GroupedTransfer]   t{tsi}: clamped {clamped.Count} interp verts to src{chosenSrc} UV2 AABB");
-                    }
+                    // NOTE: AABB clamping was removed — for diagonal thin shells the AABB
+                    // is far larger than the actual footprint and clamping to it is useless.
+                    // The barycentric extrapolation limit in the interp loop above (kMaxExtrap)
+                    // is the primary guard against cross-shell UV2 overlap.
 
                     int issuesInterp = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_interp);
 
@@ -3248,10 +3220,13 @@ namespace LightmapUvTool
         }
 
         /// <summary>
-        /// Unclamped affine UV0→UV2 map through a single source triangle.
+        /// Affine UV0→UV2 map through a single source triangle with extrapolation limit.
         /// Computes raw barycentric coords in source UV0 triangle and applies them
-        /// to source UV2 triangle.  Preserves winding by construction.
+        /// to source UV2 triangle. When any barycentric exceeds the extrapolation
+        /// limit, clamps all three to prevent thin-shell UV2 from crossing into
+        /// neighboring shells.  Preserves winding by construction.
         /// </summary>
+        const float kAffineMaxExtrap = 0.5f;
         static Vector2 AffineUv0ToUv2(Vector2 p, Vector2 a0, Vector2 b0, Vector2 c0,
             Vector2 a2, Vector2 b2, Vector2 c2, float invDet)
         {
@@ -3261,6 +3236,25 @@ namespace LightmapUvTool
             float u = (dx * cy - cx * dy) * invDet; // weight for b0/b2
             float v = (bx * dy - dx * by) * invDet; // weight for c0/c2
             float w = 1f - u - v;                   // weight for a0/a2
+
+            // Limit extrapolation to prevent thin-strip overlap
+            float minB = Mathf.Min(w, Mathf.Min(u, v));
+            float maxB = Mathf.Max(w, Mathf.Max(u, v));
+            if (minB < -kAffineMaxExtrap || maxB > 1f + kAffineMaxExtrap)
+            {
+                // Clamp barycentrics and renormalize
+                u = Mathf.Clamp(u, -kAffineMaxExtrap, 1f + kAffineMaxExtrap);
+                v = Mathf.Clamp(v, -kAffineMaxExtrap, 1f + kAffineMaxExtrap);
+                w = 1f - u - v;
+                // If w is also out of range, renormalize all
+                if (w < -kAffineMaxExtrap || w > 1f + kAffineMaxExtrap)
+                {
+                    w = Mathf.Clamp(w, -kAffineMaxExtrap, 1f + kAffineMaxExtrap);
+                    float s = u + v + w;
+                    if (Mathf.Abs(s) > 1e-8f) { float inv = 1f / s; u *= inv; v *= inv; w *= inv; }
+                }
+            }
+
             return a2 * w + b2 * u + c2 * v;
         }
 
