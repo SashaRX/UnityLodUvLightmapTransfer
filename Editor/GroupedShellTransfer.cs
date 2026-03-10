@@ -2706,7 +2706,26 @@ namespace LightmapUvTool
                         }
 
                         if (bestF >= 0)
-                            uv2_interp[vi] = triUv2A[bestF] * bestU + triUv2B[bestF] * bestV + triUv2C[bestF] * bestW;
+                        {
+                            // Use unclamped (affine) barycentric for UV2 to avoid
+                            // edge-clamping degeneracy when target vertex is outside
+                            // the source triangle in UV0 space.
+                            Vector2 sA0 = triUv0A[bestF], sB0 = triUv0B[bestF], sC0 = triUv0C[bestF];
+                            float det = (sB0.x - sA0.x) * (sC0.y - sA0.y)
+                                      - (sC0.x - sA0.x) * (sB0.y - sA0.y);
+                            if (Mathf.Abs(det) > 1e-12f)
+                            {
+                                uv2_interp[vi] = AffineUv0ToUv2(tUv, sA0, sB0, sC0,
+                                    triUv2A[bestF], triUv2B[bestF], triUv2C[bestF], 1f / det);
+                            }
+                            else
+                            {
+                                // Degenerate source face — use clamped fallback
+                                uv2_interp[vi] = triUv2A[bestF] * bestU
+                                               + triUv2B[bestF] * bestV
+                                               + triUv2C[bestF] * bestW;
+                            }
+                        }
                     }
                     int issuesInterp = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_interp);
 
