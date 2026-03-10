@@ -347,18 +347,20 @@ namespace LightmapUvTool
 
                 float avgDist = sampled > 0 ? totalDistSq / sampled : float.MaxValue;
 
-                // Composite score: surface distance + normal penalty.
+                // Composite score: surface distance × normal factor.
                 // normalDot ∈ [-1,1]: 1 = same direction, -1 = opposite.
-                // Additive penalty ensures wrong-side shells are penalized even
-                // when surface distance is near zero (thin belts/straps where
-                // front and back are equidistant in 3D).
+                // Multiplicative factor ensures wrong-side shells are penalized
+                // proportionally to distance — disambiguates equidistant surfaces
+                // (thin belts/straps) without overwhelming clearly-closer matches.
                 float score = avgDist;
                 if (useNormal && si < srcAvgNormal.Length)
                 {
                     float dot = Vector3.Dot(tgtNormal, srcAvgNormal[si]);
-                    // Penalty: 0 when aligned (dot=1), meshDiagonal when opposite (dot=-1)
-                    float normalPenalty = meshDiag * (1f - dot) * 0.5f;
-                    score += normalPenalty;
+                    // Multiplicative penalty: scales with distance so it disambiguates
+                    // equidistant surfaces (thin belts/straps) without overwhelming
+                    // clearly-closer matches (small detail shells on kiosks etc.).
+                    // Factor: 1.0 when aligned (dot=1), 3.0 when opposite (dot=-1).
+                    score *= 1f + (1f - dot);
                 }
 
                 if (score < bestScore)
@@ -3737,7 +3739,7 @@ namespace LightmapUvTool
                 // Source UV0 overlaps with other source shells (front/back belt,
                 // tiling). Fragments from different physical sides must NOT be
                 // merged — they need unique UV2 regions. Skip this group entirely;
-                // the additive normal penalty in FindBestSourceShell ensures each
+                // the multiplicative normal penalty in FindBestSourceShell ensures each
                 // fragment matches the correct side, and dedup shared-source logic
                 // handles the rest.
                 if (srcHasUv0Overlap[kv.Key])
