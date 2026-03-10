@@ -2643,18 +2643,39 @@ namespace LightmapUvTool
                         {
                             // Check if extrapolated region crosses into another source
                             // shell's UV2 AABB — if so, force interp to prevent overlap.
+                            bool crossesOther = false;
                             for (int si = 0; si < srcShells.Count; si++)
                             {
                                 if (si == chosenSrc) continue;
                                 if (xfBMin.x < srcUv2Max[si].x && xfBMax.x > srcUv2Min[si].x &&
                                     xfBMin.y < srcUv2Max[si].y && xfBMax.y > srcUv2Min[si].y)
                                 {
+                                    crossesOther = true;
                                     issuesTransform = int.MaxValue;
                                     break;
                                 }
                             }
-                            if (issuesTransform < int.MaxValue)
+                            if (!crossesOther)
+                            {
+                                // Doesn't cross another shell, but still OOB — clamp to source AABB
+                                Vector2 cMin = srcBMin2 - new Vector2(kOobMargin, kOobMargin);
+                                Vector2 cMax = srcBMax2 + new Vector2(kOobMargin, kOobMargin);
+                                var oobKeys = new List<int>();
+                                foreach (var kv in uv2_transform)
+                                {
+                                    Vector2 uv = kv.Value;
+                                    if (uv.x < cMin.x || uv.x > cMax.x || uv.y < cMin.y || uv.y > cMax.y)
+                                        oobKeys.Add(kv.Key);
+                                }
+                                foreach (int vi in oobKeys)
+                                {
+                                    Vector2 uv = uv2_transform[vi];
+                                    uv.x = Mathf.Clamp(uv.x, cMin.x, cMax.x);
+                                    uv.y = Mathf.Clamp(uv.y, cMin.y, cMax.y);
+                                    uv2_transform[vi] = uv;
+                                }
                                 issuesTransform += xfOob;
+                            }
                         }
                     }
 
@@ -2727,6 +2748,40 @@ namespace LightmapUvTool
                             }
                         }
                     }
+
+                    // ── Clamp interp UV2 to source shell AABB ──
+                    // Unclamped affine UV0→UV2 can extrapolate beyond the source shell's
+                    // UV2 region, especially for thin shells with small UV0 area.
+                    // This causes cross-shell UV2 overlaps visible as line-shells
+                    // crossing through neighboring rectangular shells.
+                    {
+                        Vector2 sMin = srcUv2Min[chosenSrc];
+                        Vector2 sMax = srcUv2Max[chosenSrc];
+                        Vector2 sSize = sMax - sMin;
+                        float padX = sSize.x * 0.005f;
+                        float padY = sSize.y * 0.005f;
+                        Vector2 clampMin = sMin - new Vector2(padX, padY);
+                        Vector2 clampMax = sMax + new Vector2(padX, padY);
+
+                        var clamped = new List<int>();
+                        foreach (var kv in uv2_interp)
+                        {
+                            Vector2 uv = kv.Value;
+                            if (uv.x < clampMin.x || uv.x > clampMax.x ||
+                                uv.y < clampMin.y || uv.y > clampMax.y)
+                                clamped.Add(kv.Key);
+                        }
+                        foreach (int vi in clamped)
+                        {
+                            Vector2 uv = uv2_interp[vi];
+                            uv.x = Mathf.Clamp(uv.x, clampMin.x, clampMax.x);
+                            uv.y = Mathf.Clamp(uv.y, clampMin.y, clampMax.y);
+                            uv2_interp[vi] = uv;
+                        }
+                        if (clamped.Count > 0)
+                            UvtLog.Verbose($"[GroupedTransfer]   t{tsi}: clamped {clamped.Count} interp verts to src{chosenSrc} UV2 AABB");
+                    }
+
                     int issuesInterp = CountShellIssues(tShell.faceIndices, tgtTris, tUv0, uv2_interp);
 
                     // Diagnostic: break down issue types for debugging
