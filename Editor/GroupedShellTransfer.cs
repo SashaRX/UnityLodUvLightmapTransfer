@@ -2929,18 +2929,11 @@ namespace LightmapUvTool
                                 UvtLog.Info($"[GroupedTransfer]   t{tsi}: border repair — {spanRepairs} spanning faces re-projected");
                         }
 
-                        // Pass 2: snap UV2 vertices to nearest source UV2 triangle
-                        // For thin shells, the source UV2 footprint is a narrow strip; any
-                        // vertex outside this strip would overlap neighboring shells.
-                        // Compute source shell fill ratio to detect thin shells.
-                        float srcTriUv2Area = 0f;
-                        foreach (int f in srcFacesChosen)
-                            srcTriUv2Area += Mathf.Abs(SignedArea2D(triUv2A[f], triUv2B[f], triUv2C[f]));
-                        Vector2 srcShellSize = srcUv2Max[chosenSrc] - srcUv2Min[chosenSrc];
-                        float srcAabbArea = srcShellSize.x * srcShellSize.y;
-                        float fillRatio = (srcAabbArea > 1e-12f) ? srcTriUv2Area / srcAabbArea : 1f;
-
-                        if (fillRatio < 0.3f) // thin shell — snap all UV2 to source geometry
+                        // Pass 2: snap UV2 vertices to nearest source UV2 triangle.
+                        // Any vertex whose UV2 lands outside the source shell's actual
+                        // UV2 triangles gets projected back onto the nearest triangle.
+                        // For normal shells this is a no-op (vertices are already inside).
+                        // For thin shells this prevents UV2 from escaping the narrow strip.
                         {
                             int snapped = 0;
                             foreach (int vi in tShell.vertexIndices)
@@ -2966,8 +2959,7 @@ namespace LightmapUvTool
                                 }
                             }
                             if (snapped > 0)
-                                UvtLog.Info($"[GroupedTransfer]   t{tsi}: border snap — {snapped}/{tShell.vertexIndices.Count} " +
-                                    $"verts snapped to source UV2 (fill={fillRatio:F3})");
+                                UvtLog.Info($"[GroupedTransfer]   t{tsi}: border snap — {snapped}/{tShell.vertexIndices.Count} verts");
                         }
                     }
 
@@ -3335,7 +3327,7 @@ namespace LightmapUvTool
         /// limit, clamps all three to prevent thin-shell UV2 from crossing into
         /// neighboring shells.  Preserves winding by construction.
         /// </summary>
-        const float kAffineMaxExtrap = 0.0f;
+        const float kAffineMaxExtrap = 0.5f;
         static Vector2 AffineUv0ToUv2(Vector2 p, Vector2 a0, Vector2 b0, Vector2 c0,
             Vector2 a2, Vector2 b2, Vector2 c2, float invDet)
         {
