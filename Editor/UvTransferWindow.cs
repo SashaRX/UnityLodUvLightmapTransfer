@@ -321,6 +321,7 @@ namespace LightmapUvTool
             // Safety: restore any preview state left from prior session (crash, domain reload)
             if (CheckerTexturePreview.IsActive) CheckerTexturePreview.Restore();
             if (ShellColorModelPreview.IsActive) ShellColorModelPreview.Restore();
+            RestoreLightmapPreview();
             checkerEnabled = false;
             shellColorPreviewEnabled = false;
             previewMode = PreviewMode.Off;
@@ -373,10 +374,12 @@ namespace LightmapUvTool
             if (texMat) DestroyImmediate(texMat);
             if (spotMat) DestroyImmediate(spotMat);
             if (shellOverlayMat) DestroyImmediate(shellOverlayMat);
+            if (lightmapPreviewMat) DestroyImmediate(lightmapPreviewMat);
             glMat = null;
             texMat = null;
             spotMat = null;
             shellOverlayMat = null;
+            lightmapPreviewMat = null;
         }
 
         void OnSelectionChange()
@@ -631,6 +634,8 @@ namespace LightmapUvTool
                 ReapplyCheckerToSelection();
             if (shellColorPreviewEnabled)
                 ReapplyShellColorPreview();
+            if (lightmapPreviewActive)
+                ApplyLightmapPreview();
 
             Repaint();
             SceneView.RepaintAll();
@@ -3195,6 +3200,7 @@ namespace LightmapUvTool
             public MeshFilter meshFilter;
             public Mesh origMesh;
             public Mesh tempMesh;
+            public Material tempMat;
         }
         readonly List<LightmapBackup> lightmapBackups = new List<LightmapBackup>();
         Material lightmapPreviewMat;
@@ -3258,7 +3264,8 @@ namespace LightmapUvTool
                     origMaterials = renderer.sharedMaterials,
                     meshFilter = mf,
                     origMesh = mf != null ? mf.sharedMesh : null,
-                    tempMesh = tempMesh
+                    tempMesh = tempMesh,
+                    tempMat = mat
                 };
 
                 if (mf != null && tempMesh != null) mf.sharedMesh = tempMesh;
@@ -3271,6 +3278,9 @@ namespace LightmapUvTool
             SceneView.RepaintAll();
         }
 
+        /// <summary>Called by PreviewSafetyGuard on domain reload / play mode / scene save.</summary>
+        internal void RestoreLightmapPreviewSafe() => RestoreLightmapPreview();
+
         void RestoreLightmapPreview()
         {
             foreach (var b in lightmapBackups)
@@ -3278,6 +3288,7 @@ namespace LightmapUvTool
                 if (b.renderer != null) b.renderer.sharedMaterials = b.origMaterials;
                 if (b.meshFilter != null && b.origMesh != null) b.meshFilter.sharedMesh = b.origMesh;
                 if (b.tempMesh != null) DestroyImmediate(b.tempMesh);
+                if (b.tempMat != null) DestroyImmediate(b.tempMat);
             }
             lightmapBackups.Clear();
             if (lightmapPreviewActive) SceneView.RepaintAll();
