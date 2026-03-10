@@ -62,15 +62,9 @@ namespace LightmapUvTool
                 for (int i = 0; i < triangleToShell.Length; i++) triangleToShell[i] = -1;
 
                 foreach (var shell in shells)
-                {
-                    // Use stable descriptor hash instead of raw shellId for consistent colors
-                    int colorKey = shell.hasDescriptor
-                        ? Mathf.Abs(shell.descriptor.stableHash)
-                        : shell.shellId;
                     foreach (int faceIndex in shell.faceIndices)
                         if (faceIndex >= 0 && faceIndex < triangleToShell.Length)
-                            triangleToShell[faceIndex] = colorKey;
-                }
+                            triangleToShell[faceIndex] = shell.shellId;
 
                 return triangleToShell;
             }

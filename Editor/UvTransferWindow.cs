@@ -3984,42 +3984,25 @@ namespace LightmapUvTool
                 return faceKeys;
             }
 
-            // Extract UV0 shells for this mesh
-            var (v2s, descs) = GetUv0ShellMap(mesh);
+            // Extract shells from UV2 (lightmap UV) — UV2 is transferred from LOD0,
+            // so UV2-based shells have consistent structure across LODs.
+            // Use shellId (sequential extraction order) for coloring — it's stable
+            // because Union-Find processes faces in triangle-buffer order.
+            var uv2List = new List<Vector2>();
+            mesh.GetUVs(1, uv2List);
+            Vector2[] uv = uv2List.Count == mesh.vertexCount ? uv2List.ToArray() : mesh.uv;
+            if (uv == null || uv.Length != mesh.vertexCount)
+                return faceKeys;
 
-            // Transfer mapping (target LODs): map vertices → source shell → source descriptor
-            var map = entry?.shellTransferResult?.vertexToSourceShell;
-            ShellDescriptor[] srcDescs = (map != null) ? GetSourceDescriptors(entry) : null;
+            List<UvShell> shells;
+            try { shells = UvShellExtractor.Extract(uv, tris); }
+            catch { return faceKeys; }
 
-            for (int face = 0; face < faceCount; face++)
-            {
-                int triBase = face * 3;
-                int i0 = tris[triBase], i1 = tris[triBase + 1], i2 = tris[triBase + 2];
+            foreach (var shell in shells)
+                foreach (int fi in shell.faceIndices)
+                    if (fi >= 0 && fi < faceCount)
+                        faceKeys[fi] = shell.shellId;
 
-                // Priority 1: Transfer mapping to source descriptors
-                if (map != null && srcDescs != null)
-                {
-                    int bestKey = VoteBestShell(map, mesh.vertexCount, i0, i1, i2);
-                    if (bestKey >= 0 && bestKey < srcDescs.Length)
-                    {
-                        faceKeys[face] = Mathf.Abs(srcDescs[bestKey].stableHash);
-                        continue;
-                    }
-                }
-
-                // Priority 2: UV0 shell descriptors
-                if (v2s != null && descs != null)
-                {
-                    int bestKey = VoteBestShell(v2s, mesh.vertexCount, i0, i1, i2);
-                    if (bestKey >= 0 && bestKey < descs.Length)
-                    {
-                        faceKeys[face] = Mathf.Abs(descs[bestKey].stableHash);
-                        continue;
-                    }
-                }
-
-                faceKeys[face] = face; // fallback
-            }
             return faceKeys;
         }
 
