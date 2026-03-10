@@ -316,6 +316,7 @@ namespace LightmapUvTool
         void OnEnable()
         {
             wantsMouseMove = true;
+            titleContent = new GUIContent("Lightmap UV Tool v" + Uv2DataAsset.ToolVersionStr);
 
             // Safety: restore any preview state left from prior session (crash, domain reload)
             if (CheckerTexturePreview.IsActive) CheckerTexturePreview.Restore();
