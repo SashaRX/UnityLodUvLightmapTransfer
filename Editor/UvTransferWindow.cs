@@ -51,7 +51,7 @@ namespace LightmapUvTool
         Dictionary<int, bool> lodFoldouts = new Dictionary<int, bool>();
         Dictionary<int, bool> transferLodFoldouts = new Dictionary<int, bool>();
         Dictionary<int, bool> reportLodFoldouts = new Dictionary<int, bool>();
-        enum Tab { Setup, Repack, Transfer }
+        enum Tab { Setup, Repack, Transfer, Uv0Optimizer }
         Tab tab = Tab.Setup;
         bool hasRepack, hasTransfer;
         bool splitTargetsInSymmetryStep;
@@ -704,6 +704,7 @@ namespace LightmapUvTool
             TBtn("Setup", Tab.Setup);
             TBtn("Repack", Tab.Repack);
             TBtn("Transfer", Tab.Transfer);
+            TBtn("UV0 Optimizer", Tab.Uv0Optimizer);
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.Space(2);
@@ -712,6 +713,7 @@ namespace LightmapUvTool
                 case Tab.Setup:    DrawSetup();    break;
                 case Tab.Repack:   DrawRepack();   break;
                 case Tab.Transfer: DrawTransfer(); break;
+                case Tab.Uv0Optimizer: DrawUv0Optimizer(); break;
             }
         }
 
@@ -900,6 +902,122 @@ namespace LightmapUvTool
                         GUI.contentColor = cc;
                     }
                 }
+            }
+        }
+
+        // ──────────────── UV0 Optimizer ────────────────
+
+        // UV0 Optimizer state
+        float optSimilarityThreshold = 0.85f;
+        float optMaxSizeRatio = 3f;
+        int   optAtlasSize = 2048;
+        int   optPaddingPx = 4;
+        string optPostfix = "_repack";
+        float optWeightAlbedo = 0.50f;
+        float optWeightNormal = 0.30f;
+        float optWeightGloss  = 0.12f;
+        float optWeightAo     = 0.08f;
+
+        // Analysis results
+        Uv0Optimizer.AnalysisResult optAnalysisResult;
+        bool optHasAnalysis;
+
+        void DrawUv0Optimizer()
+        {
+            H("UV0 Atlas Optimizer");
+            if (lodGroup == null) { Warn("Set LODGroup first."); return; }
+
+            EditorGUILayout.HelpBox(
+                "Detects visually identical UV0 shells, overlaps them, and bakes a smaller texture atlas.\n" +
+                "UV0 is modified (overlapping groups). UV2 is NOT touched.",
+                MessageType.Info);
+
+            EditorGUILayout.Space(4);
+
+            // ── Target ──
+            EditorGUILayout.LabelField("Similarity Settings", EditorStyles.boldLabel);
+            EditorGUI.indentLevel++;
+            optSimilarityThreshold = EditorGUILayout.Slider("Threshold", optSimilarityThreshold, 0.5f, 1f);
+            optMaxSizeRatio = EditorGUILayout.Slider("Max Size Ratio", optMaxSizeRatio, 1f, 10f);
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField("Channel Weights", EditorStyles.miniLabel);
+            optWeightAlbedo = EditorGUILayout.Slider("  Albedo", optWeightAlbedo, 0f, 1f);
+            optWeightNormal = EditorGUILayout.Slider("  Normal", optWeightNormal, 0f, 1f);
+            optWeightGloss  = EditorGUILayout.Slider("  Gloss",  optWeightGloss,  0f, 1f);
+            optWeightAo     = EditorGUILayout.Slider("  AO",     optWeightAo,     0f, 1f);
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Packer Settings", EditorStyles.boldLabel);
+            EditorGUI.indentLevel++;
+            optAtlasSize = EditorGUILayout.IntPopup("Atlas Size", optAtlasSize,
+                new[]{"512","1024","2048","4096"}, new[]{512,1024,2048,4096});
+            optPaddingPx = EditorGUILayout.IntSlider("Padding", optPaddingPx, 0, 16);
+            optPostfix = EditorGUILayout.TextField("Output Postfix", optPostfix);
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.Space(6);
+
+            // ── Analyze button ──
+            ColorBtn(new Color(.4f,.7f,1f), "Analyze Shells", 26, () =>
+            {
+                try
+                {
+                    var weights = new Uv0Optimizer.SimilarityWeights
+                    {
+                        albedo = optWeightAlbedo,
+                        normal = optWeightNormal,
+                        gloss  = optWeightGloss,
+                        ao     = optWeightAo
+                    };
+                    optAnalysisResult = Uv0Optimizer.Analyze(lodGroup, optSimilarityThreshold,
+                        optMaxSizeRatio, weights);
+                    optHasAnalysis = true;
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogError("[UV0 Optimizer] Analysis failed: " + ex);
+                    optHasAnalysis = false;
+                }
+            });
+
+            // ── Analysis results ──
+            if (optHasAnalysis && optAnalysisResult != null)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField("Analysis Results", EditorStyles.boldLabel);
+                EditorGUI.indentLevel++;
+                EditorGUILayout.LabelField("Total shells (LOD0):", optAnalysisResult.totalShells.ToString());
+                EditorGUILayout.LabelField("Groups formed:", optAnalysisResult.groupCount.ToString());
+                EditorGUILayout.LabelField("Monotone shells:", optAnalysisResult.monotoneCount.ToString());
+                EditorGUILayout.LabelField("Est. occupancy saving:", (optAnalysisResult.estimatedSaving * 100f).ToString("F1") + "%");
+                EditorGUI.indentLevel--;
+
+                EditorGUILayout.Space(6);
+
+                // ── Pack & Bake button ──
+                ColorBtn(new Color(.3f,.8f,.4f), "Pack && Bake", 26, () =>
+                {
+                    try
+                    {
+                        var settings = new Uv0Optimizer.PackBakeSettings
+                        {
+                            atlasSize = optAtlasSize,
+                            padding   = optPaddingPx,
+                            postfix   = optPostfix
+                        };
+                        Uv0Optimizer.PackAndBake(lodGroup, optAnalysisResult, settings);
+                        EditorUtility.DisplayDialog("UV0 Optimizer", "Pack & Bake complete!", "OK");
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogError("[UV0 Optimizer] Pack & Bake failed: " + ex);
+                    }
+                    finally
+                    {
+                        EditorUtility.ClearProgressBar();
+                    }
+                });
             }
         }
 
