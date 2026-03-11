@@ -1409,6 +1409,13 @@ namespace LightmapUvTool
             // Distinguish allowed shared-source fragments (non-overlapping UV0)
             // from true duplicates (overlapping UV0 — tiling/symmetric).
             // Only true duplicates go into duplicateSources for Phase 3 constraint.
+            //
+            // Also build fragment-restricted face lists and BVHs for shared sources
+            // with non-overlapping UV0 fragments. This prevents cross-fragment
+            // interpolation where a target vertex's UV0 is geometrically closer to
+            // the wrong fragment's faces, causing UV2 to jump to the wrong region.
+            var fragmentRestrictedFaces = new Dictionary<int, List<int>>();
+            var fragmentRestrictedBvh = new Dictionary<int, TriangleBvh2D>();
             var duplicateSources = new HashSet<int>();
             {
                 var srcToTargets = new Dictionary<int, List<int>>();
@@ -1461,6 +1468,41 @@ namespace LightmapUvTool
                         // Non-overlapping UV0 fragments sharing a source — expected
                         UvtLog.Info($"[GroupedTransfer] Shared source (fragments): src{kv.Key} " +
                             $"used by {string.Join(", ", labels)} — non-overlapping UV0, OK");
+
+                        // Build restricted face lists/BVHs so each target only searches
+                        // within its own UV0 sub-region of the shared source.
+                        // Without this, BVH FindNearest may return a triangle from the
+                        // wrong fragment, causing UV2 to jump to the wrong region.
+                        var allFaces = srcShells[kv.Key].faceIndices;
+                        foreach (int tsi2 in kv.Value)
+                        {
+                            var ts = tgtShells[tsi2];
+                            Vector2 sz = ts.boundsMax - ts.boundsMin;
+                            Vector2 pad = new Vector2(
+                                Mathf.Max(sz.x * 0.15f, 0.002f),
+                                Mathf.Max(sz.y * 0.15f, 0.002f));
+                            Vector2 aMin = ts.boundsMin - pad;
+                            Vector2 aMax = ts.boundsMax + pad;
+
+                            var restricted = new List<int>();
+                            foreach (int f in allFaces)
+                            {
+                                Vector2 fa = triUv0A[f], fb = triUv0B[f], fc = triUv0C[f];
+                                Vector2 fMin = Vector2.Min(fa, Vector2.Min(fb, fc));
+                                Vector2 fMax = Vector2.Max(fa, Vector2.Max(fb, fc));
+                                if (fMin.x <= aMax.x && fMax.x >= aMin.x &&
+                                    fMin.y <= aMax.y && fMax.y >= aMin.y)
+                                    restricted.Add(f);
+                            }
+
+                            if (restricted.Count > 0 && restricted.Count < allFaces.Count)
+                            {
+                                fragmentRestrictedFaces[tsi2] = restricted;
+                                if (restricted.Count >= kMinFacesForShellBvh)
+                                    fragmentRestrictedBvh[tsi2] = new TriangleBvh2D(
+                                        triUv0A, triUv0B, triUv0C, restricted.ToArray());
+                            }
+                        }
                     }
                 }
             }
@@ -1538,6 +1580,11 @@ namespace LightmapUvTool
 
                 shellsMatched++;
                 var srcFacesChosen = chosenSrc >= 0 ? srcShells[chosenSrc].faceIndices : null;
+
+                // Use fragment-restricted faces when this target shares a source
+                // with non-overlapping UV0 fragments (prevents cross-fragment UV2 bleed)
+                if (fragmentRestrictedFaces.TryGetValue(tsi, out var rFaces))
+                    srcFacesChosen = rFaces;
 
                 Dictionary<int, Vector2> chosenUv2;
 
@@ -2532,8 +2579,10 @@ namespace LightmapUvTool
 
                         if (outsideVerts.Count > 0 && insideCount > outsideVerts.Count)
                         {
-                            var cBvh = shellUv0Bvh[chosenSrc];
-                            var cFaces = srcShells[chosenSrc].faceIndices;
+                            var cBvh = fragmentRestrictedBvh.TryGetValue(tsi, out var crBvh)
+                                ? crBvh : shellUv0Bvh[chosenSrc];
+                            var cFaces = fragmentRestrictedFaces.TryGetValue(tsi, out var crFaces)
+                                ? crFaces : srcShells[chosenSrc].faceIndices;
                             int coherenceFixed = 0;
 
                             foreach (int vi in outsideVerts)
@@ -2688,7 +2737,10 @@ namespace LightmapUvTool
 
                     // Candidate B: per-vertex UV0 interpolation (BVH + normal filtering for thin details)
                     var uv2_interp = new Dictionary<int, Vector2>();
-                    var srcBvh = shellUv0Bvh[chosenSrc]; // may be null for small shells
+                    // Use fragment-restricted BVH when available (shared source with
+                    // non-overlapping UV0 fragments) to prevent cross-fragment UV2 bleed
+                    var srcBvh = fragmentRestrictedBvh.TryGetValue(tsi, out var rBvh)
+                        ? rBvh : shellUv0Bvh[chosenSrc]; // may be null for small shells
                     foreach (int vi in tShell.vertexIndices)
                     {
                         if (vi >= tUv0.Length) continue;
@@ -2941,6 +2993,9 @@ namespace LightmapUvTool
                 UvtLog.Info(fpSb.ToString());
             }
 
+            // ── Shell topology consistency: detect & fix displaced vertices ──
+            EnforceShellTopologyOnUv2(result.uv2, tVerts, tgtTris, tgtShells);
+
             // UV2 bounds check
             int oob = 0;
             Vector2 uvMin = Vector2.one * float.MaxValue, uvMax = Vector2.one * float.MinValue;
@@ -2972,6 +3027,220 @@ namespace LightmapUvTool
             result.overlapHints = hints;
 
             return result;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Shell topology consistency: detect & fix displaced vertices
+        //  Works on raw UV2 array + UvShell list (independent of TargetTransferState)
+        // ═══════════════════════════════════════════════════════════
+
+        static void EnforceShellTopologyOnUv2(
+            Vector2[] uv2, Vector3[] verts, int[] triangles, List<UvShell> shells)
+        {
+            if (uv2 == null || uv2.Length == 0) return;
+
+            int faceCount = triangles.Length / 3;
+
+            // Build adjacency and face lists
+            var vertNeighbors = new Dictionary<int, HashSet<int>>();
+            var vertexToFaces = new Dictionary<int, List<int>>();
+
+            for (int f = 0; f < faceCount; f++)
+            {
+                for (int j = 0; j < 3; j++)
+                {
+                    int vi = triangles[f * 3 + j];
+
+                    if (!vertexToFaces.TryGetValue(vi, out var fList))
+                    {
+                        fList = new List<int>();
+                        vertexToFaces[vi] = fList;
+                    }
+                    fList.Add(f);
+
+                    int v0 = vi;
+                    int v1 = triangles[f * 3 + (j + 1) % 3];
+
+                    if (!vertNeighbors.TryGetValue(v0, out var n0))
+                    {
+                        n0 = new HashSet<int>();
+                        vertNeighbors[v0] = n0;
+                    }
+                    n0.Add(v1);
+
+                    if (!vertNeighbors.TryGetValue(v1, out var n1))
+                    {
+                        n1 = new HashSet<int>();
+                        vertNeighbors[v1] = n1;
+                    }
+                    n1.Add(v0);
+                }
+            }
+
+            // Iterative Laplacian displacement detection (max 3 passes)
+            int totalFixed = 0;
+            const float displacementThreshold = 2.0f;
+
+            for (int iteration = 0; iteration < 3; iteration++)
+            {
+                var candidates = new List<(int vi, float ratio)>();
+
+                foreach (var kv in vertNeighbors)
+                {
+                    int vi = kv.Key;
+                    var neighbors = kv.Value;
+
+                    if (neighbors.Count < 2) continue;
+                    if (vi >= uv2.Length) continue;
+
+                    Vector2 actualUv = uv2[vi];
+                    if (float.IsNaN(actualUv.x) || float.IsNaN(actualUv.y)) continue;
+
+                    // Laplacian prediction
+                    Vector2 predicted = Vector2.zero;
+                    float totalW = 0f;
+                    foreach (int ni in neighbors)
+                    {
+                        float len3D = (verts[vi] - verts[ni]).magnitude;
+                        float w = 1f / Mathf.Max(len3D, 1e-6f);
+                        predicted += uv2[ni] * w;
+                        totalW += w;
+                    }
+                    if (totalW < 1e-6f) continue;
+                    predicted /= totalW;
+
+                    float displacement = (actualUv - predicted).magnitude;
+
+                    // Local scale: average neighbor-to-neighbor UV edge length (excluding vi)
+                    float neighborEdgeSum = 0f;
+                    int neighborEdgeCount = 0;
+                    foreach (int ni in neighbors)
+                    {
+                        if (!vertNeighbors.TryGetValue(ni, out var niN)) continue;
+                        foreach (int nni in niN)
+                        {
+                            if (nni == vi) continue;
+                            neighborEdgeSum += (uv2[ni] - uv2[nni]).magnitude;
+                            neighborEdgeCount++;
+                        }
+                    }
+                    if (neighborEdgeCount == 0) continue;
+                    float avgNeighborEdge = neighborEdgeSum / neighborEdgeCount;
+                    if (avgNeighborEdge < 1e-8f) continue;
+
+                    float ratio = displacement / avgNeighborEdge;
+                    if (ratio > displacementThreshold)
+                        candidates.Add((vi, ratio));
+                }
+
+                candidates.Sort((a, b) => b.ratio.CompareTo(a.ratio));
+
+                int fixedThisPass = 0;
+                foreach (var (vi, _) in candidates)
+                {
+                    var neighbors = vertNeighbors[vi];
+
+                    // Recompute after previous fixes
+                    Vector2 predicted = Vector2.zero;
+                    float totalW = 0f;
+                    foreach (int ni in neighbors)
+                    {
+                        float len3D = (verts[vi] - verts[ni]).magnitude;
+                        float w = 1f / Mathf.Max(len3D, 1e-6f);
+                        predicted += uv2[ni] * w;
+                        totalW += w;
+                    }
+                    if (totalW < 1e-6f) continue;
+                    predicted /= totalW;
+
+                    float displacement = (uv2[vi] - predicted).magnitude;
+
+                    float neighborEdgeSum = 0f;
+                    int neighborEdgeCount = 0;
+                    foreach (int ni in neighbors)
+                    {
+                        if (!vertNeighbors.TryGetValue(ni, out var niN)) continue;
+                        foreach (int nni in niN)
+                        {
+                            if (nni == vi) continue;
+                            neighborEdgeSum += (uv2[ni] - uv2[nni]).magnitude;
+                            neighborEdgeCount++;
+                        }
+                    }
+                    if (neighborEdgeCount == 0) continue;
+                    float avgNeighborEdge = neighborEdgeSum / neighborEdgeCount;
+                    if (avgNeighborEdge < 1e-8f) continue;
+
+                    if (displacement / avgNeighborEdge <= displacementThreshold) continue;
+
+                    // Check neighbors are consistent
+                    int consistentCount = 0;
+                    foreach (int ni in neighbors)
+                    {
+                        if (!vertNeighbors.TryGetValue(ni, out var niN)) continue;
+                        Vector2 niPred = Vector2.zero;
+                        float niW = 0f;
+                        foreach (int nni in niN)
+                        {
+                            if (nni == vi) continue;
+                            float len3D = (verts[ni] - verts[nni]).magnitude;
+                            float w = 1f / Mathf.Max(len3D, 1e-6f);
+                            niPred += uv2[nni] * w;
+                            niW += w;
+                        }
+                        if (niW < 1e-6f) continue;
+                        niPred /= niW;
+                        float niDisp = (uv2[ni] - niPred).magnitude;
+                        if (niDisp < avgNeighborEdge * displacementThreshold)
+                            consistentCount++;
+                    }
+
+                    if (consistentCount < (neighbors.Count + 1) / 2) continue;
+
+                    // No triangle flip
+                    bool wouldFlip = false;
+                    if (vertexToFaces.TryGetValue(vi, out var facesOfVi))
+                    {
+                        foreach (int f in facesOfVi)
+                        {
+                            int i0 = triangles[f * 3];
+                            int i1 = triangles[f * 3 + 1];
+                            int i2 = triangles[f * 3 + 2];
+
+                            Vector2 a = i0 == vi ? predicted : uv2[i0];
+                            Vector2 b = i1 == vi ? predicted : uv2[i1];
+                            Vector2 c = i2 == vi ? predicted : uv2[i2];
+
+                            float areaBefore = (uv2[i1].x - uv2[i0].x) * (uv2[i2].y - uv2[i0].y) -
+                                                (uv2[i1].y - uv2[i0].y) * (uv2[i2].x - uv2[i0].x);
+                            float areaAfter = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+
+                            if (Mathf.Abs(areaBefore) > 1e-9f && Mathf.Abs(areaAfter) > 1e-9f &&
+                                Mathf.Sign(areaBefore) != Mathf.Sign(areaAfter))
+                            {
+                                wouldFlip = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (wouldFlip) continue;
+
+                    UvtLog.Info($"[ShellTopology] iter={iteration} Fixed vertex {vi}: " +
+                        $"({uv2[vi].x:F4},{uv2[vi].y:F4}) → ({predicted.x:F4},{predicted.y:F4}) " +
+                        $"disp/scale={displacement / avgNeighborEdge:F2}");
+
+                    uv2[vi] = predicted;
+                    fixedThisPass++;
+                }
+
+                totalFixed += fixedThisPass;
+                if (fixedThisPass == 0) break;
+            }
+
+            if (totalFixed > 0)
+            {
+                UvtLog.Info($"[GroupedTransfer] Shell topology enforcement fixed {totalFixed} displaced vertices");
+            }
         }
 
         // ═══════════════════════════════════════════════════════════
