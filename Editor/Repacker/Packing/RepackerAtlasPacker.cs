@@ -129,11 +129,14 @@ namespace LightmapUvTool
                     groupIndices.Add(gi);
                 }
 
+                // Compute charts (required before packing)
+                XatlasNative.xatlasComputeCharts();
+
                 // Pack
                 XatlasNative.xatlasPackCharts(
-                    settings.atlasSize,
+                    0,                       // maxChartSize (0 = unlimited)
                     (uint)settings.padding,
-                    settings.texelDensity,
+                    0f,                      // texelsPerUnit (0 = auto)
                     (uint)settings.atlasSize,
                     1, // bilinear
                     0, // blockAlign
