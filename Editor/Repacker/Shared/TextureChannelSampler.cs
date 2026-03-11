@@ -27,11 +27,9 @@ namespace LightmapUvTool
             var thumb = new ShellThumbnail(thumbSize, thumbSize);
             thumb.uvBbox = uvBbox;
 
-            // Ensure textures are readable, sample, then restore
+            // Currently only albedo is used for similarity matching
             SampleChannel(albedo, uvBbox, thumb.albedo, thumbSize);
-            SampleChannel(normal, uvBbox, thumb.normal, thumbSize);
-            SampleChannel(gloss,  uvBbox, thumb.gloss,  thumbSize);
-            SampleChannel(ao,     uvBbox, thumb.ao,     thumbSize);
+            // normal/gloss/ao left as neutral gray (default from constructor)
 
             return thumb;
         }

@@ -35,10 +35,8 @@ namespace LightmapUvTool
         public static bool IsShellMonotone(ShellThumbnail thumb, float threshold = 0.008f)
         {
             if (thumb == null) return false;
-            return IsMonotone(thumb.albedo, threshold)
-                && IsMonotone(thumb.normal, threshold)
-                && IsMonotone(thumb.gloss, threshold)
-                && IsMonotone(thumb.ao, threshold);
+            // Currently albedo-only matching
+            return IsMonotone(thumb.albedo, threshold);
         }
     }
 }

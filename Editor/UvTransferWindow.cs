@@ -941,12 +941,7 @@ namespace LightmapUvTool
             EditorGUI.indentLevel++;
             optSimilarityThreshold = EditorGUILayout.Slider("Threshold", optSimilarityThreshold, 0.5f, 1f);
             optMaxSizeRatio = EditorGUILayout.Slider("Max Size Ratio", optMaxSizeRatio, 1f, 10f);
-            EditorGUILayout.Space(2);
-            EditorGUILayout.LabelField("Channel Weights", EditorStyles.miniLabel);
-            optWeightAlbedo = EditorGUILayout.Slider("  Albedo", optWeightAlbedo, 0f, 1f);
-            optWeightNormal = EditorGUILayout.Slider("  Normal", optWeightNormal, 0f, 1f);
-            optWeightGloss  = EditorGUILayout.Slider("  Gloss",  optWeightGloss,  0f, 1f);
-            optWeightAo     = EditorGUILayout.Slider("  AO",     optWeightAo,     0f, 1f);
+            EditorGUILayout.LabelField("Matching: albedo only", EditorStyles.miniLabel);
             EditorGUI.indentLevel--;
 
             EditorGUILayout.Space(4);

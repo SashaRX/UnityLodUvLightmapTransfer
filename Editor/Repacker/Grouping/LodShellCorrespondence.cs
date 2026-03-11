@@ -125,6 +125,7 @@ namespace LightmapUvTool
                 if (allShells[lod] == null || allVerts[lod] == null)
                 {
                     result.lodToLod0[lod] = new Dictionary<int, int>();
+                    UvtLog.Verbose($"[LodCorrespondence] LOD{lod}: skipped (no data)");
                     continue;
                 }
 
@@ -132,6 +133,8 @@ namespace LightmapUvTool
                     allVerts[lod], allTris[lod], allUv0[lod],
                     allShells[lod], allShells[0], allTris[0],
                     bvh, lod0FaceToShell);
+
+                UvtLog.Info($"[LodCorrespondence] LOD{lod}: {allShells[lod].Count} shells → {result.lodToLod0[lod].Count} mapped to LOD0");
             }
 
             return result;

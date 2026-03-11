@@ -97,6 +97,8 @@ namespace LightmapUvTool
                 var meshes = new Mesh[lodCount];
                 Material material = null;
 
+                UvtLog.Info($"[UV0 Optimizer] Analyze: LODGroup '{lodGroup.name}', {lodCount} LODs, threshold={threshold:F2}, maxSizeRatio={maxSizeRatio:F1}");
+
                 for (int li = 0; li < lodCount; li++)
                 {
                     var renderers = lods[li].renderers;
@@ -121,6 +123,8 @@ namespace LightmapUvTool
                         // Extract shells
                         allShells[li] = UvShellExtractor.Extract(allUv0[li], allTris[li]);
 
+                        UvtLog.Info($"[UV0 Optimizer]   LOD{li}: '{m.name}' verts={m.vertexCount} tris={allTris[li].Length / 3} uv0={allUv0[li].Length} shells={allShells[li].Count}");
+
                         // Get material from first LOD0 renderer
                         if (li == 0 && material == null)
                         {
@@ -141,6 +145,9 @@ namespace LightmapUvTool
 
                 Texture2D albedo, normal, gloss, ao;
                 TextureChannelSampler.GetMaterialTextures(material, out albedo, out normal, out gloss, out ao);
+
+                UvtLog.Info($"[UV0 Optimizer] Material: '{(material != null ? material.name : "null")}', " +
+                    $"albedo={(albedo != null ? $"{albedo.name} {albedo.width}x{albedo.height}" : "none")}");
 
                 var thumbnails = new ShellThumbnail[allShells[0].Count];
                 var shellAreas = new float[allShells[0].Count];
@@ -168,8 +175,21 @@ namespace LightmapUvTool
                             0.2f + 0.2f * si / allShells[0].Count);
                 }
 
-                // ── Step 3: Build similarity matrix ──
-                EditorUtility.DisplayProgressBar("UV0 Optimizer", "Computing similarity...", 0.4f);
+                // Log thumbnail results
+                {
+                    int monoCount = 0;
+                    float totalArea = 0f;
+                    for (int si = 0; si < thumbnails.Length; si++)
+                    {
+                        if (thumbnails[si].isMonotone) monoCount++;
+                        totalArea += shellAreas[si];
+                        UvtLog.Verbose($"[UV0 Optimizer]   shell {si}: area={shellAreas[si]:F4} bbox=({thumbnails[si].uvBbox.x:F3},{thumbnails[si].uvBbox.y:F3},{thumbnails[si].uvBbox.width:F3},{thumbnails[si].uvBbox.height:F3}){(thumbnails[si].isMonotone ? " MONO" : "")}");
+                    }
+                    UvtLog.Info($"[UV0 Optimizer] Thumbnails: {thumbnails.Length} shells sampled, {monoCount} monotone, totalArea={totalArea:F3}");
+                }
+
+                // ── Step 3: Build similarity matrix (albedo-only) ──
+                EditorUtility.DisplayProgressBar("UV0 Optimizer", "Computing similarity (albedo)...", 0.4f);
 
                 float[,] simMatrix = ShellSimilarityAnalyzer.BuildSimilarityMatrix(
                     thumbnails, weights, shellAreas, maxSizeRatio);
@@ -184,6 +204,25 @@ namespace LightmapUvTool
 
                 var groups = ShellGroupBuilder.Build(simMatrix, allShells[0], allShells,
                     correspondence, threshold, thumbnails, shellAreas);
+
+                // Log group results
+                {
+                    int multiGroups = 0;
+                    foreach (var g in groups)
+                    {
+                        int lod0 = g.Lod0MemberCount;
+                        if (lod0 > 1)
+                        {
+                            multiGroups++;
+                            var memberIds = new List<string>();
+                            foreach (var m in g.members)
+                                if (m.lodLevel == 0)
+                                    memberIds.Add(m.shellId.ToString());
+                            UvtLog.Info($"[UV0 Optimizer] Group (src={g.sourceShellId}): {lod0} LOD0 shells [{string.Join(",", memberIds)}]{(g.isMonotone ? " MONO" : "")}");
+                        }
+                    }
+                    UvtLog.Info($"[UV0 Optimizer] Grouping: {groups.Count} groups total, {multiGroups} with matches");
+                }
 
                 // ── Step 6: Find best transforms for group members ──
                 EditorUtility.DisplayProgressBar("UV0 Optimizer", "Computing transforms...", 0.8f);
@@ -248,6 +287,7 @@ namespace LightmapUvTool
         /// </summary>
         public static void PackAndBake(LODGroup lodGroup, AnalysisResult analysis, PackBakeSettings settings)
         {
+            UvtLog.Info($"[UV0 Optimizer] PackAndBake: atlasSize={settings.atlasSize}, padding={settings.padding}, postfix='{settings.postfix}'");
             EditorUtility.DisplayProgressBar("UV0 Optimizer", "Packing atlas...", 0f);
             try
             {

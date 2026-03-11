@@ -39,14 +39,21 @@ namespace LightmapUvTool
             for (int i = 0; i < n; i++) parent[i] = i;
 
             // Merge similar LOD0 shells
+            int mergeCount = 0;
             for (int i = 0; i < n; i++)
             {
                 for (int j = i + 1; j < n; j++)
                 {
                     if (simMatrix[i, j] >= threshold)
+                    {
+                        UvtLog.Verbose($"[GroupBuilder] Merge shell {i} ↔ {j} (score={simMatrix[i, j]:F3} >= {threshold:F3})");
                         Union(parent, rank, i, j);
+                        mergeCount++;
+                    }
                 }
             }
+
+            UvtLog.Info($"[GroupBuilder] {n} LOD0 shells, {mergeCount} merges at threshold {threshold:F3}");
 
             // Build groups from Union-Find roots
             var rootToGroup = new Dictionary<int, ShellGroup>();

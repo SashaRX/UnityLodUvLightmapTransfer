@@ -64,6 +64,8 @@ namespace LightmapUvTool
             // We collect all source shell triangles, submit them to xatlas as separate meshes,
             // then read back the repacked UV coordinates.
 
+            UvtLog.Info($"[RepackerAtlasPacker] Pack: {groups.Count} groups, atlasSize={settings.atlasSize}, padding={settings.padding}");
+
             XatlasNative.xatlasCreate();
             try
             {
@@ -126,8 +128,11 @@ namespace LightmapUvTool
                         shellIndices.ToArray(), (uint)shellIndices.Count,
                         faceMaterials, faceCount);
 
+                    UvtLog.Verbose($"[RepackerAtlasPacker]   group {gi}: srcShell={srcId}, verts={vertexRemap.Count}, faces={srcShell.faceIndices.Count}");
                     groupIndices.Add(gi);
                 }
+
+                UvtLog.Info($"[RepackerAtlasPacker] Submitted {groupIndices.Count} meshes to xatlas");
 
                 // Compute charts (required before packing)
                 XatlasNative.xatlasComputeCharts();
@@ -145,6 +150,8 @@ namespace LightmapUvTool
 
                 uint atlasW = XatlasNative.xatlasGetAtlasWidth();
                 uint atlasH = XatlasNative.xatlasGetAtlasHeight();
+
+                UvtLog.Info($"[RepackerAtlasPacker] xatlas result: atlas {atlasW}x{atlasH}");
 
                 if (atlasW == 0 || atlasH == 0)
                 {
