@@ -183,7 +183,13 @@ namespace LightmapUvTool
                     {
                         if (thumbnails[si].isMonotone) monoCount++;
                         totalArea += shellAreas[si];
-                        UvtLog.Verbose($"[UV0 Optimizer]   shell {si}: area={shellAreas[si]:F4} bbox=({thumbnails[si].uvBbox.x:F3},{thumbnails[si].uvBbox.y:F3},{thumbnails[si].uvBbox.width:F3},{thumbnails[si].uvBbox.height:F3}){(thumbnails[si].isMonotone ? " MONO" : "")}");
+                        string monoTag = "";
+                        if (thumbnails[si].isMonotone)
+                        {
+                            var mc = thumbnails[si].monotoneColor;
+                            monoTag = $" MONO(#{ColorUtility.ToHtmlStringRGB(mc)})";
+                        }
+                        UvtLog.Verbose($"[UV0 Optimizer]   shell {si}: area={shellAreas[si]:F4} bbox=({thumbnails[si].uvBbox.x:F3},{thumbnails[si].uvBbox.y:F3},{thumbnails[si].uvBbox.width:F3},{thumbnails[si].uvBbox.height:F3}){monoTag}");
                     }
                     UvtLog.Info($"[UV0 Optimizer] Thumbnails: {thumbnails.Length} shells sampled, {monoCount} monotone, totalArea={totalArea:F3}");
                 }
@@ -218,7 +224,8 @@ namespace LightmapUvTool
                             foreach (var m in g.members)
                                 if (m.lodLevel == 0)
                                     memberIds.Add(m.shellId.ToString());
-                            UvtLog.Info($"[UV0 Optimizer] Group (src={g.sourceShellId}): {lod0} LOD0 shells [{string.Join(",", memberIds)}]{(g.isMonotone ? " MONO" : "")}");
+                            string monoTag = g.isMonotone ? $" MONO(#{ColorUtility.ToHtmlStringRGB(g.monotoneColor)})" : "";
+                            UvtLog.Info($"[UV0 Optimizer] Group (src={g.sourceShellId}): {lod0} LOD0 shells [{string.Join(",", memberIds)}]{monoTag}");
                         }
                     }
                     UvtLog.Info($"[UV0 Optimizer] Grouping: {groups.Count} groups total, {multiGroups} with matches");

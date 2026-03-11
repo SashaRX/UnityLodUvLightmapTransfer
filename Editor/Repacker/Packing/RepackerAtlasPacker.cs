@@ -159,11 +159,22 @@ namespace LightmapUvTool
                     return null;
                 }
 
+                // Cap atlas to target size for the baked texture.
+                // UVs are normalized to [0,1] so they work at any texture resolution.
+                int targetW = (int)atlasW;
+                int targetH = (int)atlasH;
+                if (targetW > settings.atlasSize || targetH > settings.atlasSize)
+                {
+                    UvtLog.Info($"[RepackerAtlasPacker] Atlas {atlasW}x{atlasH} exceeds target {settings.atlasSize} — clamping bake texture");
+                    targetW = settings.atlasSize;
+                    targetH = settings.atlasSize;
+                }
+
                 // Step 2: Read back packed UVs and build group rects
                 var result = new PackResult
                 {
-                    atlasWidth = (int)atlasW,
-                    atlasHeight = (int)atlasH,
+                    atlasWidth = targetW,
+                    atlasHeight = targetH,
                     groupRects = new Rect[groups.Count]
                 };
 
