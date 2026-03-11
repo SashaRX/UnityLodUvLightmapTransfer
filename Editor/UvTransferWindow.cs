@@ -58,7 +58,7 @@ namespace LightmapUvTool
         HashSet<int> lastSymmetrySplitLods = new HashSet<int>();
 
         // Canvas — fill mode (mutually exclusive overlays)
-        enum FillMode { Shells, Status, ShellMatch, Validation, None }
+        enum FillMode { Shells, Status, ShellMatch, Validation, Groups, None }
         FillMode fillMode = FillMode.Shells;
         FillMode fillModeBeforeHide = FillMode.Shells; // for show/hide toggle
 
@@ -298,7 +298,7 @@ namespace LightmapUvTool
         static readonly Color cValTexel    = new Color(.1f, .7f, .9f, .5f);
 
         // Fill mode labels for dropdown
-        static readonly string[] fillModeLabels = { "Shells", "Status", "Shell Match", "Validation", "None" };
+        static readonly string[] fillModeLabels = { "Shells", "Status", "Shell Match", "Validation", "Groups", "None" };
 
         // ════════════════════════════════════════════════════════════
         //  Lifecycle
@@ -921,6 +921,8 @@ namespace LightmapUvTool
         // Analysis results
         Uv0Optimizer.AnalysisResult optAnalysisResult;
         bool optHasAnalysis;
+        bool optGroupsFoldout;
+        Vector2 optGroupsScroll;
 
         void DrawUv0Optimizer()
         {
@@ -992,6 +994,46 @@ namespace LightmapUvTool
                 EditorGUILayout.LabelField("Monotone shells:", optAnalysisResult.monotoneCount.ToString());
                 EditorGUILayout.LabelField("Est. occupancy saving:", (optAnalysisResult.estimatedSaving * 100f).ToString("F1") + "%");
                 EditorGUI.indentLevel--;
+
+                // ── Switch to Groups fill mode ──
+                if (fillMode != FillMode.Groups)
+                {
+                    if (GUILayout.Button("Show Groups on Canvas", EditorStyles.miniButton))
+                        fillMode = FillMode.Groups;
+                }
+
+                // ── Group list ──
+                if (optAnalysisResult.groups != null && optAnalysisResult.groups.Count > 0)
+                {
+                    EditorGUILayout.Space(2);
+                    optGroupsFoldout = EditorGUILayout.Foldout(optGroupsFoldout, $"Groups ({optAnalysisResult.groups.Count})", true);
+                    if (optGroupsFoldout)
+                    {
+                        float maxH = Mathf.Min(200, optAnalysisResult.groups.Count * 20 + 4);
+                        optGroupsScroll = EditorGUILayout.BeginScrollView(optGroupsScroll, GUILayout.MaxHeight(maxH));
+                        for (int gi = 0; gi < optAnalysisResult.groups.Count; gi++)
+                        {
+                            var g = optAnalysisResult.groups[gi];
+                            int lod0Count = g.Lod0MemberCount;
+                            string label;
+                            if (lod0Count > 1)
+                            {
+                                Color gc = pal[gi % pal.Length];
+                                string hex = ColorUtility.ToHtmlStringRGB(gc);
+                                label = $"<color=#{hex}>\u25A0</color> Group {gi}: {lod0Count} shells (src={g.sourceShellId})";
+                                if (g.isMonotone) label += " [mono]";
+                            }
+                            else
+                            {
+                                label = $"  Group {gi}: unique (shell {g.sourceShellId})";
+                                if (g.isMonotone) label += " [mono]";
+                            }
+                            var style = new GUIStyle(EditorStyles.miniLabel) { richText = true };
+                            EditorGUILayout.LabelField(label, style);
+                        }
+                        EditorGUILayout.EndScrollView();
+                    }
+                }
 
                 EditorGUILayout.Space(6);
 
@@ -1412,6 +1454,29 @@ namespace LightmapUvTool
 
                     ClearFrameCaches();
                     shellColorKeyCacheDirty = false;
+
+                    // Build shell→group maps for Groups fill mode
+                    Dictionary<int, int> optShellToGroup = null;
+                    Dictionary<int, int> optGroupLod0Count = null;
+                    if (fillMode == FillMode.Groups && optHasAnalysis && optAnalysisResult?.groups != null)
+                    {
+                        optShellToGroup = new Dictionary<int, int>();
+                        optGroupLod0Count = new Dictionary<int, int>();
+                        for (int gi = 0; gi < optAnalysisResult.groups.Count; gi++)
+                        {
+                            var g = optAnalysisResult.groups[gi];
+                            int lod0Count = 0;
+                            foreach (var m in g.members)
+                            {
+                                if (m.lodLevel == pvLod)
+                                    optShellToGroup[m.shellId] = gi;
+                                if (m.lodLevel == 0)
+                                    lod0Count++;
+                            }
+                            optGroupLod0Count[gi] = lod0Count;
+                        }
+                    }
+
                     foreach (var item in draws)
                     {
                         Mesh mesh = item.Item1;
@@ -1461,6 +1526,9 @@ namespace LightmapUvTool
                                 // Overlay validation problems on top of shell fill (skip clean triangles)
                                 if (hasValidation)
                                     GlFillValidationOverlay(cx,cy,sz, uvs,tri,fN,uN, entry.validationReport.perTriangle);
+                                break;
+                            case FillMode.Groups when optShellToGroup != null:
+                                GlFillGroups(cx,cy,sz, mesh, fN, uN, entry, optShellToGroup, optGroupLod0Count, hoverShellId, selectedShellId);
                                 break;
                             case FillMode.None:
                                 break;
@@ -2849,6 +2917,53 @@ namespace LightmapUvTool
                     if (!TOk(uv,uN,a0,a1,a2)) continue;
                     Vx(ox,oy,sz,uv[a0]); Vx(ox,oy,sz,uv[a1]); Vx(ox,oy,sz,uv[a2]);
                     tot++; b++; if (b>=BATCH){GL.End();GL.Begin(GL.TRIANGLES);GL.Color(c);b=0;}
+                }
+            }
+            GL.End();
+
+            if (selectedShellId >= 0)
+                GlOutlineShell(ox, oy, sz, uv, t, uN, cache, selectedShellId, new Color(1f, .95f, .2f, .95f), 2f);
+            if (hoverShellId >= 0 && hoverShellId != selectedShellId)
+                GlOutlineShell(ox, oy, sz, uv, t, uN, cache, hoverShellId, new Color(.25f, 1f, .95f, .85f), 1.2f);
+        }
+
+        void GlFillGroups(float ox, float oy, float sz, Mesh mesh, int fN, int uN, MeshEntry entry,
+            Dictionary<int, int> shellToGroup, Dictionary<int, int> groupLod0Count, int hoverShellId, int selectedShellId)
+        {
+            var cache = GetPreviewShellCache(mesh, pvChannel);
+            if (cache == null || cache.shells == null) return;
+            var uv = cache.uvs;
+            var t = cache.triangles;
+
+            int tot = 0, b = 0;
+            GL.Begin(GL.TRIANGLES);
+            foreach (var s in cache.shells)
+            {
+                if (tot >= MAX_TRI) break;
+                Color c;
+                if (shellToGroup.TryGetValue(s.shellId, out int gi))
+                {
+                    int memberCount = groupLod0Count.ContainsKey(gi) ? groupLod0Count[gi] : 1;
+                    if (memberCount > 1)
+                        c = pal[gi % pal.Length];
+                    else
+                        c = new Color(.35f, .35f, .35f);
+                }
+                else
+                {
+                    c = new Color(.25f, .25f, .25f);
+                }
+                if (s.shellId == selectedShellId)
+                    c = Color.Lerp(c, Color.white, 0.45f);
+                c.a = s.shellId == selectedShellId ? Mathf.Clamp01(fillAlpha * 1.85f) : fillAlpha;
+                GL.Color(c);
+                foreach (int f in s.faceIndices)
+                {
+                    if (tot >= MAX_TRI) break;
+                    int a0 = t[f * 3], a1 = t[f * 3 + 1], a2 = t[f * 3 + 2];
+                    if (!TOk(uv, uN, a0, a1, a2)) continue;
+                    Vx(ox, oy, sz, uv[a0]); Vx(ox, oy, sz, uv[a1]); Vx(ox, oy, sz, uv[a2]);
+                    tot++; b++; if (b >= BATCH) { GL.End(); GL.Begin(GL.TRIANGLES); GL.Color(c); b = 0; }
                 }
             }
             GL.End();
