@@ -43,6 +43,8 @@ namespace LightmapUvTool
                 Debug.LogWarning(Prefix + msg);
         }
 
+        public static void Warning(string msg) => Warn(msg);
+
         public static void Info(string msg)
         {
             if (Current >= Level.Info)
