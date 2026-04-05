@@ -3767,7 +3767,7 @@ namespace LightmapUvTool
             int n = 0;
             foreach (var e in meshEntries)
             {
-                Mesh m = e.lodIndex == sourceLodIndex ? e.repackedMesh : e.transferredMesh;
+                Mesh m = GetResultMesh(e);
                 if (m == null) continue;
                 string ap = AssetDatabase.GenerateUniqueAssetPath(p + "/" + m.name + ".asset");
                 AssetDatabase.CreateAsset(m, ap); n++;
@@ -3776,12 +3776,27 @@ namespace LightmapUvTool
             UvtLog.Info("[Save] " + n + " assets -> " + p);
         }
 
+        /// <summary>
+        /// Get the best available result mesh for an entry:
+        /// repacked/transferred first, then welded originalMesh as fallback.
+        /// </summary>
+        Mesh GetResultMesh(MeshEntry e)
+        {
+            Mesh m = e.lodIndex == sourceLodIndex ? e.repackedMesh : e.transferredMesh;
+            if (m != null) return m;
+            // Fallback: if the mesh was modified (weld/edgeWeld/symmetrySplit),
+            // originalMesh is the working copy with those changes applied.
+            if (e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit)
+                return e.originalMesh;
+            return null;
+        }
+
         void UpdateRefs()
         {
             if (lodGroup == null) return; int n = 0;
             foreach (var e in meshEntries)
             {
-                Mesh m = e.lodIndex == sourceLodIndex ? e.repackedMesh : e.transferredMesh;
+                Mesh m = GetResultMesh(e);
                 if (m == null || e.meshFilter == null) continue;
                 Undo.RecordObject(e.meshFilter, "UV Transfer"); e.meshFilter.sharedMesh = m; n++;
             }
@@ -3802,7 +3817,7 @@ namespace LightmapUvTool
             foreach (var e in meshEntries)
             {
                 if (!e.include) continue;
-                Mesh resultMesh = e.lodIndex == sourceLodIndex ? e.repackedMesh : e.transferredMesh;
+                Mesh resultMesh = GetResultMesh(e);
                 if (resultMesh == null) continue;
 
                 Mesh pathMesh = e.fbxMesh ?? e.originalMesh;
@@ -4402,7 +4417,7 @@ namespace LightmapUvTool
             foreach (var e in meshEntries)
             {
                 if (!e.include) continue;
-                Mesh resultMesh = e.lodIndex == sourceLodIndex ? e.repackedMesh : e.transferredMesh;
+                Mesh resultMesh = GetResultMesh(e);
                 if (resultMesh == null) continue;
 
                 Mesh pathMesh = e.fbxMesh ?? e.originalMesh;
