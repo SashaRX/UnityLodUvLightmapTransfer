@@ -20,5 +20,8 @@
     "transfer",
     "editor"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "com.unity.formats.fbx": "4.1.0"
+  }
 }
