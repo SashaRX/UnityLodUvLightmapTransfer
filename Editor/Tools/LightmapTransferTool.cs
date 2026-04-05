@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEditor;
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
 using UnityEditor.Formats.Fbx.Exporter;
