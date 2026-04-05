@@ -873,7 +873,8 @@ namespace LightmapUvTool
                 {
                     foreach (var (entry, resultMesh) in entries)
                     {
-                        var child = new GameObject(resultMesh.name);
+                        string objName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        var child = new GameObject(objName);
                         child.transform.SetParent(tempRoot.transform, false);
                         if (entry.renderer != null)
                         {
