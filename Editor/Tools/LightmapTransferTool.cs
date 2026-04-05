@@ -55,6 +55,8 @@ namespace LightmapUvTool
         // ── Transfer cache ──
         Dictionary<int, GroupedShellTransfer.SourceShellInfo[]> shellTransformCache =
             new Dictionary<int, GroupedShellTransfer.SourceShellInfo[]>();
+        List<GroupedShellTransfer.OverlapSourceHint> accumulatedOverlapHints =
+            new List<GroupedShellTransfer.OverlapSourceHint>();
 
         // ── Preview ──
         bool checkerEnabled, shellColorPreviewEnabled;
@@ -480,23 +482,20 @@ namespace LightmapUvTool
                     e.originalMesh = UvCanvasView.MakeReadableCopy(e.fbxMesh);
                     e.originalMesh.name = e.fbxMesh.name + "_wc";
                 }
-                int welded = Uv0Analyzer.WeldFalseSeams(e.originalMesh, e.originalMesh);
-                if (welded > 0) { e.wasWelded = true; UvtLog.Info($"[Weld] '{e.originalMesh.name}' LOD{e.lodIndex}: welded {welded} verts"); }
+                var optResult = MeshOptimizer.Optimize(e.originalMesh);
+                if (optResult.ok) { e.wasWelded = true; UvtLog.Info($"[Weld] '{e.originalMesh.name}' LOD{e.lodIndex}: meshopt optimized"); }
             }
 
-            // Source-guided edge weld for target LODs
-            var srcEntries = ctx.ForLod(ctx.SourceLodIndex);
-            if (srcEntries.Count > 0)
+            // UV edge weld for all meshes
+            foreach (var e in ctx.MeshEntries)
             {
-                foreach (var e in ctx.MeshEntries)
+                if (!e.include || e.originalMesh == null) continue;
+                var welded = Uv0Analyzer.UvEdgeWeld(e.originalMesh);
+                if (welded != null && welded != e.originalMesh)
                 {
-                    if (!e.include || e.lodIndex == ctx.SourceLodIndex) continue;
-                    var srcEntry = srcEntries.FirstOrDefault(s => (s.meshGroupKey ?? s.renderer.name) == (e.meshGroupKey ?? e.renderer.name));
-                    if (srcEntry == null) srcEntry = srcEntries[0];
-                    Mesh srcMesh = srcEntry.originalMesh;
-                    if (srcMesh == null) continue;
-                    int edgeWelded = Uv0Analyzer.SourceGuidedEdgeWeld(e.originalMesh, srcMesh);
-                    if (edgeWelded > 0) { e.wasEdgeWelded = true; UvtLog.Info($"[EdgeWeld] '{e.originalMesh.name}' LOD{e.lodIndex}: {edgeWelded} edges"); }
+                    e.originalMesh = welded;
+                    e.wasEdgeWelded = true;
+                    UvtLog.Info($"[EdgeWeld] '{e.originalMesh.name}' LOD{e.lodIndex}: edge welded");
                 }
             }
 
@@ -518,7 +517,10 @@ namespace LightmapUvTool
                     e.originalMesh = UvCanvasView.MakeReadableCopy(e.fbxMesh);
                     e.originalMesh.name = e.fbxMesh.name + "_wc";
                 }
-                int split = SymmetrySplitShells.Split(e.originalMesh);
+                var uv0 = e.originalMesh.uv;
+                if (uv0 == null || uv0.Length == 0) continue;
+                var shells = UvShellExtractor.Extract(uv0, e.originalMesh.triangles);
+                int split = SymmetrySplitShells.Split(e.originalMesh, shells);
                 if (split > 0) { e.wasSymmetrySplit = true; lastSymmetrySplitLods.Add(e.lodIndex); UvtLog.Info($"[SymSplit] '{e.originalMesh.name}' LOD{e.lodIndex}: {split} shells split"); }
             }
             ctx.ClearAllCaches();
@@ -555,23 +557,35 @@ namespace LightmapUvTool
         {
             if (entries.Count == 0) return;
             UvtLog.Info($"[Repack] {entries.Count} meshes, res={ctx.AtlasResolution}, pad={ctx.ShellPaddingPx}, bdr={ctx.BorderPaddingPx}");
-            var meshes = new List<Mesh>();
+            var validEntries = new List<MeshEntry>();
+            var meshCopies = new List<Mesh>();
             foreach (var e in entries)
             {
-                if (e.originalMesh == e.fbxMesh)
-                {
-                    e.originalMesh = UvCanvasView.MakeReadableCopy(e.fbxMesh);
-                    e.originalMesh.name = e.fbxMesh.name + "_wc";
-                }
-                meshes.Add(e.originalMesh);
+                if (e.originalMesh == null) continue;
+                var uv0 = e.originalMesh.uv;
+                if (uv0 == null || uv0.Length == 0) { UvtLog.Warn("[Repack] " + e.renderer.name + ": no UV0"); continue; }
+                var cp = UnityEngine.Object.Instantiate(e.originalMesh);
+                cp.name = e.originalMesh.name + "_repack";
+                validEntries.Add(e);
+                meshCopies.Add(cp);
             }
+            if (meshCopies.Count == 0) return;
 
-            var result = XatlasRepack.Repack(meshes, ctx.AtlasResolution, ctx.ShellPaddingPx, ctx.BorderPaddingPx);
-            if (result == null || result.Count != entries.Count) { UvtLog.Warn("[Repack] Failed"); return; }
-            for (int i = 0; i < entries.Count; i++)
+            var opts = RepackOptions.Default;
+            opts.resolution = (uint)ctx.AtlasResolution;
+            opts.padding = (uint)ctx.ShellPaddingPx;
+            opts.borderPadding = (uint)ctx.BorderPaddingPx;
+
+            var results = XatlasRepack.RepackMulti(meshCopies.ToArray(), opts);
+            for (int i = 0; i < validEntries.Count; i++)
             {
-                entries[i].repackedMesh = result[i];
-                entries[i].repackedMesh.name = entries[i].originalMesh.name + "_repack";
+                if (!results[i].ok)
+                {
+                    UvtLog.Error("[Repack] " + validEntries[i].renderer.name + ": " + results[i].error);
+                    UnityEngine.Object.DestroyImmediate(meshCopies[i]);
+                    continue;
+                }
+                validEntries[i].repackedMesh = meshCopies[i];
             }
 
             ctx.HasRepack = true;
@@ -594,6 +608,7 @@ namespace LightmapUvTool
 
         void ExecTransferAll()
         {
+            accumulatedOverlapHints.Clear();
             for (int li = 0; li < ctx.LodCount; li++)
             {
                 if (li == ctx.SourceLodIndex) continue;
@@ -619,50 +634,57 @@ namespace LightmapUvTool
                 }
 
                 // Find matching source by mesh group key
-                var srcEntry = sources.FirstOrDefault(s => (s.meshGroupKey ?? s.renderer.name) == (tgt.meshGroupKey ?? tgt.renderer.name));
-                if (srcEntry == null) srcEntry = sources[0];
+                MeshEntry srcEntry = null;
+                if (!string.IsNullOrEmpty(tgt.meshGroupKey))
+                    srcEntry = sources.FirstOrDefault(s => s.meshGroupKey == tgt.meshGroupKey);
+                if (srcEntry == null)
+                    srcEntry = sources[0];
 
                 Mesh srcMesh = srcEntry.repackedMesh ?? srcEntry.originalMesh;
-                int srcId = srcMesh.GetInstanceID();
+                Mesh tgtMesh = tgt.originalMesh;
+                if (srcMesh == null || tgtMesh == null) continue;
 
+                int srcId = srcMesh.GetInstanceID();
                 if (!shellTransformCache.TryGetValue(srcId, out var srcInfos))
                 {
-                    srcInfos = GroupedShellTransfer.BuildSourceInfo(srcMesh, ctx.PipeSettings.sourceUvChannel);
+                    srcInfos = GroupedShellTransfer.AnalyzeSource(srcMesh);
                     if (srcInfos != null) shellTransformCache[srcId] = srcInfos;
                 }
+                if (srcInfos == null) continue;
 
-                var transferResult = GroupedShellTransfer.Transfer(
-                    srcMesh, tgt.originalMesh,
-                    srcInfos,
-                    ctx.PipeSettings.sourceUvChannel,
-                    ctx.PipeSettings.targetUvChannel,
-                    ctx.PipeSettings.maxProjectionDistance,
-                    ctx.PipeSettings.maxNormalAngle,
-                    ctx.PipeSettings.filterBySubmesh,
-                    srcEntry.renderer?.transform,
-                    tgt.renderer?.transform);
+                var tr = GroupedShellTransfer.Transfer(tgtMesh, srcMesh,
+                    accumulatedOverlapHints.Count > 0 ? accumulatedOverlapHints : null);
+                if (tr.uv2 == null) { UvtLog.Warn($"[Transfer] Failed for '{tgt.renderer.name}'"); continue; }
 
-                if (transferResult == null) { UvtLog.Warn($"[Transfer] Failed for '{tgt.renderer.name}'"); continue; }
+                // Accumulate overlap hints for subsequent LODs
+                if (tr.overlapHints != null && tr.overlapHints.Count > 0)
+                    accumulatedOverlapHints.AddRange(tr.overlapHints);
 
-                tgt.transferredMesh = transferResult.resultMesh;
-                tgt.transferredMesh.name = tgt.originalMesh.name + "_transferred";
-                tgt.shellTransferResult = transferResult;
-
-                // Validation
-                tgt.validationReport = TransferValidator.Validate(tgt.transferredMesh, ctx.PipeSettings.targetUvChannel, ctx.AtlasResolution);
-
-                // Border repair
+                // Border repair (modifies tr.uv2 in-place)
+                tgt.borderRepairReport = null;
                 if (ctx.PipeSettings.enableBorderRepair)
                 {
-                    tgt.borderRepairReport = BorderRepairAdapter.Repair(
-                        tgt.transferredMesh, srcMesh,
-                        ctx.PipeSettings.targetUvChannel,
-                        ctx.PipeSettings.perimeterTolerance,
-                        ctx.PipeSettings.borderFuseTolerance);
+                    var brSettings = new BorderRepairAdapter.Settings
+                    {
+                        perimeterTolerance = ctx.PipeSettings.perimeterTolerance,
+                        borderFuseTolerance = ctx.PipeSettings.borderFuseTolerance,
+                        maxNormalAngle = ctx.PipeSettings.maxNormalAngle
+                    };
+                    tgt.borderRepairReport = BorderRepairAdapter.Repair(tgtMesh, srcMesh, tr.uv2, brSettings);
                 }
 
-                float pct = transferResult.verticesTotal > 0 ? transferResult.verticesTransferred * 100f / transferResult.verticesTotal : 0;
-                UvtLog.Info($"[Transfer] '{tgt.renderer.name}' LOD{tLod}: {transferResult.shellsMatched} shells, {pct:F0}% coverage");
+                // Build output mesh with UV2 applied
+                var om = UnityEngine.Object.Instantiate(tgtMesh);
+                om.name = tgtMesh.name + "_uvTransfer";
+                om.SetUVs(ctx.PipeSettings.targetUvChannel, new List<Vector2>(tr.uv2));
+                tgt.transferredMesh = om;
+                tgt.shellTransferResult = tr;
+
+                // Validation
+                tgt.validationReport = TransferValidator.Validate(tgtMesh, tr.uv2, tr);
+
+                float pct = tr.verticesTotal > 0 ? tr.verticesTransferred * 100f / tr.verticesTotal : 0;
+                UvtLog.Info($"[Transfer] '{tgt.renderer.name}' LOD{tLod}: {tr.shellsMatched} shells, {pct:F0}% coverage");
             }
         }
 
@@ -670,25 +692,283 @@ namespace LightmapUvTool
         {
             if (ctx.LodGroup == null) return;
             UvtLog.Info("[Apply] Applying UV2 to FBX...");
-            UvTransferPipeline.ApplyUv2(ctx.MeshEntries, ctx.SourceLodIndex, ctx.PipeSettings,
-                ctx.AtlasResolution, ctx.ShellPaddingPx, ctx.BorderPaddingPx, ctx.RepackPerMesh);
+
+            // Pre-import pass: reimport FBXs with postprocessor bypassed to get raw vertex order
+            var fbxPathSet = new HashSet<string>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (!e.include) continue;
+                Mesh m = e.fbxMesh ?? e.originalMesh;
+                if (m == null) continue;
+                string p = AssetDatabase.GetAssetPath(m);
+                if (!string.IsNullOrEmpty(p)) fbxPathSet.Add(p);
+            }
+            if (fbxPathSet.Count > 0)
+            {
+                foreach (string p in fbxPathSet)
+                {
+                    var imp = AssetImporter.GetAtPath(p) as ModelImporter;
+                    if (imp == null) continue;
+                    if (imp.generateSecondaryUV) imp.generateSecondaryUV = false;
+                    Uv2AssetPostprocessor.bypassPaths.Add(p);
+                    imp.SaveAndReimport();
+                }
+                foreach (var e in ctx.MeshEntries)
+                {
+                    if (e.meshFilter != null && e.meshFilter.sharedMesh != null)
+                        e.fbxMesh = e.meshFilter.sharedMesh;
+                }
+                Uv2AssetPostprocessor.bypassPaths.Clear();
+            }
+
+            // Build sidecar entries
+            var fbxGroups = new Dictionary<string, List<MeshUv2Entry>>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (!e.include) continue;
+                Mesh resultMesh = GetResultMesh(e);
+                if (resultMesh == null) continue;
+
+                Mesh pathMesh = e.fbxMesh ?? e.originalMesh;
+                string fbxPath = AssetDatabase.GetAssetPath(pathMesh);
+                if (string.IsNullOrEmpty(fbxPath)) continue;
+
+                var uv2List = new List<Vector2>();
+                resultMesh.GetUVs(ctx.PipeSettings.targetUvChannel, uv2List);
+                if (uv2List.Count == 0) continue;
+
+                var positions = resultMesh.vertices;
+                var uv0List = new List<Vector2>();
+                (e.originalMesh ?? resultMesh).GetUVs(0, uv0List);
+
+                if (!fbxGroups.ContainsKey(fbxPath))
+                    fbxGroups[fbxPath] = new List<MeshUv2Entry>();
+
+                string meshName = e.fbxMesh != null ? e.fbxMesh.name : e.originalMesh.name;
+                MeshFingerprint fp = e.fbxMesh != null ? MeshFingerprint.Compute(e.fbxMesh) : null;
+
+                fbxGroups[fbxPath].Add(new MeshUv2Entry
+                {
+                    meshName = meshName,
+                    uv2 = uv2List.ToArray(),
+                    welded = e.wasWelded,
+                    edgeWelded = e.wasEdgeWelded,
+                    vertPositions = positions,
+                    vertUv0 = uv0List.ToArray(),
+                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
+                    toolVersion = Uv2DataAsset.ToolVersionStr,
+                    sourceFingerprint = fp,
+                    targetUvChannel = ctx.PipeSettings.targetUvChannel,
+                    stepMeshopt = e.wasWelded,
+                    stepEdgeWeld = e.wasEdgeWelded,
+                    stepSymmetrySplit = e.wasSymmetrySplit,
+                    stepRepack = (e.lodIndex == ctx.SourceLodIndex),
+                    stepTransfer = (e.lodIndex != ctx.SourceLodIndex),
+                });
+            }
+
+            if (fbxGroups.Count == 0) { UvtLog.Warn("[Apply] No meshes with UV2 data."); return; }
+
+            // Save sidecar assets
+            foreach (var kv in fbxGroups)
+            {
+                string sidecarPath = Uv2DataAsset.GetSidecarPath(kv.Key);
+                var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+                if (data == null)
+                {
+                    data = ScriptableObject.CreateInstance<Uv2DataAsset>();
+                    AssetDatabase.CreateAsset(data, sidecarPath);
+                }
+                foreach (var entry in kv.Value)
+                    data.Set(entry);
+                EditorUtility.SetDirty(data);
+                AssetDatabase.SaveAssets();
+
+                // Reimport FBX so the postprocessor replays UV2
+                AssetDatabase.ImportAsset(kv.Key);
+            }
+
+            UvtLog.Info($"[Apply] Done — {fbxGroups.Count} FBX(es) updated.");
             SwitchToPostApplyView();
             SaveSettingsToSidecar();
+        }
+
+        Mesh GetResultMesh(MeshEntry e)
+        {
+            Mesh m = e.lodIndex == ctx.SourceLodIndex ? e.repackedMesh : e.transferredMesh;
+            if (m != null) return m;
+            if (e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit)
+                return e.originalMesh;
+            return null;
         }
 
         void ExportFbx(bool overwriteSource)
         {
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
-            UvTransferPipeline.ExportFbx(ctx.MeshEntries, ctx.SourceLodIndex, overwriteSource);
+            if (ctx.LodGroup == null) { UvtLog.Error("[FBX Export] No LODGroup loaded."); return; }
+
+            var fbxGroups = new Dictionary<string, List<(MeshEntry entry, Mesh resultMesh)>>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (!e.include) continue;
+                Mesh resultMesh = GetResultMesh(e);
+                if (resultMesh == null) continue;
+                Mesh pathMesh = e.fbxMesh ?? e.originalMesh;
+                string fbxPath = pathMesh != null ? AssetDatabase.GetAssetPath(pathMesh) : null;
+                if (string.IsNullOrEmpty(fbxPath)) continue;
+                if (!fbxGroups.ContainsKey(fbxPath))
+                    fbxGroups[fbxPath] = new List<(MeshEntry, Mesh)>();
+                fbxGroups[fbxPath].Add((e, resultMesh));
+            }
+            if (fbxGroups.Count == 0) { UvtLog.Error("[FBX Export] No processed meshes to export."); return; }
+
+            foreach (var kv in fbxGroups)
+            {
+                string sourceFbxPath = kv.Key;
+                var entries = kv.Value;
+                string exportPath;
+                if (overwriteSource)
+                {
+                    if (!EditorUtility.DisplayDialog("Overwrite Source FBX",
+                        "This will overwrite:\n" + sourceFbxPath + "\n\nA backup (.fbx.bak) will be created. Continue?",
+                        "Overwrite", "Cancel")) continue;
+                    exportPath = sourceFbxPath;
+                    string fullSource = System.IO.Path.GetFullPath(sourceFbxPath);
+                    try { System.IO.File.Copy(fullSource, fullSource + ".bak", true); }
+                    catch (Exception ex) { UvtLog.Error("[FBX Export] Backup failed: " + ex.Message); continue; }
+                }
+                else
+                {
+                    string dir = System.IO.Path.GetDirectoryName(sourceFbxPath);
+                    string baseName = System.IO.Path.GetFileNameWithoutExtension(sourceFbxPath);
+                    exportPath = EditorUtility.SaveFilePanel("Export FBX", dir, baseName + "_uv2.fbx", "fbx");
+                    if (string.IsNullOrEmpty(exportPath)) continue;
+                    string dataPath = Application.dataPath;
+                    if (exportPath.StartsWith(dataPath))
+                        exportPath = "Assets" + exportPath.Substring(dataPath.Length);
+                }
+
+                var tempRoot = new GameObject("__FbxExportTemp__");
+                try
+                {
+                    foreach (var (entry, resultMesh) in entries)
+                    {
+                        var child = new GameObject(resultMesh.name);
+                        child.transform.SetParent(tempRoot.transform, false);
+                        if (entry.renderer != null)
+                        {
+                            child.transform.position = entry.renderer.transform.position;
+                            child.transform.rotation = entry.renderer.transform.rotation;
+                            child.transform.localScale = entry.renderer.transform.lossyScale;
+                        }
+                        var mf = child.AddComponent<MeshFilter>();
+                        mf.sharedMesh = resultMesh;
+                        var mr = child.AddComponent<MeshRenderer>();
+                        if (entry.renderer != null) mr.sharedMaterials = entry.renderer.sharedMaterials;
+                    }
+                    ModelExporter.ExportObject(exportPath, tempRoot);
+                    UvtLog.Info("[FBX Export] Exported " + entries.Count + " mesh(es) -> " + exportPath);
+                }
+                catch (Exception ex) { UvtLog.Error("[FBX Export] Export failed: " + ex); }
+                finally { UnityEngine.Object.DestroyImmediate(tempRoot); }
+            }
+            AssetDatabase.Refresh();
 #endif
         }
 
         void GenerateLods()
         {
             if (ctx.LodGroup == null) return;
-            UvTransferPipeline.GenerateLods(ctx.LodGroup, ctx.ForLod(ctx.SourceLodIndex),
-                generateLodCount, generateLodRatios, generateTargetError,
-                generateUv2Weight, generateNormalWeight, generateLockBorder, generateAddToLodGroup);
+
+            var sourceMeshes = new List<(MeshEntry entry, Mesh mesh)>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (!e.include || e.lodIndex != ctx.SourceLodIndex) continue;
+                Mesh src = e.repackedMesh ?? e.originalMesh;
+                if (src != null) sourceMeshes.Add((e, src));
+            }
+            if (sourceMeshes.Count == 0) { UvtLog.Error("[GenerateLOD] No source meshes found."); return; }
+
+            string savePath = ctx.PipeSettings.savePath;
+            if (string.IsNullOrEmpty(savePath)) savePath = "Assets/LightmapUvTool_Output";
+            if (!AssetDatabase.IsValidFolder(savePath))
+            {
+                var par = System.IO.Path.GetDirectoryName(savePath);
+                var fld = System.IO.Path.GetFileName(savePath);
+                if (!string.IsNullOrEmpty(par)) AssetDatabase.CreateFolder(par, fld);
+            }
+
+            var lods = ctx.LodGroup.GetLODs();
+            var newLods = new List<LOD>(lods);
+
+            try
+            {
+                for (int lodIdx = 0; lodIdx < generateLodCount; lodIdx++)
+                {
+                    float ratio = generateLodRatios[lodIdx];
+                    var settings = new MeshSimplifier.SimplifySettings
+                    {
+                        targetRatio  = ratio,
+                        targetError  = generateTargetError,
+                        uv2Weight    = generateUv2Weight,
+                        normalWeight = generateNormalWeight,
+                        lockBorder   = generateLockBorder,
+                        uvChannel    = ctx.PipeSettings.targetUvChannel
+                    };
+
+                    float progress = (float)lodIdx / generateLodCount;
+                    EditorUtility.DisplayProgressBar("Generate LODs",
+                        $"LOD {lodIdx + 1}/{generateLodCount} (ratio {ratio:P0})", progress);
+
+                    var lodRenderers = new List<Renderer>();
+                    foreach (var (entry, srcMesh) in sourceMeshes)
+                    {
+                        var r = MeshSimplifier.Simplify(srcMesh, settings);
+                        if (!r.ok) { UvtLog.Error($"[GenerateLOD] Failed on {srcMesh.name}: {r.error}"); continue; }
+
+                        string meshName = srcMesh.name + "_LOD" + (ctx.SourceLodIndex + lodIdx + 1);
+                        r.simplifiedMesh.name = meshName;
+                        string assetPath = AssetDatabase.GenerateUniqueAssetPath(savePath + "/" + meshName + ".asset");
+                        AssetDatabase.CreateAsset(r.simplifiedMesh, assetPath);
+                        UvtLog.Info($"[GenerateLOD] {meshName}: {r.originalTriCount} → {r.simplifiedTriCount} tris, saved → {assetPath}");
+
+                        if (generateAddToLodGroup && entry.renderer != null)
+                        {
+                            var go = new GameObject(meshName);
+                            go.transform.SetParent(ctx.LodGroup.transform, false);
+                            go.transform.localPosition = entry.renderer.transform.localPosition;
+                            go.transform.localRotation = entry.renderer.transform.localRotation;
+                            go.transform.localScale    = entry.renderer.transform.localScale;
+                            var mf = go.AddComponent<MeshFilter>();
+                            mf.sharedMesh = r.simplifiedMesh;
+                            var mr = go.AddComponent<MeshRenderer>();
+                            mr.sharedMaterials = entry.renderer.sharedMaterials;
+                            Undo.RegisterCreatedObjectUndo(go, "Generate LOD");
+                            lodRenderers.Add(mr);
+                        }
+                    }
+
+                    if (generateAddToLodGroup && lodRenderers.Count > 0)
+                    {
+                        int newLodIdx = ctx.SourceLodIndex + lodIdx + 1;
+                        float baseHeight = newLods.Count > 0 ? newLods[newLods.Count - 1].screenRelativeTransitionHeight : 0.5f;
+                        float height = baseHeight * 0.5f;
+                        var newLod = new LOD(height, lodRenderers.ToArray());
+                        if (newLodIdx < newLods.Count) newLods.Insert(newLodIdx, newLod);
+                        else newLods.Add(newLod);
+                    }
+                }
+
+                if (generateAddToLodGroup)
+                {
+                    Undo.RecordObject(ctx.LodGroup, "Generate LODs");
+                    ctx.LodGroup.SetLODs(newLods.ToArray());
+                }
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+            finally { EditorUtility.ClearProgressBar(); }
+
             ctx.Refresh(ctx.LodGroup);
             OnRefresh();
             requestRepaint?.Invoke();
@@ -696,12 +976,38 @@ namespace LightmapUvTool
 
         void SaveAll()
         {
-            UvTransferPipeline.SaveMeshAssets(ctx.MeshEntries, ctx.PipeSettings.savePath);
+            string p = ctx.PipeSettings.savePath;
+            if (string.IsNullOrEmpty(p)) p = "Assets/LightmapUvTool_Output";
+            if (!AssetDatabase.IsValidFolder(p))
+            {
+                var par = System.IO.Path.GetDirectoryName(p);
+                var fld = System.IO.Path.GetFileName(p);
+                if (!string.IsNullOrEmpty(par)) AssetDatabase.CreateFolder(par, fld);
+            }
+            int n = 0;
+            foreach (var e in ctx.MeshEntries)
+            {
+                Mesh m = GetResultMesh(e);
+                if (m == null) continue;
+                string ap = AssetDatabase.GenerateUniqueAssetPath(p + "/" + m.name + ".asset");
+                AssetDatabase.CreateAsset(m, ap); n++;
+            }
+            AssetDatabase.SaveAssets(); AssetDatabase.Refresh();
+            UvtLog.Info("[Save] " + n + " assets -> " + p);
         }
 
         void UpdateRefs()
         {
-            UvTransferPipeline.UpdateLodGroupRefs(ctx.LodGroup, ctx.MeshEntries, ctx.SourceLodIndex);
+            if (ctx.LodGroup == null) return;
+            int n = 0;
+            foreach (var e in ctx.MeshEntries)
+            {
+                Mesh m = GetResultMesh(e);
+                if (m == null || e.meshFilter == null) continue;
+                Undo.RecordObject(e.meshFilter, "UV Transfer");
+                e.meshFilter.sharedMesh = m; n++;
+            }
+            UvtLog.Info("[Save] " + n + " refs updated");
         }
 
         // ════════════════════════════════════════════════════════════
