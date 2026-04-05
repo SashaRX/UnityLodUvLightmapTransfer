@@ -3881,15 +3881,6 @@ namespace LightmapUvTool
                         string objName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
                         var child = new GameObject(objName);
                         child.transform.SetParent(tempRoot.transform, false);
-
-                        // Copy transform from original renderer
-                        if (entry.renderer != null)
-                        {
-                            child.transform.position = entry.renderer.transform.position;
-                            child.transform.rotation = entry.renderer.transform.rotation;
-                            child.transform.localScale = entry.renderer.transform.lossyScale;
-                        }
-
                         var mf = child.AddComponent<MeshFilter>();
                         mf.sharedMesh = resultMesh;
 
