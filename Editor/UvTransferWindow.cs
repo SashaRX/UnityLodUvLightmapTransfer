@@ -102,6 +102,15 @@ namespace LightmapUvTool
         string selectedFbxPath;
         string selectedResetLabel;
 
+        // LOD generation
+        int generateLodCount = 2;
+        float[] generateLodRatios = { 0.5f, 0.25f, 0.125f, 0.0625f };
+        float generateTargetError = 0.01f;
+        float generateUv2Weight = 100f;
+        float generateNormalWeight = 1f;
+        bool generateLockBorder = true;
+        bool generateAddToLodGroup = true;
+
         // Sidebar foldouts
         bool foldProjection = true;
         bool foldBorderRepair = false;
@@ -1086,6 +1095,23 @@ namespace LightmapUvTool
                     "Window → Package Manager → + → Add package by name → com.unity.formats.fbx",
                     MessageType.Info);
 #endif
+
+                // ── Generate LODs ──
+                EditorGUILayout.Space(4);
+                H("Generate LODs (Simplify)");
+                generateLodCount = EditorGUILayout.IntSlider("LOD Count", generateLodCount, 1, 4);
+                for (int i = 0; i < generateLodCount; i++)
+                {
+                    if (i >= generateLodRatios.Length) break;
+                    generateLodRatios[i] = EditorGUILayout.Slider(
+                        "  LOD" + (i + 1) + " ratio", generateLodRatios[i], 0.01f, 0.99f);
+                }
+                generateTargetError = EditorGUILayout.Slider("Target Error", generateTargetError, 0.001f, 0.5f);
+                generateUv2Weight = EditorGUILayout.Slider("UV2 Weight", generateUv2Weight, 0f, 500f);
+                generateNormalWeight = EditorGUILayout.Slider("Normal Weight", generateNormalWeight, 0f, 10f);
+                generateLockBorder = EditorGUILayout.Toggle("Lock Border", generateLockBorder);
+                generateAddToLodGroup = EditorGUILayout.Toggle("Add to LODGroup", generateAddToLodGroup);
+                ColorBtn(new Color(.7f,.4f,.95f), "Generate LODs", 26, GenerateLods);
 
                 EditorGUILayout.Space(4);
                 H("Legacy Save");
@@ -3872,6 +3898,135 @@ namespace LightmapUvTool
             AssetDatabase.Refresh();
         }
 #endif
+
+        // ════════════════════════════════════════════════════════════
+        //  Generate LODs (Simplification)
+        // ════════════════════════════════════════════════════════════
+
+        void GenerateLods()
+        {
+            if (lodGroup == null) { UvtLog.Error("[GenerateLOD] No LODGroup loaded."); return; }
+
+            // Find source meshes: prefer repacked (has UV2), fall back to original
+            var sourceMeshes = new List<(MeshEntry entry, Mesh mesh)>();
+            foreach (var e in meshEntries)
+            {
+                if (!e.include || e.lodIndex != sourceLodIndex) continue;
+                Mesh src = e.repackedMesh ?? e.originalMesh;
+                if (src != null) sourceMeshes.Add((e, src));
+            }
+
+            if (sourceMeshes.Count == 0)
+            {
+                UvtLog.Error("[GenerateLOD] No source meshes found. Run Repack first or select a LOD with meshes.");
+                return;
+            }
+
+            // Output folder
+            string savePath = pipeSettings.savePath;
+            if (string.IsNullOrEmpty(savePath)) savePath = "Assets/LightmapUvTool_Output";
+            if (!AssetDatabase.IsValidFolder(savePath))
+            {
+                var par = System.IO.Path.GetDirectoryName(savePath);
+                var fld = System.IO.Path.GetFileName(savePath);
+                if (!string.IsNullOrEmpty(par)) AssetDatabase.CreateFolder(par, fld);
+            }
+
+            var lods = lodGroup.GetLODs();
+            var newLods = new List<LOD>(lods);
+
+            try
+            {
+                for (int lodIdx = 0; lodIdx < generateLodCount; lodIdx++)
+                {
+                    float ratio = generateLodRatios[lodIdx];
+                    var settings = new MeshSimplifier.SimplifySettings
+                    {
+                        targetRatio  = ratio,
+                        targetError  = generateTargetError,
+                        uv2Weight    = generateUv2Weight,
+                        normalWeight = generateNormalWeight,
+                        lockBorder   = generateLockBorder,
+                        uvChannel    = pipeSettings.targetUvChannel
+                    };
+
+                    float progress = (float)lodIdx / generateLodCount;
+                    EditorUtility.DisplayProgressBar("Generate LODs",
+                        $"LOD {lodIdx + 1}/{generateLodCount} (ratio {ratio:P0})", progress);
+
+                    var lodRenderers = new List<Renderer>();
+
+                    foreach (var (entry, srcMesh) in sourceMeshes)
+                    {
+                        var r = MeshSimplifier.Simplify(srcMesh, settings);
+                        if (!r.ok)
+                        {
+                            UvtLog.Error($"[GenerateLOD] Failed on {srcMesh.name}: {r.error}");
+                            continue;
+                        }
+
+                        string meshName = srcMesh.name + "_LOD" + (sourceLodIndex + lodIdx + 1);
+                        r.simplifiedMesh.name = meshName;
+
+                        // Save as asset
+                        string assetPath = AssetDatabase.GenerateUniqueAssetPath(savePath + "/" + meshName + ".asset");
+                        AssetDatabase.CreateAsset(r.simplifiedMesh, assetPath);
+
+                        UvtLog.Info($"[GenerateLOD] {meshName}: {r.originalTriCount} → {r.simplifiedTriCount} tris, saved → {assetPath}");
+
+                        // Create scene object if adding to LODGroup
+                        if (generateAddToLodGroup && entry.renderer != null)
+                        {
+                            var go = new GameObject(meshName);
+                            go.transform.SetParent(lodGroup.transform, false);
+                            go.transform.localPosition = entry.renderer.transform.localPosition;
+                            go.transform.localRotation = entry.renderer.transform.localRotation;
+                            go.transform.localScale    = entry.renderer.transform.localScale;
+
+                            var mf = go.AddComponent<MeshFilter>();
+                            mf.sharedMesh = r.simplifiedMesh;
+
+                            var mr = go.AddComponent<MeshRenderer>();
+                            mr.sharedMaterials = entry.renderer.sharedMaterials;
+
+                            Undo.RegisterCreatedObjectUndo(go, "Generate LOD");
+                            lodRenderers.Add(mr);
+                        }
+                    }
+
+                    // Add LOD level to LODGroup
+                    if (generateAddToLodGroup && lodRenderers.Count > 0)
+                    {
+                        int newLodIdx = sourceLodIndex + lodIdx + 1;
+                        // Compute screen transition height (exponential falloff)
+                        float baseHeight = newLods.Count > 0 ? newLods[newLods.Count - 1].screenRelativeTransitionHeight : 0.5f;
+                        float height = baseHeight * 0.5f;
+
+                        var newLod = new LOD(height, lodRenderers.ToArray());
+                        if (newLodIdx < newLods.Count)
+                            newLods.Insert(newLodIdx, newLod);
+                        else
+                            newLods.Add(newLod);
+                    }
+                }
+
+                if (generateAddToLodGroup)
+                {
+                    Undo.RecordObject(lodGroup, "Generate LODs");
+                    lodGroup.SetLODs(newLods.ToArray());
+                    Refresh();
+                }
+
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            Repaint();
+        }
 
         // ════════════════════════════════════════════════════════════
         //  Checker Preview
