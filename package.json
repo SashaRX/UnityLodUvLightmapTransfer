@@ -22,6 +22,6 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "com.unity.formats.fbx": "4.1.0"
+    "com.unity.formats.fbx": "5.0.0"
   }
 }

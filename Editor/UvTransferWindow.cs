@@ -3897,8 +3897,9 @@ namespace LightmapUvTool
                             mr.sharedMaterials = entry.renderer.sharedMaterials;
                     }
 
-                    ModelExporter.ExportObject(exportPath, tempRoot);
-                    UvtLog.Info("[FBX Export] Exported " + entries.Count + " mesh(es) -> " + exportPath);
+                    var exportOptions = new ExportModelOptions { ExportFormat = ExportFormat.Binary };
+                    ModelExporter.ExportObjects(exportPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
+                    UvtLog.Info("[FBX Export] Exported (binary) " + entries.Count + " mesh(es) -> " + exportPath);
                 }
                 catch (Exception ex)
                 {
