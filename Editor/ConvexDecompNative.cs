@@ -23,7 +23,12 @@ namespace LightmapUvTool
             int     maxHulls,
             int     resolution,
             int     maxVertsPerHull,
-            float   minVolumePerHull);
+            float   minVolumePerHull,
+            int     maxRecursionDepth,
+            int     shrinkWrap,
+            int     fillMode,
+            int     minEdgeLength,
+            int     findBestPlane);
 
         [DllImport(DLL)]
         public static extern int ConvexDecomp_GetHullCount(IntPtr ctx);

@@ -34,6 +34,11 @@ namespace LightmapUvTool
         int   convexMaxHulls        = 16;
         int   convexResolution      = 100000;
         int   convexMaxVertsPerHull = 64;
+        int   convexMaxRecursionDepth = 10;
+        bool  convexShrinkWrap      = true;
+        int   convexFillMode        = 0; // 0=FloodFill, 1=SurfaceOnly, 2=RaycastFill
+        int   convexMinEdgeLength   = 2;
+        bool  convexFindBestPlane   = false;
 
         // ── Results ──
         CollisionMode generatedMode; // mode used during last Generate (for Apply)
@@ -189,23 +194,52 @@ namespace LightmapUvTool
             }
         }
 
+        static readonly string[] fillModeNames = { "Flood Fill", "Surface Only", "Raycast Fill" };
+
         void DrawSimplifiedSettings()
         {
             EditorGUILayout.HelpBox("For static objects, terrain, walls. Creates a single non-convex MeshCollider.", MessageType.None);
-            simplifyTargetRatio = EditorGUILayout.Slider("Target Ratio", simplifyTargetRatio, 0.01f, 0.5f);
-            simplifyTargetError = EditorGUILayout.Slider("Target Error", simplifyTargetError, 0.01f, 1.0f);
+            simplifyTargetRatio = EditorGUILayout.Slider(
+                new GUIContent("Target Ratio", "Fraction of triangles to keep (0.05 = 5%). Lower = fewer triangles, rougher shape."),
+                simplifyTargetRatio, 0.01f, 0.5f);
+            simplifyTargetError = EditorGUILayout.Slider(
+                new GUIContent("Target Error", "Maximum allowed geometric error. Higher = more aggressive simplification, less accurate shape."),
+                simplifyTargetError, 0.01f, 1.0f);
         }
 
         void DrawConvexSettings()
         {
             EditorGUILayout.HelpBox("For dynamic/kinematic objects. Creates compound convex MeshColliders.", MessageType.None);
-            convexMaxHulls        = EditorGUILayout.IntSlider("Max Hulls", convexMaxHulls, 1, 64);
-            convexResolution      = EditorGUILayout.IntField("Resolution", convexResolution);
-            convexResolution      = Mathf.Clamp(convexResolution, 10000, 1000000);
-            convexMaxVertsPerHull = EditorGUILayout.IntSlider("Max Verts/Hull", convexMaxVertsPerHull, 8, 255);
+            convexMaxHulls = EditorGUILayout.IntSlider(
+                new GUIContent("Max Hulls", "Maximum number of convex hulls to produce. More hulls = better shape approximation, higher cost."),
+                convexMaxHulls, 1, 64);
+            convexResolution = EditorGUILayout.IntField(
+                new GUIContent("Resolution", "Voxel grid resolution. Higher = more precise decomposition, slower computation. (10K\u20131M)"),
+                convexResolution);
+            convexResolution = Mathf.Clamp(convexResolution, 10000, 1000000);
+            convexMaxVertsPerHull = EditorGUILayout.IntSlider(
+                new GUIContent("Max Verts/Hull", "Maximum vertices per convex hull. PhysX hard limit is 255. Lower = simpler hulls."),
+                convexMaxVertsPerHull, 8, 255);
 
             if (convexMaxVertsPerHull > 128)
                 EditorGUILayout.HelpBox("Values above 128 may cause issues with some physics engines.", MessageType.Warning);
+
+            EditorGUILayout.Space(4);
+            convexFillMode = EditorGUILayout.Popup(
+                new GUIContent("Fill Mode", "How to determine inside vs outside.\n\nFlood Fill: default, works for closed meshes.\nSurface Only: hollow result, for thin shells.\nRaycast Fill: better for meshes with holes."),
+                convexFillMode, fillModeNames);
+            convexMaxRecursionDepth = EditorGUILayout.IntSlider(
+                new GUIContent("Max Recursion", "Maximum depth of recursive splitting. Higher = finer decomposition, slower. Default: 10."),
+                convexMaxRecursionDepth, 1, 25);
+            convexMinEdgeLength = EditorGUILayout.IntSlider(
+                new GUIContent("Min Edge Length", "Stop recursing when voxel patch edge is below this length. Lower = more detail. Default: 2."),
+                convexMinEdgeLength, 1, 8);
+            convexShrinkWrap = EditorGUILayout.Toggle(
+                new GUIContent("Shrink Wrap", "Snap voxel hull vertices back to the original mesh surface for tighter fit."),
+                convexShrinkWrap);
+            convexFindBestPlane = EditorGUILayout.Toggle(
+                new GUIContent("Find Best Plane", "Experimental: search for optimal split plane instead of axis-aligned. Slower but can produce better results."),
+                convexFindBestPlane);
         }
 
         // ── Generate ──
@@ -270,10 +304,15 @@ namespace LightmapUvTool
         {
             var settings = new CollisionMeshBuilder.ConvexDecompSettings
             {
-                maxHulls         = convexMaxHulls,
-                resolution       = convexResolution,
-                maxVertsPerHull  = convexMaxVertsPerHull,
-                minVolumePerHull = 1f
+                maxHulls          = convexMaxHulls,
+                resolution        = convexResolution,
+                maxVertsPerHull   = convexMaxVertsPerHull,
+                minVolumePerHull  = 1f,
+                maxRecursionDepth = convexMaxRecursionDepth,
+                shrinkWrap        = convexShrinkWrap,
+                fillMode          = convexFillMode,
+                minEdgeLength     = convexMinEdgeLength,
+                findBestPlane     = convexFindBestPlane
             };
 
             var result = CollisionMeshBuilder.BuildConvexDecomposition(sourceMesh, settings);

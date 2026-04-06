@@ -68,13 +68,23 @@ namespace LightmapUvTool
             public int   resolution;
             public int   maxVertsPerHull;
             public float minVolumePerHull;
+            public int   maxRecursionDepth;
+            public bool  shrinkWrap;
+            public int   fillMode;        // 0=FloodFill, 1=SurfaceOnly, 2=RaycastFill
+            public int   minEdgeLength;
+            public bool  findBestPlane;
 
             public static ConvexDecompSettings Default => new ConvexDecompSettings
             {
-                maxHulls         = 16,
-                resolution       = 100000,
-                maxVertsPerHull  = 64,
-                minVolumePerHull = 1f  // V-HACD: percentage error allowed
+                maxHulls          = 16,
+                resolution        = 100000,
+                maxVertsPerHull   = 64,
+                minVolumePerHull  = 1f,
+                maxRecursionDepth = 10,
+                shrinkWrap        = true,
+                fillMode          = 0,
+                minEdgeLength     = 2,
+                findBestPlane     = false
             };
         }
 
@@ -146,7 +156,12 @@ namespace LightmapUvTool
                     settings.maxHulls,
                     settings.resolution,
                     maxVPH,
-                    settings.minVolumePerHull);
+                    settings.minVolumePerHull,
+                    settings.maxRecursionDepth,
+                    settings.shrinkWrap ? 1 : 0,
+                    settings.fillMode,
+                    settings.minEdgeLength,
+                    settings.findBestPlane ? 1 : 0);
 
                 if (ctx == IntPtr.Zero)
                 {

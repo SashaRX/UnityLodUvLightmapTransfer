@@ -45,7 +45,12 @@ EXPORT void* ConvexDecomp_Compute(
     int          maxHulls,
     int          resolution,
     int          maxVertsPerHull,
-    float        minVolumePerHull)
+    float        minVolumePerHull,
+    int          maxRecursionDepth,
+    int          shrinkWrap,
+    int          fillMode,
+    int          minEdgeLength,
+    int          findBestPlane)
 {
     if (!vertices || !indices || vertexCount <= 0 || indexCount < 3)
         return nullptr;
@@ -59,6 +64,11 @@ EXPORT void* ConvexDecomp_Compute(
     params.m_resolution                        = (uint32_t)resolution;
     params.m_maxNumVerticesPerCH               = (uint32_t)maxVertsPerHull;
     params.m_minimumVolumePercentErrorAllowed   = (double)minVolumePerHull;
+    params.m_maxRecursionDepth                 = (uint32_t)maxRecursionDepth;
+    params.m_shrinkWrap                        = (shrinkWrap != 0);
+    params.m_fillMode                          = (VHACD::FillMode)fillMode;
+    params.m_minEdgeLength                     = (uint32_t)minEdgeLength;
+    params.m_findBestPlane                     = (findBestPlane != 0);
     params.m_asyncACD                          = false; // synchronous — block until done
 
     uint32_t triangleCount = (uint32_t)(indexCount / 3);
