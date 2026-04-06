@@ -311,7 +311,7 @@ namespace LightmapUvTool
                     }
 
                     var mc = Undo.AddComponent<MeshCollider>(go);
-                    mc.sharedMesh = generatedMeshes[meshIdx];
+                    mc.sharedMesh = CreateAppliedMeshCopy(generatedMeshes[meshIdx], go.name + "_Mesh");
                     mc.convex = false;
                     meshIdx++;
                 }
@@ -342,7 +342,7 @@ namespace LightmapUvTool
                         hullGo.transform.SetParent(container.transform, false);
 
                         var mc = Undo.AddComponent<MeshCollider>(hullGo);
-                        mc.sharedMesh = generatedMeshes[meshIdx];
+                        mc.sharedMesh = CreateAppliedMeshCopy(generatedMeshes[meshIdx], hullGo.name + "_Mesh");
                         mc.convex = true;
                     }
                 }
@@ -350,6 +350,15 @@ namespace LightmapUvTool
 
             Undo.CollapseUndoOperations(undoGroup);
             UvtLog.Info("Collision meshes applied to scene.");
+        }
+
+        static Mesh CreateAppliedMeshCopy(Mesh source, string fallbackName)
+        {
+            if (source == null) return null;
+
+            var instance = UnityEngine.Object.Instantiate(source);
+            instance.name = string.IsNullOrEmpty(source.name) ? fallbackName : source.name + "_Applied";
+            return instance;
         }
 
         void RemoveFromScene()
