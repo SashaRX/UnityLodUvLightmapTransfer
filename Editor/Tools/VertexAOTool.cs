@@ -191,10 +191,15 @@ namespace LightmapUvTool
 
             // Bake button
             var bgc = GUI.backgroundColor;
+            EditorGUILayout.BeginHorizontal();
             GUI.backgroundColor = new Color(.4f, .8f, .4f);
             if (GUILayout.Button("Bake Vertex AO", GUILayout.Height(28)))
                 ExecuteBake();
+            GUI.backgroundColor = new Color(.6f, .75f, .9f);
+            if (GUILayout.Button("Load from Mesh", GUILayout.Height(28)))
+                LoadFromMesh();
             GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
 
             // Results
             if (bakedFinalAO != null && bakedFinalAO.Count > 0)
@@ -351,6 +356,83 @@ namespace LightmapUvTool
             // Auto-enable preview after bake
             ActivatePreview();
             requestRepaint?.Invoke();
+        }
+
+        void LoadFromMesh()
+        {
+            RestorePreview();
+
+            var entries = ctx.MeshEntries
+                .Where(e => e.include && e.renderer != null)
+                .ToList();
+
+            if (entries.Count == 0)
+            {
+                UvtLog.Warn("[Vertex AO] No meshes found.");
+                return;
+            }
+
+            var channel = TargetChannel;
+            bakedRawAO = new Dictionary<Mesh, float[]>();
+            bakedFaceAreaAO = null;
+            bakedVertexCount = 0;
+
+            foreach (var e in entries)
+            {
+                Mesh mesh = e.originalMesh ?? e.fbxMesh;
+                if (mesh == null) continue;
+
+                var ao = ReadFromChannel(mesh, channel);
+                if (ao == null) continue;
+
+                bakedRawAO[mesh] = ao;
+                bakedVertexCount += ao.Length;
+            }
+
+            if (bakedRawAO.Count == 0)
+            {
+                UvtLog.Warn($"[Vertex AO] No AO data found in {TargetChannelName}.");
+                bakedRawAO = null;
+                return;
+            }
+
+            bakeTimeSeconds = 0;
+            ApplyBlurInternal();
+            ActivatePreview();
+            requestRepaint?.Invoke();
+            UvtLog.Info($"[Vertex AO] Loaded {bakedVertexCount} vertices from {TargetChannelName}");
+        }
+
+        static float[] ReadFromChannel(Mesh mesh, AOTargetChannel channel)
+        {
+            int ch = (int)channel;
+            int vertCount = mesh.vertexCount;
+
+            if (ch <= (int)AOTargetChannel.VertexColorA)
+            {
+                var colors = mesh.colors32;
+                if (colors == null || colors.Length != vertCount) return null;
+                int comp = ch - (int)AOTargetChannel.VertexColorR;
+                var ao = new float[vertCount];
+                for (int i = 0; i < vertCount; i++)
+                {
+                    var c = colors[i];
+                    ao[i] = (comp == 0 ? c.r : comp == 1 ? c.g : comp == 2 ? c.b : c.a) / 255f;
+                }
+                return ao;
+            }
+            else
+            {
+                int uvIdx = (ch - (int)AOTargetChannel.UV0_X) / 2;
+                int comp  = (ch - (int)AOTargetChannel.UV0_X) % 2;
+                var uvs = new List<Vector2>();
+                mesh.GetUVs(uvIdx, uvs);
+                if (uvs.Count != vertCount) return null;
+                var ao = new float[vertCount];
+                for (int i = 0; i < vertCount; i++)
+                    ao[i] = comp == 0 ? uvs[i].x : uvs[i].y;
+                return ao;
+            }
         }
 
         void ApplyBlur()
