@@ -4,7 +4,7 @@ Unity Editor tool suite for lightmap UV management, LOD generation, and collisio
 
 ## Overview
 
-Mesh Lab provides five integrated tools accessible via **Tools → Mesh Lab**:
+Mesh Lab provides six integrated tools accessible via **Tools → Mesh Lab**:
 
 | Tab | Purpose |
 |-----|---------|
@@ -13,6 +13,7 @@ Mesh Lab provides five integrated tools accessible via **Tools → Mesh Lab**:
 | **UV0 Optimize** | UV0 analysis and optimization |
 | **LOD Gen** | Generate LOD meshes via meshoptimizer simplification with UV2 preservation |
 | **Collision** | Generate collision meshes — simplified (non-convex) or V-HACD convex decomposition |
+| **Vertex AO** | GPU-accelerated vertex ambient occlusion baking via hemisphere depth sampling |
 
 ## UV2 Transfer
 
@@ -51,12 +52,33 @@ Two modes for generating physics collision meshes from any LOD:
 * **Save to Sidecar** — persists collision data in `_uv2data.asset` for FBX reimport
 * **FBX Export** — collision meshes are automatically included when exporting FBX
 
+## Auto LODGroup Creation
+
+When no LODGroup exists, the Setup tab and LOD Gen tab detect LOD siblings automatically:
+
+* **LOD-named children** (`Chair_LOD0`, `Chair_LOD1`) — detected and listed, one-click "Add LOD Group" creates correct multi-level LODGroup
+* **No LOD naming** — fallback detects any child renderers, creates LODGroup with all renderers as LOD0, renames children to `_LOD0` for consistency
+* **Auto-clear stale context** — selecting a new mesh object automatically clears the previous LODGroup reference
+
+After creation, use LOD Gen to generate lower LODs and the naming (`_LOD1`, `_LOD2`) is handled automatically.
+
+## Vertex AO Baking
+
+GPU-accelerated per-vertex ambient occlusion via hemisphere depth sampling:
+
+* Renders depth maps from multiple hemisphere directions around each vertex
+* Compute shader accumulates occlusion from depth comparisons
+* Configurable sample count, radius, bias, normal offset, and intensity
+* CPU fallback for platforms without compute shader support
+* Results written to vertex colors or UV channels
+
 ## Key characteristics
 
 * **Repack, not full unwrap** — preserves existing UV0 shell structure
 * **LOD-aware UV transfer** — transfers UV2 through UV0 shell correspondence
 * **Collision from any LOD** — generate collision meshes from source LOD geometry
 * **Dual save** — results persist as Unity assets and in FBX exports
+* **Vertex AO** — GPU hemisphere depth sampling for per-vertex ambient occlusion
 * **Diagnostics included** — transfer quality, shell visualization, wireframe preview
 
 ## Dependencies
@@ -96,8 +118,9 @@ git clone https://github.com/SashaRX/UnityLodUvLightmapTransfer.git com.sasharx.
 2. Select a `LODGroup` in the scene (or select a GameObject with LOD children — LOD Gen tab can auto-create the group)
 3. Use the tabs for your workflow:
    - **UV2 Transfer**: Analyze → Weld → Repack → Transfer → Apply UV2 / Export FBX
-   - **LOD Gen**: Configure ratios → Generate LODs
+   - **LOD Gen**: Configure ratios → Generate LODs (or auto-create LODGroup from renderers)
    - **Collision**: Choose mode → Generate → Apply to Scene / Save to Sidecar
+   - **Vertex AO**: Configure samples → Bake → Apply to vertex colors/UVs
 
 ## Requirements
 
