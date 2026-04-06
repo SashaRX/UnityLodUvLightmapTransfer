@@ -144,6 +144,140 @@ namespace LightmapUvTool
             if (!neighbors[b].Contains(a)) neighbors[b].Add(a);
         }
 
+        // ── Face-area AO correction ──
+        // Large polygons where all vertices sit in occluded corners get fully
+        // black even though most of the surface is unoccluded.  This post-pass
+        // shoots rays from triangle centroids and interior sample points.
+        // If the centroid AO is significantly brighter than vertex AO, vertices
+        // are pushed towards the centroid value, weighted by triangle area.
+
+        public static float[] FaceAreaCorrection(
+            float[] ao, Mesh mesh, Matrix4x4 xform,
+            TriangleBvh bvh, Vector3[] directions, float maxDist,
+            float normalOffset, VertexAOSettings settings, float groundY)
+        {
+            var verts = mesh.vertices;
+            var norms = mesh.normals;
+            var tris  = mesh.triangles;
+            int vertCount = verts.Length;
+
+            // Per-vertex correction accumulator (weighted sum)
+            var correction  = new float[vertCount];
+            var totalWeight = new float[vertCount];
+
+            // Median edge length to define "large" triangle threshold
+            float medianArea = ComputeMedianTriArea(verts, tris, xform);
+            float largeThreshold = medianArea * 4f;
+
+            for (int t = 0; t < tris.Length; t += 3)
+            {
+                int i0 = tris[t], i1 = tris[t + 1], i2 = tris[t + 2];
+                Vector3 p0 = xform.MultiplyPoint3x4(verts[i0]);
+                Vector3 p1 = xform.MultiplyPoint3x4(verts[i1]);
+                Vector3 p2 = xform.MultiplyPoint3x4(verts[i2]);
+
+                float area = Vector3.Cross(p1 - p0, p2 - p0).magnitude * 0.5f;
+                if (area < largeThreshold) continue;
+
+                Vector3 faceNorm = Vector3.Cross(p1 - p0, p2 - p0).normalized;
+                if (faceNorm.sqrMagnitude < 0.001f) continue;
+
+                // Sample points inside triangle: centroid + 3 edge midpoints
+                var samplePoints = new Vector3[]
+                {
+                    (p0 + p1 + p2) / 3f,
+                    (p0 + p1) * 0.5f,
+                    (p1 + p2) * 0.5f,
+                    (p2 + p0) * 0.5f
+                };
+
+                float surfaceAO = 0;
+                int surfaceSamples = 0;
+
+                foreach (var pt in samplePoints)
+                {
+                    Vector3 origin = pt + faceNorm * normalOffset;
+                    int occluded = 0, sampled = 0;
+
+                    for (int d = 0; d < directions.Length; d++)
+                    {
+                        if (Vector3.Dot(directions[d], faceNorm) <= 0) continue;
+                        sampled++;
+                        var hit = bvh.Raycast(origin, directions[d], maxDist);
+                        if (hit.triangleIndex >= 0) { occluded++; continue; }
+                        if (settings.groundPlane && directions[d].y < -0.001f)
+                        {
+                            float tt = (groundY - origin.y) / directions[d].y;
+                            if (tt > 0 && tt < maxDist) occluded++;
+                        }
+                    }
+
+                    if (sampled > 0)
+                    {
+                        surfaceAO += 1f - (float)occluded / sampled;
+                        surfaceSamples++;
+                    }
+                }
+
+                if (surfaceSamples == 0) continue;
+                surfaceAO /= surfaceSamples;
+                surfaceAO = Mathf.Pow(Mathf.Clamp01(surfaceAO), settings.intensity);
+
+                float vertexAvgAO = (ao[i0] + ao[i1] + ao[i2]) / 3f;
+
+                // Only correct when surface is significantly brighter than vertices
+                if (surfaceAO <= vertexAvgAO + 0.05f) continue;
+
+                // Weight by area ratio (larger faces get stronger correction)
+                float weight = area / medianArea;
+
+                int[] faceVerts = { i0, i1, i2 };
+                foreach (int vi in faceVerts)
+                {
+                    // Blend vertex AO towards surface AO
+                    correction[vi]  += surfaceAO * weight;
+                    totalWeight[vi] += weight;
+                }
+            }
+
+            // Apply corrections
+            var result = (float[])ao.Clone();
+            int corrected = 0;
+            for (int v = 0; v < vertCount; v++)
+            {
+                if (totalWeight[v] <= 0) continue;
+                float targetAO = correction[v] / totalWeight[v];
+                // Only brighten, never darken
+                if (targetAO > result[v])
+                {
+                    float blend = Mathf.Clamp01(totalWeight[v] / (totalWeight[v] + 1f));
+                    result[v] = Mathf.Lerp(result[v], targetAO, blend);
+                    corrected++;
+                }
+            }
+
+            if (corrected > 0)
+                UvtLog.Info($"[Vertex AO] Face-area correction: {corrected} vertices adjusted.");
+
+            return result;
+        }
+
+        static float ComputeMedianTriArea(Vector3[] verts, int[] tris, Matrix4x4 xform)
+        {
+            int triCount = tris.Length / 3;
+            if (triCount == 0) return 1f;
+            var areas = new float[triCount];
+            for (int t = 0; t < triCount; t++)
+            {
+                Vector3 p0 = xform.MultiplyPoint3x4(verts[tris[t * 3]]);
+                Vector3 p1 = xform.MultiplyPoint3x4(verts[tris[t * 3 + 1]]);
+                Vector3 p2 = xform.MultiplyPoint3x4(verts[tris[t * 3 + 2]]);
+                areas[t] = Vector3.Cross(p1 - p0, p2 - p0).magnitude * 0.5f;
+            }
+            System.Array.Sort(areas);
+            return areas[triCount / 2];
+        }
+
         // ── GPU Path ──
 
         static Dictionary<Mesh, float[]> BakeMultiMeshGPU(
@@ -429,6 +563,12 @@ namespace LightmapUvTool
                     ao[v] = Mathf.Pow(Mathf.Clamp01(aoVal), settings.intensity);
                 }
                 processed += verts.Length;
+
+                // Face-area correction: fix large polygons where all vertices
+                // are in occlusion but the surface itself is mostly open.
+                ao = FaceAreaCorrection(ao, mesh, xform, bvh, directions, maxDist,
+                    normalOffset, settings, groundY);
+
                 result[mesh] = ao;
             }
 
