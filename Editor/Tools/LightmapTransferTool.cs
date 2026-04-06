@@ -1002,9 +1002,40 @@ namespace LightmapUvTool
                         if (entry.renderer != null) mr.sharedMaterials = entry.renderer.sharedMaterials;
                     }
 
+                    // Add collision meshes from sidecar (if any)
+                    var collisionData = CollisionMeshTool.GetCollisionMeshesFromSidecar(sourceFbxPath);
+                    int collisionMeshCount = 0;
+                    foreach (var (colMeshName, colMeshes, isConvex) in collisionData)
+                    {
+                        if (colMeshes.Count == 1 && !isConvex)
+                        {
+                            // Simplified: single _COL child
+                            var colChild = new GameObject(colMeshName + "_COL");
+                            colChild.transform.SetParent(tempRoot.transform, false);
+                            colChild.AddComponent<MeshFilter>().sharedMesh = colMeshes[0];
+                            colChild.AddComponent<MeshRenderer>();
+                            collisionMeshCount++;
+                        }
+                        else
+                        {
+                            // Convex: container with hull children
+                            var container = new GameObject(colMeshName + "_COL");
+                            container.transform.SetParent(tempRoot.transform, false);
+                            for (int hi = 0; hi < colMeshes.Count; hi++)
+                            {
+                                var hullChild = new GameObject($"{colMeshName}_COL_Hull{hi}");
+                                hullChild.transform.SetParent(container.transform, false);
+                                hullChild.AddComponent<MeshFilter>().sharedMesh = colMeshes[hi];
+                                hullChild.AddComponent<MeshRenderer>();
+                                collisionMeshCount++;
+                            }
+                        }
+                    }
+
                     var exportOptions = new ExportModelOptions { ExportFormat = ExportFormat.Binary };
                     ModelExporter.ExportObjects(exportPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
-                    UvtLog.Info("[FBX Export] Exported (binary) " + entries.Count + " mesh(es) -> " + exportPath);
+                    int totalExported = entries.Count + collisionMeshCount;
+                    UvtLog.Info("[FBX Export] Exported (binary) " + totalExported + " mesh(es) -> " + exportPath);
 
                     // Restore original .meta and clean up .bak files
                     if (overwriteSource)

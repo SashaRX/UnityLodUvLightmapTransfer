@@ -147,6 +147,15 @@ namespace LightmapUvTool
                 if (GUILayout.Button("Remove from Scene", GUILayout.Height(24)))
                     RemoveFromScene();
                 EditorGUILayout.EndHorizontal();
+
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField("Persist", EditorStyles.boldLabel);
+
+                var bgc2 = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(.3f, .85f, .4f);
+                if (GUILayout.Button("Save to Sidecar (for FBX reimport)", GUILayout.Height(24)))
+                    SaveToSidecar();
+                GUI.backgroundColor = bgc2;
             }
 
             // Existing collision objects info
@@ -381,6 +390,161 @@ namespace LightmapUvTool
 
             AssetDatabase.CreateFolder("Assets", "LightmapUvTool");
             AssetDatabase.CreateFolder("Assets/LightmapUvTool", "GeneratedCollisionMeshes");
+        }
+
+        // ── Sidecar persistence ──
+
+        void SaveToSidecar()
+        {
+            if (ctx.LodGroup == null || generatedMeshes.Count == 0) return;
+
+            // Find source FBX path from source LOD entries
+            string fbxPath = null;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (e.lodIndex != ctx.SourceLodIndex || e.fbxMesh == null) continue;
+                string p = AssetDatabase.GetAssetPath(e.fbxMesh);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase))
+                { fbxPath = p; break; }
+            }
+            if (string.IsNullOrEmpty(fbxPath))
+            {
+                UvtLog.Warn("[Collision] Cannot find source FBX path for sidecar.");
+                return;
+            }
+
+            // Save mesh assets to savePath (like LOD Gen does)
+            string savePath = ctx.PipeSettings != null && !string.IsNullOrEmpty(ctx.PipeSettings.savePath)
+                ? ctx.PipeSettings.savePath
+                : "Assets/LightmapUvTool_Output";
+            if (!AssetDatabase.IsValidFolder(savePath))
+            {
+                var par = Path.GetDirectoryName(savePath);
+                var fld = Path.GetFileName(savePath);
+                if (!string.IsNullOrEmpty(par)) AssetDatabase.CreateFolder(par, fld);
+            }
+
+            var savedMeshAssets = new List<Mesh>();
+            foreach (var mesh in generatedMeshes)
+            {
+                string assetPath = AssetDatabase.GenerateUniqueAssetPath(savePath + "/" + mesh.name + ".asset");
+                var copy = UnityEngine.Object.Instantiate(mesh);
+                copy.name = mesh.name;
+                AssetDatabase.CreateAsset(copy, assetPath);
+                savedMeshAssets.Add(AssetDatabase.LoadAssetAtPath<Mesh>(assetPath));
+            }
+
+            // Build CollisionMeshEntry and save to sidecar
+            string sidecarPath = Uv2DataAsset.GetSidecarPath(fbxPath);
+            var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+            if (data == null)
+            {
+                data = ScriptableObject.CreateInstance<Uv2DataAsset>();
+                AssetDatabase.CreateAsset(data, sidecarPath);
+            }
+
+            // Build flattened collision entry per source mesh
+            int meshIdx = 0;
+            foreach (var r in lastResults)
+            {
+                // Compute fingerprint from source FBX mesh
+                MeshFingerprint fp = null;
+                var srcEntry = ctx.MeshEntries.FirstOrDefault(
+                    e => e.lodIndex == ctx.SourceLodIndex && e.include &&
+                    (e.fbxMesh != null ? e.fbxMesh.name : e.originalMesh?.name) == r.meshName);
+                if (srcEntry != null && srcEntry.fbxMesh != null)
+                    fp = MeshFingerprint.Compute(srcEntry.fbxMesh);
+
+                var allPos = new List<Vector3>();
+                var posOffsets = new List<int>();
+                var allTri = new List<int>();
+                var triOffsets = new List<int>();
+
+                for (int h = 0; h < r.hullCount && meshIdx < savedMeshAssets.Count; h++, meshIdx++)
+                {
+                    var m = savedMeshAssets[meshIdx];
+                    posOffsets.Add(allPos.Count);
+                    triOffsets.Add(allTri.Count);
+                    allPos.AddRange(m.vertices);
+                    allTri.AddRange(m.triangles);
+                }
+
+                var entry = new CollisionMeshEntry
+                {
+                    meshGroupKey      = r.meshName,
+                    mode              = (int)generatedMode,
+                    sourceFingerprint = fp,
+                    allPositions      = allPos.ToArray(),
+                    positionOffsets   = posOffsets.ToArray(),
+                    allTriangles      = allTri.ToArray(),
+                    triangleOffsets   = triOffsets.ToArray(),
+                    targetRatio       = simplifyTargetRatio,
+                    targetError       = simplifyTargetError,
+                    maxHulls          = convexMaxHulls,
+                    resolution        = convexResolution,
+                    maxVertsPerHull   = convexMaxVertsPerHull,
+                };
+
+                // Replace existing entry for same meshGroupKey
+                data.collisionEntries.RemoveAll(c => c.meshGroupKey == entry.meshGroupKey);
+                data.collisionEntries.Add(entry);
+            }
+
+            EditorUtility.SetDirty(data);
+            AssetDatabase.SaveAssets();
+            UvtLog.Info($"[Collision] Saved to sidecar: {sidecarPath} ({data.collisionEntries.Count} collision entries)");
+        }
+
+        /// <summary>
+        /// Get the saved collision meshes for FBX export.
+        /// Returns list of (meshName, collisionMeshes, isConvex) for each entry.
+        /// Called by LightmapTransferTool.ExportFbx.
+        /// </summary>
+        public static List<(string meshName, List<Mesh> meshes, bool isConvex)> GetCollisionMeshesFromSidecar(string fbxPath)
+        {
+            var result = new List<(string, List<Mesh>, bool)>();
+            string sidecarPath = Uv2DataAsset.GetSidecarPath(fbxPath);
+            var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+            if (data == null || data.collisionEntries == null) return result;
+
+            foreach (var entry in data.collisionEntries)
+            {
+                bool isConvex = entry.mode == 1;
+                var meshes = new List<Mesh>();
+                int hullCount = entry.positionOffsets.Length;
+
+                for (int h = 0; h < hullCount; h++)
+                {
+                    int posStart = entry.positionOffsets[h];
+                    int posEnd   = (h + 1 < hullCount) ? entry.positionOffsets[h + 1] : entry.allPositions.Length;
+                    int triStart = entry.triangleOffsets[h];
+                    int triEnd   = (h + 1 < hullCount) ? entry.triangleOffsets[h + 1] : entry.allTriangles.Length;
+
+                    int vertCount = posEnd - posStart;
+                    var verts = new Vector3[vertCount];
+                    Array.Copy(entry.allPositions, posStart, verts, 0, vertCount);
+
+                    int idxCount = triEnd - triStart;
+                    var tris = new int[idxCount];
+                    Array.Copy(entry.allTriangles, triStart, tris, 0, idxCount);
+                    // Rebase indices to local vertex offset
+                    for (int i = 0; i < tris.Length; i++)
+                        tris[i] -= posStart;
+
+                    var mesh = new Mesh();
+                    mesh.name = isConvex
+                        ? $"{entry.meshGroupKey}_COL_Hull{h}"
+                        : $"{entry.meshGroupKey}_COL";
+                    mesh.SetVertices(verts);
+                    mesh.SetTriangles(tris, 0);
+                    mesh.RecalculateNormals();
+                    mesh.RecalculateBounds();
+                    meshes.Add(mesh);
+                }
+
+                result.Add((entry.meshGroupKey, meshes, isConvex));
+            }
+            return result;
         }
 
         void RemoveFromScene()
