@@ -27,6 +27,9 @@ namespace LightmapUvTool
         Vector2 sideScroll;
         int _cachedLodCount;
         int _checkerUvChannel = 1;
+        bool _checkerColorMode;
+        bool _checkerShowR = true;
+        bool _checkerShowG = true;
 
         // ── Selection tracking ──
         string selectedSidecarPath;
@@ -409,7 +412,7 @@ namespace LightmapUvTool
                     ApplyPreviewMode(newMode);
             }
 
-            // ── Checker UV channel selector ──
+            // ── Checker UV channel selector + color mode ──
             if (canvas.CurrentPreviewMode == UvCanvasView.PreviewMode.Checker)
             {
                 GUILayout.Space(2);
@@ -436,12 +439,47 @@ namespace LightmapUvTool
                         if (!active)
                         {
                             _checkerUvChannel = ch;
+                            _checkerColorMode = ch >= 2;
                             ApplyPreviewMode(UvCanvasView.PreviewMode.Off);
                             ApplyPreviewMode(UvCanvasView.PreviewMode.Checker);
                         }
                     }
                 }
                 GUI.backgroundColor = bgCh;
+
+                GUILayout.Space(4);
+
+                // Color/Checker mode toggle
+                GUI.backgroundColor = _checkerColorMode ? new Color(.3f, .9f, .5f) : new Color(.65f, .65f, .7f);
+                if (GUILayout.Button(_checkerColorMode ? "Color" : "Grid", EditorStyles.toolbarButton, GUILayout.Width(38)))
+                {
+                    _checkerColorMode = !_checkerColorMode;
+                    ApplyPreviewMode(UvCanvasView.PreviewMode.Off);
+                    ApplyPreviewMode(UvCanvasView.PreviewMode.Checker);
+                }
+                GUI.backgroundColor = bgCh;
+
+                // R/G channel mask (only in color mode)
+                if (_checkerColorMode)
+                {
+                    GUI.backgroundColor = _checkerShowR ? new Color(1f, .3f, .3f) : new Color(.4f, .4f, .4f);
+                    if (GUILayout.Button("R", EditorStyles.toolbarButton, GUILayout.Width(20)))
+                    {
+                        _checkerShowR = !_checkerShowR;
+                        if (!_checkerShowR && !_checkerShowG) _checkerShowG = true;
+                        ApplyPreviewMode(UvCanvasView.PreviewMode.Off);
+                        ApplyPreviewMode(UvCanvasView.PreviewMode.Checker);
+                    }
+                    GUI.backgroundColor = _checkerShowG ? new Color(.3f, 1f, .3f) : new Color(.4f, .4f, .4f);
+                    if (GUILayout.Button("G", EditorStyles.toolbarButton, GUILayout.Width(20)))
+                    {
+                        _checkerShowG = !_checkerShowG;
+                        if (!_checkerShowR && !_checkerShowG) _checkerShowR = true;
+                        ApplyPreviewMode(UvCanvasView.PreviewMode.Off);
+                        ApplyPreviewMode(UvCanvasView.PreviewMode.Checker);
+                    }
+                    GUI.backgroundColor = bgCh;
+                }
             }
 
             // ── Lightmap exposure slider ──
@@ -676,7 +714,8 @@ namespace LightmapUvTool
                     if (checkerEntries.Count > 0)
                     {
                         canvas.CheckerEnabled = true;
-                        CheckerTexturePreview.Apply(checkerEntries, _checkerUvChannel);
+                        CheckerTexturePreview.Apply(checkerEntries, _checkerUvChannel,
+                            _checkerColorMode, _checkerShowR, _checkerShowG);
                     }
                     else
                     {

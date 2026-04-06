@@ -854,6 +854,33 @@ namespace LightmapUvTool
             return tiles;
         }
 
+        /// <summary>
+        /// Compute a UV-centroid hash for the shell — stable across LODs because UV2
+        /// is transferred from source, so the same island lands at the same UV position.
+        /// </summary>
+        static int ShellCentroidHash(UvShell shell, Mesh mesh, int uvChannel = 1)
+        {
+            if (shell?.vertexIndices == null || shell.vertexIndices.Count == 0 || mesh == null)
+                return shell?.shellId ?? 0;
+            var uvs = new List<Vector2>();
+            mesh.GetUVs(uvChannel, uvs);
+            if (uvs.Count != mesh.vertexCount)
+            {
+                mesh.GetUVs(0, uvs);
+                if (uvs.Count != mesh.vertexCount) return shell.shellId;
+            }
+            Vector2 centroid = Vector2.zero;
+            int count = 0;
+            foreach (int vi in shell.vertexIndices)
+            {
+                if (vi >= 0 && vi < uvs.Count) { centroid += uvs[vi]; count++; }
+            }
+            if (count > 0) centroid /= count;
+            int qx = Mathf.RoundToInt(centroid.x * 1000f);
+            int qy = Mathf.RoundToInt(centroid.y * 1000f);
+            return Mathf.Abs(qx * 73856093 ^ qy * 19349663);
+        }
+
         public int GetShellColorKey(UvToolContext ctx, UvShell shell, MeshEntry entry)
         {
             int meshId = 0;
@@ -862,14 +889,10 @@ namespace LightmapUvTool
             long cacheKey = ((long)meshId << 32) | (uint)shell.shellId;
             if (!ctx.ShellColorKeyCacheDirty && ctx.ShellColorKeyCache.TryGetValue(cacheKey, out int cc)) return cc;
 
-            // Use meshGroupKey for hashing — stable across LODs (e.g. "Mattress" for
-            // Mattress_LOD0, Mattress_LOD1, etc.) so the same shell gets the same color.
-            int groupHash = entry?.meshGroupKey?.GetHashCode() ?? 0;
-
             int result;
             if (ctx.PostResetColoring)
             {
-                result = Mathf.Abs((shell.shellId * 73856093) ^ (groupHash * 19349663) ^ 0x5F3759DF);
+                result = ShellCentroidHash(shell, mesh);
                 ctx.ShellColorKeyCache[cacheKey] = result;
                 return result;
             }
@@ -886,7 +909,7 @@ namespace LightmapUvTool
                     freq[srcShell] = c2;
                     if (c2 > bestCount || (c2 == bestCount && srcShell < bestKey)) { bestCount = c2; bestKey = srcShell; }
                 }
-                result = bestKey >= 0 ? bestKey : Mathf.Abs((shell.shellId * 73856093) ^ (groupHash * 19349663));
+                result = bestKey >= 0 ? bestKey : ShellCentroidHash(shell, mesh);
             }
             else if (mesh != null && shell?.vertexIndices != null && shell.vertexIndices.Count > 0)
             {
@@ -903,11 +926,11 @@ namespace LightmapUvTool
                         freq[uv0Shell] = c2;
                         if (c2 > bestCount || (c2 == bestCount && uv0Shell < bestKey)) { bestCount = c2; bestKey = uv0Shell; }
                     }
-                    result = bestKey >= 0 ? bestKey : Mathf.Abs((shell.shellId * 73856093) ^ (groupHash * 19349663));
+                    result = bestKey >= 0 ? bestKey : ShellCentroidHash(shell, mesh);
                 }
-                else result = Mathf.Abs((shell.shellId * 73856093) ^ (groupHash * 19349663));
+                else result = ShellCentroidHash(shell, mesh);
             }
-            else result = Mathf.Abs((shell.shellId * 73856093) ^ (groupHash * 19349663));
+            else result = ShellCentroidHash(shell, mesh);
             ctx.ShellColorKeyCache[cacheKey] = result;
             return result;
         }

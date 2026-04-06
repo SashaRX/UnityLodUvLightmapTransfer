@@ -7,6 +7,9 @@ Shader "Hidden/LightmapUvTool/CheckerUV2"
         _CellLineAlpha ("Cell Line Alpha", Range(0, 1)) = 0.7
         _BorderWidth ("UV Border Width", Range(0.001, 0.02)) = 0.005
         _UVChannel ("UV Channel", Float) = 1
+        _ColorMode ("Color Mode", Float) = 0
+        _ShowR ("Show R", Float) = 1
+        _ShowG ("Show G", Float) = 1
     }
     SubShader
     {
@@ -25,6 +28,9 @@ Shader "Hidden/LightmapUvTool/CheckerUV2"
             float _CellLineAlpha;
             float _BorderWidth;
             float _UVChannel;
+            float _ColorMode;
+            float _ShowR;
+            float _ShowG;
 
             struct appdata
             {
@@ -65,7 +71,18 @@ Shader "Hidden/LightmapUvTool/CheckerUV2"
             {
                 float2 uv = i.uv;
 
-                // ── Base: colored cell texture with labels ──
+                // ── Color mode: display UV values as RGB ──
+                if (_ColorMode > 0.5)
+                {
+                    float r = _ShowR > 0.5 ? uv.x : 0.0;
+                    float g = _ShowG > 0.5 ? uv.y : 0.0;
+                    // When only one channel is shown, display as grayscale
+                    if (_ShowR > 0.5 && _ShowG < 0.5) return fixed4(r, r, r, 1.0);
+                    if (_ShowR < 0.5 && _ShowG > 0.5) return fixed4(g, g, g, 1.0);
+                    return fixed4(r, g, 0.0, 1.0);
+                }
+
+                // ── Checker mode: colored cell texture with labels ──
                 fixed4 base = tex2D(_MainTex, uv);
 
                 // ── Cell grid lines (8x8) ──

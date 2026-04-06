@@ -61,10 +61,36 @@ namespace LightmapUvTool
                 var triangleToShell = new int[faceCount];
                 for (int i = 0; i < triangleToShell.Length; i++) triangleToShell[i] = -1;
 
+                // Use UV centroid hash instead of shellId for stable colors across LODs.
+                // shellId is just the extraction order which can differ between LOD meshes;
+                // the centroid of the UV island is stable since UV2 is transferred from source.
                 foreach (var shell in shells)
+                {
+                    // Compute UV centroid of the shell
+                    Vector2 centroid = Vector2.zero;
+                    int count = 0;
+                    if (shell.vertexIndices != null)
+                    {
+                        foreach (int vi in shell.vertexIndices)
+                        {
+                            if (vi >= 0 && vi < uv.Length)
+                            {
+                                centroid += uv[vi];
+                                count++;
+                            }
+                        }
+                    }
+                    if (count > 0) centroid /= count;
+
+                    // Quantize and hash for stable color key
+                    int qx = Mathf.RoundToInt(centroid.x * 1000f);
+                    int qy = Mathf.RoundToInt(centroid.y * 1000f);
+                    int stableKey = Mathf.Abs(qx * 73856093 ^ qy * 19349663);
+
                     foreach (int faceIndex in shell.faceIndices)
                         if (faceIndex >= 0 && faceIndex < triangleToShell.Length)
-                            triangleToShell[faceIndex] = shell.shellId;
+                            triangleToShell[faceIndex] = stableKey;
+                }
 
                 return triangleToShell;
             }
