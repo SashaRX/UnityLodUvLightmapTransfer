@@ -1,0 +1,20 @@
+# AI config — git only
+AGENTS.md
+AGENTS.md.meta
+CLAUDE.md
+CLAUDE.md.meta
+REVIEW.md
+REVIEW.md.meta
+
+# CI/CD & GitHub
+.github/
+
+# Native C++ source — users get prebuilt Plugins/ only
+Native/
+Native.meta
+
+# Dev/build files
+CONFLICT_CHECK_LAST_5_PRS.md
+CONFLICT_CHECK_LAST_5_PRS.md.meta
+.gitignore
+*.bat

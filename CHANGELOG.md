@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.15.9] - 2026-04-06
+
+### Added — Auto LODGroup creation + Vertex AO + CI workflows
+
+#### Auto LODGroup Creation
+- **"Add LOD Group" button in Setup tab**: when no LODGroup is assigned, detects LOD siblings by name pattern (`_LOD0`, `_LOD1`) and shows one-click creation button with detected LODs list
+- **Fallback for non-LOD naming**: when children have arbitrary names but contain Renderers, creates LODGroup with all renderers as LOD0 and renames children to `_LOD0`
+- **Auto-clear stale LODGroup**: `OnSelectionChange` now clears the LODGroup context when selecting a mesh-relevant object without a LODGroup (preserves context when clicking lights/cameras)
+- **Shared helpers**: `FindLodSiblings` and `CreateLodGroupStatic` extracted as `internal static` for reuse across tools
+
+#### FBX Export Improvements
+- **LOD0 naming in FBX**: exported FBX clone renames children to `_LOD0` matching scene hierarchy
+- **Post-export cleanup**: removes scene-generated LOD1+/COL objects after successful export to prevent duplicates on reimport
+- **Cleanup gated on success**: only runs when all FBX groups exported successfully
+- **Collision dedup**: removes existing `_COL` nodes from FBX clone before adding new ones (prevents accumulation on repeated exports)
+
+#### Vertex AO Baking
+- **GPU vertex AO baker**: hemisphere depth sampling via compute shader
+- **CPU fallback**: for platforms without compute shader support
+- **Depth shader**: `Hidden/LightmapUvTool/VertexAODepth` for orthographic depth rendering
+- **Compute shader**: `VertexAOAccum.compute` with AccumulateAO and FinalizeAO kernels
+
+#### Safety & Lifecycle
+- **RestoreWorkingMeshes()**: extracted helper from OnDisable, called before clearing/switching LODGroup context to prevent orphaned temporary meshes
+- **ForceLOD(-1) reset**: clears forced LOD preview state before dropping LODGroup reference
+- **meshoptimizer v1.1**: updated from v0.22
+
+#### CI/CD
+- **Meta file validation** (`meta-check.yml`): PR check for missing/orphaned `.meta` files and `package.json` semver
+- **Auto version bump** (`version-bump.yml`): auto-increments patch version on push to main
+- **CLAUDE.md**: project rules and 10-point review checklist for contributors
+
 ## [0.13.32] - 2026-03-07
 
 ### Fixed — Unfilled vertices after remap rebuild (3D stretching to origin)
