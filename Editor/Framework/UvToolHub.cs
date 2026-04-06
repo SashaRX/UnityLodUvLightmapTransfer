@@ -274,7 +274,18 @@ namespace LightmapUvTool
                 GUILayout.Space(8);
                 var sep = GUILayoutUtility.GetRect(1, 18, GUILayout.Width(1));
                 EditorGUI.DrawRect(sep, new Color(.5f, .5f, .5f, .6f));
-                GUILayout.Space(8);
+                GUILayout.Space(4);
+
+                // ── LOD tri count ──
+                int lodTris = 0;
+                foreach (var e in ctx.ForLod(ctx.PreviewLod))
+                {
+                    Mesh m = e.repackedMesh ?? e.originalMesh ?? e.fbxMesh;
+                    if (m != null) lodTris += m.triangles.Length / 3;
+                }
+                EditorGUILayout.LabelField(lodTris.ToString("N0") + " tris",
+                    EditorStyles.miniLabel, GUILayout.Width(60));
+                GUILayout.Space(4);
             }
 
             // ── UV channel toggle ──
