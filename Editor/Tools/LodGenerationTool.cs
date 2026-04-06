@@ -37,6 +37,9 @@ namespace LightmapUvTool
         List<GeneratedLodInfo> lastResults = new List<GeneratedLodInfo>();
         List<GameObject> generatedObjects = new List<GameObject>();
 
+        // Static accessor for cross-tool cleanup (e.g., after FBX export)
+        internal static LodGenerationTool ActiveInstance { get; private set; }
+
         struct GeneratedLodInfo
         {
             public string meshName;
@@ -51,6 +54,7 @@ namespace LightmapUvTool
         {
             this.ctx = ctx;
             this.canvas = canvas;
+            ActiveInstance = this;
         }
 
         public void OnDeactivate() { }
@@ -252,7 +256,7 @@ namespace LightmapUvTool
         }
 
 
-        void ClearGeneratedLods()
+        internal void ClearGeneratedLods()
         {
             if (generatedObjects.Count == 0 && lastResults.Count == 0) return;
 

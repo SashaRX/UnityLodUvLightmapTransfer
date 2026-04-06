@@ -1145,6 +1145,10 @@ namespace LightmapUvTool
                     Uv2AssetPostprocessor.fbxOverwritePaths.Add(sourceFbxPath);
             }
 
+            // Clean up scene-generated LOD objects from LodGenerationTool.
+            // These are now embedded in the exported FBX and would duplicate on reimport.
+            LodGenerationTool.ActiveInstance?.ClearGeneratedLods();
+
             AssetDatabase.Refresh();
 #endif
         }
