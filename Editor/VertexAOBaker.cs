@@ -128,16 +128,20 @@ namespace LightmapUvTool
             // Connect position-duplicate vertices across seams
             if (positions != null && positions.Length == vertexCount && (crossHardEdges || crossUvSeams))
             {
-                const float posEps = 1e-6f;
-                const float normThresh = 0.9f; // cos ~26° — normals are "similar"
+                const float posEps = 1e-4f;    // position match tolerance (FBX floats)
+                const float posEpsSq = posEps * posEps;
+                const float normThresh = 0.9f;  // cos ~26°
                 const float uvEps = 1e-4f;
+                float cellSize = posEps * 10f;  // grid cell larger than epsilon
 
                 var posMap = new Dictionary<long, List<int>>();
                 for (int i = 0; i < vertexCount; i++)
                 {
-                    long key = ((long)(positions[i].x / posEps) * 73856093L) ^
-                               ((long)(positions[i].y / posEps) * 19349663L) ^
-                               ((long)(positions[i].z / posEps) * 83492791L);
+                    // Use RoundToInt for stable bucketing at cell boundaries
+                    int cx = Mathf.RoundToInt(positions[i].x / cellSize);
+                    int cy = Mathf.RoundToInt(positions[i].y / cellSize);
+                    int cz = Mathf.RoundToInt(positions[i].z / cellSize);
+                    long key = ((long)cx * 73856093L) ^ ((long)cy * 19349663L) ^ ((long)cz * 83492791L);
                     if (!posMap.TryGetValue(key, out var list))
                     {
                         list = new List<int>();
@@ -146,31 +150,44 @@ namespace LightmapUvTool
                     list.Add(i);
                 }
 
-                foreach (var group in posMap.Values)
+                // Check each vertex against same cell + 26 neighbors
+                var processed = new HashSet<long>();
+                foreach (var kvp in posMap)
                 {
-                    if (group.Count < 2) continue;
+                    var group = kvp.Value;
+                    // Match within same cell
                     for (int i = 0; i < group.Count; i++)
                         for (int j = i + 1; j < group.Count; j++)
-                        {
-                            int vi = group[i], vj = group[j];
-                            if ((positions[vi] - positions[vj]).sqrMagnitude > posEps * posEps)
-                                continue;
+                            TryConnectSeamVerts(neighbors, positions, normals, uv0,
+                                group[i], group[j], posEpsSq, normThresh, uvEps,
+                                crossHardEdges, crossUvSeams);
+                }
 
-                            // Check if normals match
-                            bool normalsMatch = normals == null ||
-                                Vector3.Dot(normals[vi], normals[vj]) >= normThresh;
+                // Also check across adjacent cells
+                var keys = new List<long>(posMap.Keys);
+                foreach (var key in keys)
+                {
+                    var group = posMap[key];
+                    // Reconstruct cell coords from first vertex
+                    var p0 = positions[group[0]];
+                    int bx = Mathf.RoundToInt(p0.x / cellSize);
+                    int by = Mathf.RoundToInt(p0.y / cellSize);
+                    int bz = Mathf.RoundToInt(p0.z / cellSize);
 
-                            // Check if UV0 matches
-                            bool uvsMatch = uv0 == null ||
-                                (uv0[vi] - uv0[vj]).sqrMagnitude < uvEps * uvEps;
+                    for (int dx = -1; dx <= 1; dx++)
+                    for (int dy = -1; dy <= 1; dy++)
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        long nkey = ((long)(bx+dx) * 73856093L) ^ ((long)(by+dy) * 19349663L) ^ ((long)(bz+dz) * 83492791L);
+                        if (!posMap.TryGetValue(nkey, out var ngroup)) continue;
 
-                            // Connect if allowed to cross the differing attribute
-                            bool canConnect = (normalsMatch || crossHardEdges) &&
-                                              (uvsMatch || crossUvSeams);
-
-                            if (canConnect)
-                                AddNeighbor(neighbors, vi, vj);
-                        }
+                        foreach (int vi in group)
+                            foreach (int vj in ngroup)
+                                TryConnectSeamVerts(neighbors, positions, normals, uv0,
+                                    vi, vj, posEpsSq, normThresh, uvEps,
+                                    crossHardEdges, crossUvSeams);
+                    }
                 }
             }
 
@@ -274,6 +291,22 @@ namespace LightmapUvTool
         static long PackKey(int x, int y, int z)
         {
             return ((long)x * 73856093L) ^ ((long)y * 19349663L) ^ ((long)z * 83492791L);
+        }
+
+        static void TryConnectSeamVerts(List<int>[] neighbors,
+            Vector3[] positions, Vector3[] normals, Vector2[] uv0,
+            int vi, int vj, float posEpsSq, float normThresh, float uvEps,
+            bool crossHardEdges, bool crossUvSeams)
+        {
+            if ((positions[vi] - positions[vj]).sqrMagnitude > posEpsSq) return;
+
+            bool normalsMatch = normals == null ||
+                Vector3.Dot(normals[vi], normals[vj]) >= normThresh;
+            bool uvsMatch = uv0 == null ||
+                (uv0[vi] - uv0[vj]).sqrMagnitude < uvEps * uvEps;
+
+            if ((normalsMatch || crossHardEdges) && (uvsMatch || crossUvSeams))
+                AddNeighbor(neighbors, vi, vj);
         }
 
         static void AddNeighbor(List<int>[] neighbors, int a, int b)
