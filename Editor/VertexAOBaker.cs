@@ -399,7 +399,7 @@ namespace LightmapUvTool
             }
 
             // Generate hemisphere directions
-            var directions = GenerateHemisphereDirections(settings.sampleCount);
+            var directions = GenerateSphereDirections(settings.sampleCount);
 
             // Kernel indices
             int accumKernel = computeShader.FindKernel("AccumulateAO");
@@ -519,7 +519,7 @@ namespace LightmapUvTool
             }
 
             var bvh = new TriangleBvh(allVerts.ToArray(), allTris.ToArray());
-            var directions = GenerateHemisphereDirections(settings.sampleCount);
+            var directions = GenerateSphereDirections(settings.sampleCount);
 
             Bounds combinedBounds = ComputeCombinedBounds(meshes);
             float extent = combinedBounds.extents.magnitude;
@@ -614,17 +614,22 @@ namespace LightmapUvTool
 
         // ── Helpers ──
 
-        static Vector3[] GenerateHemisphereDirections(int count)
+        static Vector3[] GenerateSphereDirections(int count)
         {
+            // Full sphere via golden spiral — per-vertex dot(dir, normal) filter
+            // selects the correct hemisphere. This ensures all normal orientations
+            // get equal sampling coverage (fixes black artifacts on sideways/downward faces).
             var dirs = new Vector3[count];
             float goldenRatio = (1f + Mathf.Sqrt(5f)) / 2f;
             for (int i = 0; i < count; i++)
             {
-                float theta = Mathf.Acos(1f - (i + 0.5f) / count);
+                float cosTheta = 1f - 2f * (i + 0.5f) / count; // -1 to +1 (full sphere)
+                float sinTheta = Mathf.Sqrt(1f - cosTheta * cosTheta);
                 float phi = 2f * Mathf.PI * i / goldenRatio;
                 dirs[i] = new Vector3(
-                    Mathf.Sin(theta) * Mathf.Cos(phi),
-                    Mathf.Cos(theta),
+                    sinTheta * Mathf.Cos(phi),
+                    cosTheta,
+                    sinTheta * Mathf.Sin(phi));
                     Mathf.Sin(theta) * Mathf.Sin(phi));
             }
             return dirs;
