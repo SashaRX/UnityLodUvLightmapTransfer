@@ -557,6 +557,17 @@ namespace LightmapUvTool
             var renderers = root.GetComponentsInChildren<Renderer>();
             if (renderers.Length == 0) return null;
 
+            // Rename children to add _LOD0 suffix if they don't already have one
+            foreach (var r in renderers)
+            {
+                var go = r.gameObject;
+                if (!Regex.IsMatch(go.name, @"[_\-\s]LOD\d+$", RegexOptions.IgnoreCase))
+                {
+                    Undo.RecordObject(go, "Rename to LOD0");
+                    go.name = go.name + "_LOD0";
+                }
+            }
+
             var lodGroup = Undo.AddComponent<LODGroup>(root);
             lodGroup.SetLODs(new[] { new LOD(0.5f, renderers) });
             lodGroup.RecalculateBounds();
