@@ -414,7 +414,7 @@ namespace LightmapUvTool
             }
 
             // Save mesh assets to savePath (like LOD Gen does)
-            string savePath = ctx.PipeSettings != null && !string.IsNullOrEmpty(ctx.PipeSettings.savePath)
+            string savePath = !string.IsNullOrEmpty(ctx.PipeSettings.savePath)
                 ? ctx.PipeSettings.savePath
                 : "Assets/LightmapUvTool_Output";
             if (!AssetDatabase.IsValidFolder(savePath))
