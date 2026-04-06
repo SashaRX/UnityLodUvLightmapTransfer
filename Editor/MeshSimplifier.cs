@@ -268,6 +268,7 @@ namespace LightmapUvTool
 
             // ── Build output mesh ──
             var outMesh = new Mesh();
+            outMesh.indexFormat = sourceMesh.indexFormat;
             outMesh.name = sourceMesh.name;
 
             outMesh.SetVertices(allOutPositions);
