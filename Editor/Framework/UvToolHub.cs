@@ -547,14 +547,24 @@ namespace LightmapUvTool
         void DrawMeshGroupPanel()
         {
             var groupKeys = ctx.BuildGroupKeys(ctx.PreviewLod);
-            if (groupKeys.Count <= 1) return;
+            if (groupKeys.Count <= 1) { ctx.IsolatedMeshGroup = -1; return; }
+
+            // Resolve stored group key → index for current LOD
+            if (!string.IsNullOrEmpty(ctx.IsolatedMeshGroupKey))
+            {
+                int idx = groupKeys.IndexOf(ctx.IsolatedMeshGroupKey);
+                ctx.IsolatedMeshGroup = idx; // -1 if not found → shows "All"
+            }
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.MaxWidth(meshGroupPanelW), GUILayout.MinWidth(40));
 
             var bg = GUI.backgroundColor;
             if (ctx.IsolatedMeshGroup < 0) GUI.backgroundColor = new Color(.35f, .65f, 1f);
             if (GUILayout.Button("All", EditorStyles.miniButton))
+            {
                 ctx.IsolatedMeshGroup = -1;
+                ctx.IsolatedMeshGroupKey = null;
+            }
             GUI.backgroundColor = bg;
 
             meshGroupScroll = EditorGUILayout.BeginScrollView(meshGroupScroll);
@@ -563,7 +573,18 @@ namespace LightmapUvTool
                 bool active = ctx.IsolatedMeshGroup == i;
                 if (active) GUI.backgroundColor = new Color(.35f, .85f, .4f);
                 if (GUILayout.Button(groupKeys[i], EditorStyles.miniButton))
-                    ctx.IsolatedMeshGroup = active ? -1 : i;
+                {
+                    if (active)
+                    {
+                        ctx.IsolatedMeshGroup = -1;
+                        ctx.IsolatedMeshGroupKey = null;
+                    }
+                    else
+                    {
+                        ctx.IsolatedMeshGroup = i;
+                        ctx.IsolatedMeshGroupKey = groupKeys[i];
+                    }
+                }
                 if (active) GUI.backgroundColor = bg;
             }
             EditorGUILayout.EndScrollView();

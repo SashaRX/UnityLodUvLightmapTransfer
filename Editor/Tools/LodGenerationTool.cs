@@ -35,6 +35,7 @@ namespace LightmapUvTool
 
         // ── Results ──
         List<GeneratedLodInfo> lastResults = new List<GeneratedLodInfo>();
+        List<GameObject> generatedObjects = new List<GameObject>();
 
         struct GeneratedLodInfo
         {
@@ -53,7 +54,7 @@ namespace LightmapUvTool
         }
 
         public void OnDeactivate() { }
-        public void OnRefresh() { lastResults.Clear(); }
+        public void OnRefresh() { lastResults.Clear(); generatedObjects.Clear(); }
 
         public void OnDrawSidebar()
         {
@@ -220,14 +221,66 @@ namespace LightmapUvTool
                             EditorStyles.miniLabel);
                 }
 
-                // FBX export buttons are in the fixed sidebar footer
+                EditorGUILayout.Space(4);
+                var bgClear = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(.9f, .3f, .3f);
+                if (GUILayout.Button("Clear Results", GUILayout.Height(20)))
+                    ClearGeneratedLods();
+                GUI.backgroundColor = bgClear;
             }
         }
 
 
+        void ClearGeneratedLods()
+        {
+            if (generatedObjects.Count == 0 && lastResults.Count == 0) return;
+
+            int undoGroup = Undo.GetCurrentGroup();
+
+            // Remove LOD slots that reference generated objects
+            if (ctx.LodGroup != null)
+            {
+                var lods = ctx.LodGroup.GetLODs();
+                var generatedSet = new HashSet<GameObject>();
+                foreach (var go in generatedObjects)
+                    if (go != null) generatedSet.Add(go);
+
+                var cleanedLods = new List<LOD>();
+                foreach (var lod in lods)
+                {
+                    if (lod.renderers == null || lod.renderers.Length == 0) continue;
+                    bool anyGenerated = false;
+                    foreach (var r in lod.renderers)
+                        if (r != null && generatedSet.Contains(r.gameObject))
+                        { anyGenerated = true; break; }
+                    if (!anyGenerated) cleanedLods.Add(lod);
+                }
+
+                if (cleanedLods.Count != lods.Length)
+                {
+                    Undo.RecordObject(ctx.LodGroup, "Clear Generated LODs");
+                    ctx.LodGroup.SetLODs(cleanedLods.ToArray());
+                }
+            }
+
+            // Destroy generated GameObjects (top-level ones destroy children too)
+            foreach (var go in generatedObjects)
+                if (go != null) Undo.DestroyObjectImmediate(go);
+
+            Undo.CollapseUndoOperations(undoGroup);
+
+            generatedObjects.Clear();
+            lastResults.Clear();
+
+            if (ctx.LodGroup != null)
+                ctx.Refresh(ctx.LodGroup);
+            requestRepaint?.Invoke();
+        }
+
         void ExecGenerateLods(int startLod)
         {
             if (ctx.LodGroup == null) return;
+            if (generatedObjects.Count > 0) ClearGeneratedLods();
             lastResults.Clear();
 
             var sourceMeshes = new List<(MeshEntry entry, Mesh mesh)>();
@@ -266,6 +319,10 @@ namespace LightmapUvTool
                     var lodRenderers = new List<Renderer>();
                     int lodLevel = startLod + lodIdx;
 
+                    // Build source parent → LOD container mapping for hierarchy preservation
+                    // If source renderers are nested (e.g. LOD0/Door_LOD0), create matching containers
+                    var parentToContainer = new Dictionary<Transform, Transform>();
+
                     foreach (var (entry, srcMesh) in sourceMeshes)
                     {
                         var r = MeshSimplifier.Simplify(srcMesh, settings);
@@ -295,11 +352,31 @@ namespace LightmapUvTool
                             hitErrorLimit = hitLimit
                         });
 
-                        // Create scene GameObject + add to LODGroup
+                        // Create scene GameObject preserving source hierarchy
                         if (entry.renderer != null)
                         {
                             var go = new GameObject(meshName);
-                            go.transform.SetParent(ctx.LodGroup.transform, false);
+
+                            // Determine correct parent: mirror source hierarchy
+                            Transform srcParent = entry.renderer.transform.parent;
+                            Transform lodGroupTransform = ctx.LodGroup.transform;
+
+                            if (srcParent != lodGroupTransform && srcParent != null)
+                            {
+                                // Nested renderer — find or create matching container
+                                if (parentToContainer.TryGetValue(srcParent, out var container))
+                                    go.transform.SetParent(container, false);
+                                else
+                                    go.transform.SetParent(lodGroupTransform, false);
+                            }
+                            else
+                            {
+                                go.transform.SetParent(lodGroupTransform, false);
+                            }
+
+                            // Register this GO as container for its source transform
+                            // so nested renderers can be parented under it
+                            parentToContainer[entry.renderer.transform] = go.transform;
                             go.transform.localPosition = entry.renderer.transform.localPosition;
                             go.transform.localRotation = entry.renderer.transform.localRotation;
                             go.transform.localScale    = entry.renderer.transform.localScale;
@@ -308,6 +385,7 @@ namespace LightmapUvTool
                             var mr = go.AddComponent<MeshRenderer>();
                             mr.sharedMaterials = entry.renderer.sharedMaterials;
                             Undo.RegisterCreatedObjectUndo(go, "Generate LOD");
+                            generatedObjects.Add(go);
                             lodRenderers.Add(mr);
                         }
                     }
@@ -393,25 +471,44 @@ namespace LightmapUvTool
 
             // Match trailing LOD suffix: _LOD0, -LOD1, LOD2, etc.
             var m = Regex.Match(go.name, @"^(.+?)([_\-\s]*)LOD(\d+)$", RegexOptions.IgnoreCase);
-            if (!m.Success) return null;
-
-            string baseName = m.Groups[1].Value;
-            string separator = m.Groups[2].Value;
-
-            var parent = go.transform.parent;
-            if (parent == null) return null; // Root-level objects need a common parent
-
-            var results = new List<(GameObject, int)>();
-            for (int i = 0; i < parent.childCount; i++)
+            if (m.Success)
             {
-                var child = parent.GetChild(i).gameObject;
-                var cm = Regex.Match(child.name, @"^(.+?)[_\-\s]*LOD(\d+)$", RegexOptions.IgnoreCase);
-                if (cm.Success && string.Equals(cm.Groups[1].Value, baseName, System.StringComparison.OrdinalIgnoreCase))
-                    results.Add((child, int.Parse(cm.Groups[2].Value)));
+                // Selected object has LOD suffix — search siblings
+                string baseName = m.Groups[1].Value;
+                var parent = go.transform.parent;
+                if (parent == null) return null;
+
+                var results = new List<(GameObject, int)>();
+                for (int i = 0; i < parent.childCount; i++)
+                {
+                    var child = parent.GetChild(i).gameObject;
+                    var cm = Regex.Match(child.name, @"^(.+?)[_\-\s]*LOD(\d+)$", RegexOptions.IgnoreCase);
+                    if (cm.Success && string.Equals(cm.Groups[1].Value, baseName, System.StringComparison.OrdinalIgnoreCase))
+                        results.Add((child, int.Parse(cm.Groups[2].Value)));
+                }
+
+                results.Sort((a, b) => a.Item2.CompareTo(b.Item2));
+                return results.Count > 0 ? results : null;
             }
 
-            results.Sort((a, b) => a.Item2.CompareTo(b.Item2));
-            return results.Count > 0 ? results : null;
+            // Selected object does NOT have LOD suffix — search its children
+            // Handles prefab pattern: Parent (Pallet_13) → Children (Pallet_LOD0, Pallet_LOD1, ...)
+            var childResults = new List<(GameObject, int)>();
+            for (int i = 0; i < go.transform.childCount; i++)
+            {
+                var child = go.transform.GetChild(i).gameObject;
+                var cm = Regex.Match(child.name, @"^(.+?)[_\-\s]*LOD(\d+)$", RegexOptions.IgnoreCase);
+                if (cm.Success)
+                    childResults.Add((child, int.Parse(cm.Groups[2].Value)));
+            }
+
+            if (childResults.Count > 0)
+            {
+                childResults.Sort((a, b) => a.Item2.CompareTo(b.Item2));
+                return childResults;
+            }
+
+            return null;
         }
 
         void CreateLodGroup(List<(GameObject go, int lodIndex)> siblings)
