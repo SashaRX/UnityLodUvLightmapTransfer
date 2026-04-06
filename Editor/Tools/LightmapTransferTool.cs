@@ -909,25 +909,37 @@ namespace LightmapUvTool
                         exportPath = "Assets" + exportPath.Substring(dataPath.Length);
                 }
 
-                var tempRoot = new GameObject("__FbxExportTemp__");
+                // Clone original FBX hierarchy and replace only the meshes
+                var fbxPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(sourceFbxPath);
+                if (fbxPrefab == null) { UvtLog.Error("[FBX Export] Cannot load FBX prefab: " + sourceFbxPath); continue; }
+                var tempRoot = UnityEngine.Object.Instantiate(fbxPrefab);
+                tempRoot.name = fbxPrefab.name;
                 try
                 {
+                    // Build lookup: original mesh name -> export mesh
+                    var meshReplacements = new Dictionary<string, Mesh>();
                     foreach (var (entry, resultMesh) in entries)
                     {
-                        // Build export mesh: start from result, restore missing UV channels from original
                         var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
                         Mesh srcUvMesh = entry.fbxMesh ?? entry.originalMesh;
                         if (srcUvMesh != null)
                             PreserveUvChannels(exportMesh, srcUvMesh);
-
-                        string objName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
-                        var child = new GameObject(objName);
-                        child.transform.SetParent(tempRoot.transform, false);
-                        var mf = child.AddComponent<MeshFilter>();
-                        mf.sharedMesh = exportMesh;
-                        var mr = child.AddComponent<MeshRenderer>();
-                        if (entry.renderer != null) mr.sharedMaterials = entry.renderer.sharedMaterials;
+                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        meshReplacements[meshName] = exportMesh;
                     }
+
+                    // Replace meshes in cloned hierarchy
+                    foreach (var mf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+                    {
+                        if (mf.sharedMesh != null && meshReplacements.TryGetValue(mf.sharedMesh.name, out var replacement))
+                            mf.sharedMesh = replacement;
+                    }
+                    foreach (var smr in tempRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                    {
+                        if (smr.sharedMesh != null && meshReplacements.TryGetValue(smr.sharedMesh.name, out var replacement))
+                            smr.sharedMesh = replacement;
+                    }
+
                     var exportOptions = new ExportModelOptions { ExportFormat = ExportFormat.Binary };
                     ModelExporter.ExportObjects(exportPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
                     UvtLog.Info("[FBX Export] Exported (binary) " + entries.Count + " mesh(es) -> " + exportPath);
