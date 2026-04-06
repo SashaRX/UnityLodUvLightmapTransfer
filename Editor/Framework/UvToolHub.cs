@@ -86,6 +86,16 @@ namespace LightmapUvTool
 
             ActiveTool?.OnDeactivate();
 
+            // Restore all previews
+            if (canvas != null && canvas.CheckerEnabled)
+            {
+                canvas.CheckerEnabled = false;
+                CheckerTexturePreview.Restore();
+            }
+            if (ShellColorModelPreview.IsActive)
+                ShellColorModelPreview.Restore();
+            RestoreLightmapPreview();
+
             if (ctx?.LodGroup != null)
                 ctx.LodGroup.ForceLOD(-1);
 
@@ -487,6 +497,29 @@ namespace LightmapUvTool
             Repaint();
         }
 
+        // ── Lightmap preview state ──
+        struct LightmapBackup
+        {
+            public Renderer renderer;
+            public Material[] origMaterials;
+            public MeshFilter meshFilter;
+            public Mesh origMesh;
+            public Mesh tempMesh;
+            public Material tempMat;
+        }
+        readonly List<LightmapBackup> lightmapBackups = new List<LightmapBackup>();
+        Material lightmapPreviewMat;
+
+        // ── Shell color palette ──
+        static readonly Color32[] shellPalette = {
+            new Color(.20f,.60f,1f),  new Color(1f,.40f,.20f),
+            new Color(.30f,.85f,.40f),new Color(.90f,.25f,.60f),
+            new Color(.95f,.85f,.20f),new Color(.55f,.30f,.90f),
+            new Color(0f,.80f,.80f),  new Color(.85f,.55f,.20f),
+            new Color(.60f,.90f,.20f),new Color(.90f,.20f,.20f),
+            new Color(.40f,.40f,.90f),new Color(.90f,.70f,.40f),
+        };
+
         void ApplyPreviewMode(UvCanvasView.PreviewMode newMode)
         {
             // Turn off current preview
@@ -497,13 +530,14 @@ namespace LightmapUvTool
             }
             if (ShellColorModelPreview.IsActive)
                 ShellColorModelPreview.Restore();
+            RestoreLightmapPreview();
 
             canvas.CurrentPreviewMode = newMode;
 
             switch (newMode)
             {
                 case UvCanvasView.PreviewMode.Checker:
-                    var entries = new List<(Renderer renderer, Mesh meshWithUv2)>();
+                    var checkerEntries = new List<(Renderer renderer, Mesh meshWithUv2)>();
                     foreach (var e in ctx.MeshEntries)
                     {
                         if (!e.include || e.renderer == null) continue;
@@ -518,12 +552,12 @@ namespace LightmapUvTool
                                 if (testUv2.Count > 0) uvMesh = fallback;
                             }
                         }
-                        if (uvMesh != null) entries.Add((e.renderer, uvMesh));
+                        if (uvMesh != null) checkerEntries.Add((e.renderer, uvMesh));
                     }
-                    if (entries.Count > 0)
+                    if (checkerEntries.Count > 0)
                     {
                         canvas.CheckerEnabled = true;
-                        CheckerTexturePreview.Apply(entries);
+                        CheckerTexturePreview.Apply(checkerEntries);
                     }
                     else
                     {
@@ -533,15 +567,107 @@ namespace LightmapUvTool
                     break;
 
                 case UvCanvasView.PreviewMode.Shells3D:
-                    // Delegated to active tool's ToggleShellColorPreview if available
-                    UvtLog.Info("[Preview] 3D Shell coloring — use tool-specific preview.");
+                {
+                    var shellEntries = new List<(Renderer renderer, Mesh sourceMesh)>();
+                    foreach (var e in ctx.ForLod(ctx.PreviewLod))
+                    {
+                        if (!e.include || e.renderer == null) continue;
+                        Mesh mesh = e.transferredMesh ?? e.repackedMesh ?? e.originalMesh ?? e.fbxMesh;
+                        if (mesh != null) shellEntries.Add((e.renderer, mesh));
+                    }
+                    if (shellEntries.Count > 0)
+                    {
+                        var cache = new ShellColorModelPreview.PreviewShellCache();
+                        ShellColorModelPreview.Apply(shellEntries, shellPalette, cache);
+                    }
+                    else
+                    {
+                        canvas.CurrentPreviewMode = UvCanvasView.PreviewMode.Off;
+                        UvtLog.Warn("[Shells3D] No meshes for current LOD.");
+                    }
                     break;
+                }
+
+                case UvCanvasView.PreviewMode.Lightmap:
+                {
+                    foreach (var e in ctx.ForLod(ctx.PreviewLod))
+                    {
+                        if (e.renderer == null) continue;
+                        int lmIdx = e.renderer.lightmapIndex;
+                        if (lmIdx < 0 || lmIdx >= LightmapSettings.lightmaps.Length) continue;
+                        var lmData = LightmapSettings.lightmaps[lmIdx];
+                        if (lmData.lightmapColor == null) continue;
+                        var so = e.renderer.lightmapScaleOffset;
+
+                        if (lightmapPreviewMat == null)
+                        {
+                            var shader = Shader.Find("Unlit/Texture");
+                            if (shader == null) continue;
+                            lightmapPreviewMat = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+                        }
+                        var mat = new Material(lightmapPreviewMat) { hideFlags = HideFlags.HideAndDontSave };
+                        mat.mainTexture = lmData.lightmapColor;
+                        mat.mainTextureScale = Vector2.one;
+                        mat.mainTextureOffset = Vector2.zero;
+
+                        var mf = e.renderer.GetComponent<MeshFilter>();
+                        Mesh srcMesh = mf != null ? mf.sharedMesh : null;
+                        Mesh tempMesh = null;
+                        if (srcMesh != null)
+                        {
+                            tempMesh = Instantiate(srcMesh);
+                            tempMesh.name = srcMesh.name + "_LmPreview";
+                            tempMesh.hideFlags = HideFlags.HideAndDontSave;
+                            var uv1 = new List<Vector2>();
+                            srcMesh.GetUVs(1, uv1);
+                            if (uv1.Count == srcMesh.vertexCount)
+                            {
+                                var lmUvs = new Vector2[uv1.Count];
+                                for (int i = 0; i < uv1.Count; i++)
+                                    lmUvs[i] = new Vector2(uv1[i].x * so.x + so.z, uv1[i].y * so.y + so.w);
+                                tempMesh.uv = lmUvs;
+                            }
+                        }
+
+                        lightmapBackups.Add(new LightmapBackup
+                        {
+                            renderer = e.renderer,
+                            origMaterials = e.renderer.sharedMaterials,
+                            meshFilter = mf,
+                            origMesh = mf != null ? mf.sharedMesh : null,
+                            tempMesh = tempMesh,
+                            tempMat = mat
+                        });
+                        if (mf != null && tempMesh != null) mf.sharedMesh = tempMesh;
+                        var mats = new Material[e.renderer.sharedMaterials.Length];
+                        for (int i = 0; i < mats.Length; i++) mats[i] = mat;
+                        e.renderer.sharedMaterials = mats;
+                    }
+                    if (lightmapBackups.Count == 0)
+                    {
+                        canvas.CurrentPreviewMode = UvCanvasView.PreviewMode.Off;
+                        UvtLog.Warn("[Lightmap] No lightmapped meshes found.");
+                    }
+                    break;
+                }
 
                 case UvCanvasView.PreviewMode.Off:
                     break;
             }
             Repaint();
             SceneView.RepaintAll();
+        }
+
+        void RestoreLightmapPreview()
+        {
+            foreach (var b in lightmapBackups)
+            {
+                if (b.renderer != null) b.renderer.sharedMaterials = b.origMaterials;
+                if (b.meshFilter != null && b.origMesh != null) b.meshFilter.sharedMesh = b.origMesh;
+                if (b.tempMesh != null) DestroyImmediate(b.tempMesh);
+                if (b.tempMat != null) DestroyImmediate(b.tempMat);
+            }
+            lightmapBackups.Clear();
         }
 
         void OnPreviewChannelChanged(int newChannel)
