@@ -26,11 +26,13 @@ FetchContent_MakeAvailable(xatlas meshoptimizer)
 # ── Build shared library ──
 add_library(xatlas-unity SHARED
     xatlas-unity-bridge.cpp
+    src/collision.cpp
     ${xatlas_SOURCE_DIR}/source/xatlas/xatlas.cpp
 )
 
 target_include_directories(xatlas-unity PRIVATE
     ${xatlas_SOURCE_DIR}/source/xatlas
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
 # Link meshoptimizer (static lib baked into our shared lib)

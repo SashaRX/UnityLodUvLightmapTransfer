@@ -209,6 +209,32 @@ namespace LightmapUvTool
         public string savePath = "Assets/LightmapUvTool_Output";
     }
 
+    /// <summary>
+    /// Stores collision mesh data (simplified or convex decomposition) for persistence.
+    /// Uses flattened arrays because Unity serialization does not support jagged arrays.
+    /// </summary>
+    [Serializable]
+    public class CollisionMeshEntry
+    {
+        public string meshGroupKey;
+        public int mode;  // 0 = Simplified, 1 = ConvexDecomp
+
+        public MeshFingerprint sourceFingerprint;
+
+        // Flattened vertex/index data — all hulls (or single mesh) concatenated
+        public Vector3[] allPositions;
+        public int[] positionOffsets;   // start index per hull/mesh in allPositions
+        public int[] allTriangles;
+        public int[] triangleOffsets;   // start index per hull/mesh in allTriangles
+
+        // Generation settings (for UI restore and re-generation)
+        public float targetRatio;
+        public float targetError;
+        public int maxHulls;
+        public int resolution;
+        public int maxVertsPerHull;
+    }
+
     [CreateAssetMenu(menuName = "LightmapUvTool/UV2 Data (internal)", fileName = "uv2data")]
     public class Uv2DataAsset : ScriptableObject
     {
@@ -229,6 +255,7 @@ namespace LightmapUvTool
         static string _cachedVersion;
 
         public List<MeshUv2Entry> entries = new List<MeshUv2Entry>();
+        public List<CollisionMeshEntry> collisionEntries = new List<CollisionMeshEntry>();
         public ToolSettings toolSettings;
 
         /// <summary>Find entry by mesh name, or null.</summary>
