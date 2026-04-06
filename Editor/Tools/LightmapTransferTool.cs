@@ -935,15 +935,44 @@ namespace LightmapUvTool
                     }
 
                     // Replace meshes in cloned hierarchy
+                    var replaced = new HashSet<string>();
                     foreach (var mf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
                     {
                         if (mf.sharedMesh != null && meshReplacements.TryGetValue(mf.sharedMesh.name, out var replacement))
+                        {
+                            replaced.Add(mf.sharedMesh.name);
                             mf.sharedMesh = replacement;
+                        }
                     }
                     foreach (var smr in tempRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true))
                     {
                         if (smr.sharedMesh != null && meshReplacements.TryGetValue(smr.sharedMesh.name, out var replacement))
+                        {
+                            replaced.Add(smr.sharedMesh.name);
                             smr.sharedMesh = replacement;
+                        }
+                    }
+
+                    // Add meshes that weren't found in the clone (new LODs from generation)
+                    foreach (var (entry, resultMesh) in entries)
+                    {
+                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        if (replaced.Contains(meshName)) continue;
+                        // Remove existing child with same name (from previous export)
+                        for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
+                        {
+                            var ch = tempRoot.transform.GetChild(ci);
+                            if (ch.name == meshName) UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                        }
+                        var child = new GameObject(meshName);
+                        child.transform.SetParent(tempRoot.transform, false);
+                        var newMf = child.AddComponent<MeshFilter>();
+                        var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
+                        Mesh srcUvMesh = entry.fbxMesh ?? entry.originalMesh;
+                        if (srcUvMesh != null) PreserveUvChannels(exportMesh, srcUvMesh);
+                        newMf.sharedMesh = exportMesh;
+                        var mr = child.AddComponent<MeshRenderer>();
+                        if (entry.renderer != null) mr.sharedMaterials = entry.renderer.sharedMaterials;
                     }
 
                     var exportOptions = new ExportModelOptions { ExportFormat = ExportFormat.Binary };
