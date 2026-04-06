@@ -5,7 +5,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEditor;
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+using UnityEditor.Formats.Fbx.Exporter;
+#endif
 
 namespace LightmapUvTool
 {
@@ -29,9 +33,13 @@ namespace LightmapUvTool
         float generateNormalWeight = 1f;
         bool generateLockBorder = true;
         bool generateAddToLodGroup = true;
+        bool exportToFbx = true;
 
         // ── Results ──
         List<GeneratedLodInfo> lastResults = new List<GeneratedLodInfo>();
+        // Generated meshes per source FBX path for FBX export
+        Dictionary<string, List<(MeshEntry entry, Mesh generatedMesh, string meshName)>> generatedPerFbx
+            = new Dictionary<string, List<(MeshEntry, Mesh, string)>>();
 
         struct GeneratedLodInfo
         {
@@ -49,7 +57,7 @@ namespace LightmapUvTool
         }
 
         public void OnDeactivate() { }
-        public void OnRefresh() { lastResults.Clear(); }
+        public void OnRefresh() { lastResults.Clear(); generatedPerFbx.Clear(); }
 
         public void OnDrawSidebar()
         {
@@ -85,6 +93,10 @@ namespace LightmapUvTool
             generateLockBorder = EditorGUILayout.Toggle("Lock Border", generateLockBorder);
             generateAddToLodGroup = EditorGUILayout.Toggle("Add to LODGroup", generateAddToLodGroup);
 
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            exportToFbx = EditorGUILayout.Toggle("Export to FBX", exportToFbx);
+#endif
+
             EditorGUILayout.Space(6);
 
             // ── Generate button ──
@@ -93,6 +105,23 @@ namespace LightmapUvTool
             if (GUILayout.Button("Generate LODs", GUILayout.Height(30)))
                 ExecGenerateLods();
             GUI.backgroundColor = c;
+
+            // ── FBX Export buttons (after generation) ──
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (generatedPerFbx.Count > 0)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField("FBX Export", EditorStyles.boldLabel);
+                GUI.backgroundColor = new Color(.4f, .7f, .95f);
+                if (GUILayout.Button("Export LODs as New FBX", GUILayout.Height(24)))
+                    ExportGeneratedLods(false);
+                EditorGUILayout.Space(2);
+                GUI.backgroundColor = new Color(.95f, .6f, .2f);
+                if (GUILayout.Button("Add LODs to Source FBX", GUILayout.Height(24)))
+                    ExportGeneratedLods(true);
+                GUI.backgroundColor = c;
+            }
+#endif
 
             // ── Results ──
             if (lastResults.Count > 0)
@@ -113,6 +142,7 @@ namespace LightmapUvTool
         {
             if (ctx.LodGroup == null) return;
             lastResults.Clear();
+            generatedPerFbx.Clear();
 
             var sourceMeshes = new List<(MeshEntry entry, Mesh mesh)>();
             foreach (var e in ctx.MeshEntries)
@@ -162,11 +192,14 @@ namespace LightmapUvTool
                         var r = MeshSimplifier.Simplify(srcMesh, settings);
                         if (!r.ok) { UvtLog.Error($"[GenerateLOD] Failed on {srcMesh.name}: {r.error}"); continue; }
 
-                        // Use clean base name from fbxMesh, strip _wc/_repack/_LODn suffixes
                         string baseName = entry.fbxMesh != null ? entry.fbxMesh.name : srcMesh.name;
                         baseName = System.Text.RegularExpressions.Regex.Replace(baseName, @"(_wc|_repack|_uvTransfer|_optimized|_LOD\d+)+$", "");
                         string meshName = baseName + "_LOD" + lodLevel;
                         r.simplifiedMesh.name = meshName;
+
+                        // Preserve all UV channels from source
+                        PreserveUvChannels(r.simplifiedMesh, entry.fbxMesh ?? entry.originalMesh);
+
                         string assetPath = AssetDatabase.GenerateUniqueAssetPath(savePath + "/" + meshName + ".asset");
                         AssetDatabase.CreateAsset(r.simplifiedMesh, assetPath);
                         UvtLog.Info($"[GenerateLOD] {meshName}: {r.originalTriCount} → {r.simplifiedTriCount} tris, saved → {assetPath}");
@@ -179,6 +212,16 @@ namespace LightmapUvTool
                             error = r.resultError,
                             lodLevel = lodLevel
                         });
+
+                        // Track for FBX export
+                        Mesh pathMesh = entry.fbxMesh ?? entry.originalMesh;
+                        string fbxPath = pathMesh != null ? AssetDatabase.GetAssetPath(pathMesh) : null;
+                        if (!string.IsNullOrEmpty(fbxPath))
+                        {
+                            if (!generatedPerFbx.ContainsKey(fbxPath))
+                                generatedPerFbx[fbxPath] = new List<(MeshEntry, Mesh, string)>();
+                            generatedPerFbx[fbxPath].Add((entry, r.simplifiedMesh, meshName));
+                        }
 
                         if (generateAddToLodGroup && entry.renderer != null)
                         {
@@ -216,10 +259,128 @@ namespace LightmapUvTool
             }
             finally { EditorUtility.ClearProgressBar(); }
 
+            // Auto-export to FBX if enabled
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (exportToFbx && generatedPerFbx.Count > 0)
+                ExportGeneratedLods(true);
+#endif
+
             ctx.Refresh(ctx.LodGroup);
             OnRefresh();
             requestRepaint?.Invoke();
-            // Re-populate results after refresh (Refresh clears them)
+        }
+
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+        void ExportGeneratedLods(bool addToSource)
+        {
+            foreach (var kv in generatedPerFbx)
+            {
+                string sourceFbxPath = kv.Key;
+                var generated = kv.Value;
+
+                var fbxPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(sourceFbxPath);
+                if (fbxPrefab == null) { UvtLog.Error("[FBX LOD Export] Cannot load: " + sourceFbxPath); continue; }
+
+                string exportPath;
+                if (addToSource)
+                {
+                    exportPath = sourceFbxPath;
+                    // Backup
+                    string fullSource = System.IO.Path.GetFullPath(sourceFbxPath);
+                    string fullMeta = fullSource + ".meta";
+                    try
+                    {
+                        System.IO.File.Copy(fullSource, fullSource + ".bak", true);
+                        if (System.IO.File.Exists(fullMeta))
+                            System.IO.File.Copy(fullMeta, fullSource + ".meta.bak", true);
+                    }
+                    catch (Exception ex) { UvtLog.Error("[FBX LOD Export] Backup failed: " + ex.Message); continue; }
+                }
+                else
+                {
+                    string dir = System.IO.Path.GetDirectoryName(sourceFbxPath);
+                    string baseName = System.IO.Path.GetFileNameWithoutExtension(sourceFbxPath);
+                    exportPath = EditorUtility.SaveFilePanel("Export LODs FBX", dir, baseName + "_lods.fbx", "fbx");
+                    if (string.IsNullOrEmpty(exportPath)) continue;
+                    string dataPath = Application.dataPath;
+                    if (exportPath.StartsWith(dataPath))
+                        exportPath = "Assets" + exportPath.Substring(dataPath.Length);
+                }
+
+                // Clone original FBX hierarchy
+                var tempRoot = UnityEngine.Object.Instantiate(fbxPrefab);
+                tempRoot.name = fbxPrefab.name;
+                try
+                {
+                    // Add generated LOD meshes as new children
+                    foreach (var (entry, genMesh, meshName) in generated)
+                    {
+                        var child = new GameObject(meshName);
+                        child.transform.SetParent(tempRoot.transform, false);
+                        // Copy transform from source renderer
+                        if (entry.renderer != null)
+                        {
+                            // Use local transform relative to LODGroup root
+                            var srcT = entry.renderer.transform;
+                            var lodRoot = ctx.LodGroup.transform;
+                            child.transform.localPosition = lodRoot.InverseTransformPoint(srcT.position);
+                            child.transform.localRotation = Quaternion.Inverse(lodRoot.rotation) * srcT.rotation;
+                            child.transform.localScale = srcT.localScale;
+                        }
+                        var mf = child.AddComponent<MeshFilter>();
+                        mf.sharedMesh = genMesh;
+                        var mr = child.AddComponent<MeshRenderer>();
+                        if (entry.renderer != null)
+                            mr.sharedMaterials = entry.renderer.sharedMaterials;
+                    }
+
+                    var exportOptions = new ExportModelOptions { ExportFormat = ExportFormat.Binary };
+                    ModelExporter.ExportObjects(exportPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
+                    UvtLog.Info("[FBX LOD Export] Exported " + generated.Count + " LOD mesh(es) -> " + exportPath);
+
+                    // Restore .meta for overwrite
+                    if (addToSource)
+                    {
+                        string metaBak = System.IO.Path.GetFullPath(sourceFbxPath) + ".meta.bak";
+                        string metaOrig = System.IO.Path.GetFullPath(sourceFbxPath) + ".meta";
+                        if (System.IO.File.Exists(metaBak))
+                        {
+                            System.IO.File.Copy(metaBak, metaOrig, true);
+                            System.IO.File.Delete(metaBak);
+                        }
+                    }
+                }
+                catch (Exception ex) { UvtLog.Error("[FBX LOD Export] Failed: " + ex); }
+                finally { UnityEngine.Object.DestroyImmediate(tempRoot); }
+            }
+            AssetDatabase.Refresh();
+        }
+#endif
+
+        /// <summary>
+        /// Copy non-trivial UV channels from source to target mesh (if missing).
+        /// </summary>
+        static void PreserveUvChannels(Mesh exportMesh, Mesh sourceMesh)
+        {
+            if (sourceMesh == null || exportMesh == null) return;
+            // For simplified meshes vertex count differs — can't copy per-vertex data directly.
+            // But we ensure the simplifier preserves attributes via its own pipeline.
+            // This method handles the case where the source has UV channels the simplifier didn't copy.
+            if (sourceMesh.vertexCount != exportMesh.vertexCount) return;
+            for (int ch = 0; ch < 8; ch++)
+            {
+                var attr = (VertexAttribute)((int)VertexAttribute.TexCoord0 + ch);
+                if (exportMesh.HasVertexAttribute(attr)) continue;
+                if (!sourceMesh.HasVertexAttribute(attr)) continue;
+                var uv = new List<Vector2>();
+                sourceMesh.GetUVs(ch, uv);
+                if (uv.Count == 0) continue;
+                bool allZero = true;
+                for (int i = 0; i < uv.Count; i++)
+                    if (uv[i].x != 0f || uv[i].y != 0f) { allZero = false; break; }
+                if (allZero) continue;
+                exportMesh.SetUVs(ch, uv);
+            }
         }
 
         public void OnDrawToolbarExtra() { }
