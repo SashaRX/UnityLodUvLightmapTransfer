@@ -820,6 +820,14 @@ namespace LightmapUvTool
             if (m != null) return m;
             if (e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit)
                 return e.originalMesh;
+            // Generated LODs (from LOD Gen): their fbxMesh is an .asset, not from source FBX
+            // Include them in export so they end up in the FBX file
+            if (e.originalMesh != null)
+            {
+                string assetPath = AssetDatabase.GetAssetPath(e.fbxMesh ?? e.originalMesh);
+                if (!string.IsNullOrEmpty(assetPath) && assetPath.EndsWith(".asset"))
+                    return e.originalMesh;
+            }
             return null;
         }
 
