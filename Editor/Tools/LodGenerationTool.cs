@@ -376,13 +376,13 @@ namespace LightmapUvTool
             // (ctx.Refresh would clear repack/transfer/weld state on LOD0-2)
             if (generateAddToLodGroup)
             {
-                var lods = ctx.LodGroup.GetLODs();
-                for (int li = 0; li < lods.Length; li++)
+                var currentLods = ctx.LodGroup.GetLODs();
+                for (int li = 0; li < currentLods.Length; li++)
                 {
                     // Only add entries for LOD levels we don't already have
                     if (ctx.MeshEntries.Any(e => e.lodIndex == li)) continue;
-                    if (lods[li].renderers == null) continue;
-                    foreach (var r in lods[li].renderers)
+                    if (currentLods[li].renderers == null) continue;
+                    foreach (var r in currentLods[li].renderers)
                     {
                         if (r == null) continue;
                         var mf = r.GetComponent<MeshFilter>();
