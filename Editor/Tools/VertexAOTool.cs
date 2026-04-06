@@ -58,6 +58,7 @@ namespace LightmapUvTool
         float blur3DRadius = 0.1f;
         float ppBrightness = 0f;   // -1..1
         float ppContrast   = 1f;   // 0..3
+        float ppMinAO      = 0f;   // 0..1
         bool  faceAreaCorrection = false;
         bool  backfaceCulling = true;
 
@@ -241,6 +242,9 @@ namespace LightmapUvTool
                 ppContrast = EditorGUILayout.Slider(
                     new GUIContent("Contrast", "AO contrast around 0.5. >1 = sharper, <1 = flatter."),
                     ppContrast, 0f, 3f);
+                ppMinAO = EditorGUILayout.Slider(
+                    new GUIContent("Min AO", "Minimum AO value. Prevents fully black areas in enclosed spaces."),
+                    ppMinAO, 0f, 1f);
                 if (EditorGUI.EndChangeCheck())
                     ApplyBlur();
 
@@ -383,8 +387,8 @@ namespace LightmapUvTool
                 }
             }
 
-            // Brightness / Contrast
-            if (ppBrightness != 0f || ppContrast != 1f)
+            // Brightness / Contrast / Min AO
+            if (ppBrightness != 0f || ppContrast != 1f || ppMinAO > 0f)
             {
                 foreach (var mesh in bakedFinalAO.Keys.ToList())
                 {
@@ -392,6 +396,9 @@ namespace LightmapUvTool
                     for (int i = 0; i < ao.Length; i++)
                     {
                         float v = ao[i];
+                        // Min AO: remap [0,1] → [minAO,1]
+                        if (ppMinAO > 0f)
+                            v = ppMinAO + v * (1f - ppMinAO);
                         // Contrast around 0.5 midpoint, then brightness offset
                         v = (v - 0.5f) * ppContrast + 0.5f + ppBrightness;
                         ao[i] = Mathf.Clamp01(v);
