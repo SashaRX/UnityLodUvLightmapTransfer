@@ -28,6 +28,7 @@ namespace LightmapUvTool
         public bool groundPlane   = true;
         public float groundOffset = 0.01f;
         public bool faceAreaCorrection = false;
+        public bool backfaceCulling = true;
     }
 
     public static class VertexAOBaker
@@ -519,8 +520,25 @@ namespace LightmapUvTool
                     allTris.Add(tris[i] + baseVert);
             }
 
-            var bvh = new TriangleBvh(allVerts.ToArray(), allTris.ToArray());
+            var allVertsArr = allVerts.ToArray();
+            var allTrisArr = allTris.ToArray();
+            var bvh = new TriangleBvh(allVertsArr, allTrisArr);
             var directions = GenerateSphereDirections(settings.sampleCount);
+
+            // Precompute face normals for backface culling
+            Vector3[] faceNormals = null;
+            if (settings.backfaceCulling)
+            {
+                int faceCount = allTrisArr.Length / 3;
+                faceNormals = new Vector3[faceCount];
+                for (int f = 0; f < faceCount; f++)
+                {
+                    var a = allVertsArr[allTrisArr[f * 3]];
+                    var b = allVertsArr[allTrisArr[f * 3 + 1]];
+                    var c = allVertsArr[allTrisArr[f * 3 + 2]];
+                    faceNormals[f] = Vector3.Cross(b - a, c - a).normalized;
+                }
+            }
 
             Bounds combinedBounds = ComputeCombinedBounds(meshes);
             float extent = combinedBounds.extents.magnitude;
@@ -577,7 +595,20 @@ namespace LightmapUvTool
                         totalWeight += ndot;
 
                         var hit = bvh.Raycast(origin, directions[d], maxDist);
-                        if (hit.triangleIndex >= 0) { occludedWeight += ndot; continue; }
+                        if (hit.triangleIndex >= 0)
+                        {
+                            // Backface culling: skip if ray hit the back side of a triangle
+                            if (faceNormals != null &&
+                                Vector3.Dot(directions[d], faceNormals[hit.triangleIndex]) > 0)
+                            {
+                                // Hit backface — not real occlusion
+                            }
+                            else
+                            {
+                                occludedWeight += ndot;
+                            }
+                            continue;
+                        }
 
                         if (settings.groundPlane && directions[d].y < -0.001f)
                         {

@@ -52,6 +52,7 @@ namespace LightmapUvTool
         int   blurIterations = 0;
         float blurStrength   = 0.5f;
         bool  faceAreaCorrection = false;
+        bool  backfaceCulling = true;
 
         // ── Results ──
         Dictionary<Mesh, float[]> bakedRawAO;    // raw bake result (before blur)
@@ -170,6 +171,9 @@ namespace LightmapUvTool
             }
 
             EditorGUILayout.Space(4);
+            backfaceCulling = EditorGUILayout.Toggle(
+                new GUIContent("Backface Culling", "Ignore hits on back side of triangles. Reduces false occlusion on thin walls and single-sided geometry."),
+                backfaceCulling);
             faceAreaCorrection = EditorGUILayout.Toggle(
                 new GUIContent("Face-Area Fix", "Fix large flat polygons where all vertices are in occlusion but the surface is open. Enable only for low-poly meshes with large quads."),
                 faceAreaCorrection);
@@ -271,7 +275,8 @@ namespace LightmapUvTool
                 intensity       = intensity,
                 groundPlane     = groundPlane,
                 groundOffset    = groundOffset,
-                faceAreaCorrection = faceAreaCorrection
+                faceAreaCorrection = faceAreaCorrection,
+                backfaceCulling = backfaceCulling
             };
 
             var sw = Stopwatch.StartNew();
