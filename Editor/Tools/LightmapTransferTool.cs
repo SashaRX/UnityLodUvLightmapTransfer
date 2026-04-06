@@ -1084,6 +1084,16 @@ namespace LightmapUvTool
                     // Add collision meshes from sidecar (if any)
                     var collisionData = CollisionMeshTool.GetCollisionMeshesFromSidecar(sourceFbxPath);
                     int collisionMeshCount = 0;
+                    if (collisionData.Count > 0)
+                    {
+                        // Remove existing _COL nodes from the cloned hierarchy to prevent duplicates
+                        for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
+                        {
+                            var ch = tempRoot.transform.GetChild(ci);
+                            if (ch.name.Contains("_COL"))
+                                UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                        }
+                    }
                     foreach (var (colMeshName, colMeshes, isConvex) in collisionData)
                     {
                         if (colMeshes.Count == 1 && !isConvex)
