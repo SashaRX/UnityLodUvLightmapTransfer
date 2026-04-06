@@ -1014,7 +1014,7 @@ namespace LightmapUvTool
                 foreach (var mf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
                 {
                     if (mf.gameObject != tempRoot &&
-                        !Regex.IsMatch(mf.gameObject.name, @"[_\-\s]LOD\d+$", RegexOptions.IgnoreCase))
+                        !System.Text.RegularExpressions.Regex.IsMatch(mf.gameObject.name, @"[_\-\s]LOD\d+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                     {
                         mf.gameObject.name = mf.gameObject.name + "_LOD0";
                     }
@@ -1156,7 +1156,7 @@ namespace LightmapUvTool
                 for (int ci = lodGroupT.childCount - 1; ci >= 0; ci--)
                 {
                     var child = lodGroupT.GetChild(ci);
-                    if (Regex.IsMatch(child.name, @"_LOD[1-9]\d*$", RegexOptions.IgnoreCase) ||
+                    if (System.Text.RegularExpressions.Regex.IsMatch(child.name, @"_LOD[1-9]\d*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ||
                         child.name.Contains("_COL"))
                     {
                         Undo.DestroyObjectImmediate(child.gameObject);
