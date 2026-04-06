@@ -30,6 +30,7 @@ namespace LightmapUvTool
         public int BorderPaddingPx = 0;
         public bool RepackPerMesh;
         public int IsolatedMeshGroup = -1;
+        public string IsolatedMeshGroupKey;
 
         // ── Canvas state ──
         public int PreviewUvChannel = 1;
