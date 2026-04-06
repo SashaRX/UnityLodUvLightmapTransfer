@@ -74,7 +74,11 @@ namespace LightmapUvTool
 
             activeToolIndex = 0;
             if (ActiveTool != null)
+            {
                 ActiveTool.OnActivate(ctx, canvas);
+                var modes = ActiveTool.GetFillModes();
+                canvas.SetFillModes(modes != null ? modes.ToList() : new List<UvCanvasView.FillModeEntry>());
+            }
 
             SceneView.duringSceneGui -= OnSceneGUI;
             SceneView.duringSceneGui += OnSceneGUI;
