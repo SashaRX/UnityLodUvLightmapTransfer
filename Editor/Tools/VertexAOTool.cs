@@ -80,10 +80,13 @@ namespace LightmapUvTool
 
         // ── Lifecycle ──
 
+        internal static VertexAOTool ActiveInstance { get; private set; }
+
         public void OnActivate(UvToolContext ctx, UvCanvasView canvas)
         {
             this.ctx = ctx;
             this.canvas = canvas;
+            ActiveInstance = this;
         }
 
         public void OnDeactivate()
@@ -590,7 +593,7 @@ namespace LightmapUvTool
             SceneView.RepaintAll();
         }
 
-        void RestorePreview()
+        internal void RestorePreview()
         {
             if (!previewActive) return;
 

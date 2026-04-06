@@ -944,6 +944,10 @@ namespace LightmapUvTool
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
             if (ctx.LodGroup == null) { UvtLog.Error("[FBX Export] No LODGroup loaded."); return; }
 
+            // Restore any active preview (checker, AO, shell colors) before export
+            // so that original materials are captured, not preview materials.
+            RestoreAllPreviews();
+
             // Find the source FBX path from source LOD entries
             string sourceFbxFile = null;
             foreach (var e in ctx.MeshEntries)
@@ -1498,6 +1502,7 @@ namespace LightmapUvTool
                 shellColorPreviewEnabled = false;
             }
             if (lightmapPreviewActive) RestoreLightmapPreview();
+            VertexAOTool.ActiveInstance?.RestorePreview();
             canvas.CurrentPreviewMode = UvCanvasView.PreviewMode.Off;
         }
 
