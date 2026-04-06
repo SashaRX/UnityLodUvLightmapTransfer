@@ -799,16 +799,24 @@ namespace LightmapUvTool
 
         Mesh GetResultMesh(MeshEntry e)
         {
-            Mesh m = e.lodIndex == ctx.SourceLodIndex ? e.repackedMesh : e.transferredMesh;
-            if (m != null) return m;
+            // Source LOD: prefer repacked mesh
+            if (e.lodIndex == ctx.SourceLodIndex && e.repackedMesh != null)
+                return e.repackedMesh;
+            // Target LODs: prefer transferred mesh
+            if (e.transferredMesh != null)
+                return e.transferredMesh;
+            // Welded/modified meshes
             if (e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit)
                 return e.originalMesh;
-            // Generated LODs (from LOD Gen): their fbxMesh is an .asset, not from source FBX
-            // Include them in export so they end up in the FBX file
+            // Generated LODs or any mesh that differs from the original FBX
+            if (e.originalMesh != null && e.originalMesh != e.fbxMesh)
+                return e.originalMesh;
+            // Generated LODs: originalMesh == fbxMesh but it's not from a .fbx file
             if (e.originalMesh != null)
             {
-                string assetPath = AssetDatabase.GetAssetPath(e.fbxMesh ?? e.originalMesh);
-                if (!string.IsNullOrEmpty(assetPath) && assetPath.EndsWith(".asset"))
+                string path = AssetDatabase.GetAssetPath(e.originalMesh);
+                // Mesh not from .fbx = generated in memory or .asset → include it
+                if (string.IsNullOrEmpty(path) || !path.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
                     return e.originalMesh;
             }
             return null;
