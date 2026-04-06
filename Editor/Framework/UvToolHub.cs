@@ -283,8 +283,12 @@ namespace LightmapUvTool
                     Mesh m = e.repackedMesh ?? e.originalMesh ?? e.fbxMesh;
                     if (m != null) lodTris += m.triangles.Length / 3;
                 }
-                EditorGUILayout.LabelField(lodTris.ToString("N0") + " tris",
-                    EditorStyles.miniLabel, GUILayout.Width(60));
+                var triStyle = new GUIStyle(EditorStyles.toolbarButton) {
+                    normal = { textColor = new Color(.3f, 1f, .5f) },
+                    fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.MiddleCenter
+                };
+                GUILayout.Label("▲ " + lodTris.ToString("N0"), triStyle, GUILayout.Width(72));
                 GUILayout.Space(4);
             }
 
