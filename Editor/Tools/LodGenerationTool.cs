@@ -399,28 +399,15 @@ namespace LightmapUvTool
             string separator = m.Groups[2].Value;
 
             var parent = go.transform.parent;
-            var results = new List<(GameObject, int)>();
+            if (parent == null) return null; // Root-level objects need a common parent
 
-            if (parent == null)
+            var results = new List<(GameObject, int)>();
+            for (int i = 0; i < parent.childCount; i++)
             {
-                // Root-level objects — search all root GameObjects in the scene
-                var roots = go.scene.GetRootGameObjects();
-                foreach (var root in roots)
-                {
-                    var rm = Regex.Match(root.name, @"^(.+?)[_\-\s]*LOD(\d+)$", RegexOptions.IgnoreCase);
-                    if (rm.Success && string.Equals(rm.Groups[1].Value, baseName, System.StringComparison.OrdinalIgnoreCase))
-                        results.Add((root, int.Parse(rm.Groups[2].Value)));
-                }
-            }
-            else
-            {
-                for (int i = 0; i < parent.childCount; i++)
-                {
-                    var child = parent.GetChild(i).gameObject;
-                    var cm = Regex.Match(child.name, @"^(.+?)[_\-\s]*LOD(\d+)$", RegexOptions.IgnoreCase);
-                    if (cm.Success && string.Equals(cm.Groups[1].Value, baseName, System.StringComparison.OrdinalIgnoreCase))
-                        results.Add((child, int.Parse(cm.Groups[2].Value)));
-                }
+                var child = parent.GetChild(i).gameObject;
+                var cm = Regex.Match(child.name, @"^(.+?)[_\-\s]*LOD(\d+)$", RegexOptions.IgnoreCase);
+                if (cm.Success && string.Equals(cm.Groups[1].Value, baseName, System.StringComparison.OrdinalIgnoreCase))
+                    results.Add((child, int.Parse(cm.Groups[2].Value)));
             }
 
             results.Sort((a, b) => a.Item2.CompareTo(b.Item2));
@@ -429,36 +416,16 @@ namespace LightmapUvTool
 
         void CreateLodGroup(List<(GameObject go, int lodIndex)> siblings)
         {
-            var parent = siblings[0].go.transform.parent;
-            string baseName = Regex.Replace(siblings[0].go.name, @"[_\-\s]*LOD\d+$", "", RegexOptions.IgnoreCase);
-
-            GameObject lodRoot;
-            if (parent != null)
-            {
-                lodRoot = parent.gameObject;
-            }
-            else
-            {
-                // Root-level objects — create a new parent
-                lodRoot = new GameObject(baseName);
-                Undo.RegisterCreatedObjectUndo(lodRoot, "Create LODGroup");
-                foreach (var (go, _) in siblings)
-                {
-                    Undo.SetTransformParent(go.transform, lodRoot.transform, "Create LODGroup");
-                }
-            }
+            var lodRoot = siblings[0].go.transform.parent.gameObject;
 
             var lodGroup = Undo.AddComponent<LODGroup>(lodRoot);
 
-            int maxLod = siblings[siblings.Count - 1].lodIndex;
-            var lods = new LOD[maxLod + 1];
-            for (int i = 0; i <= maxLod; i++)
-                lods[i] = new LOD(Mathf.Pow(0.5f, i + 1), new Renderer[0]);
-
-            foreach (var (go, lodIndex) in siblings)
+            // Remap to contiguous indices (handles gaps like LOD0, LOD2 → slot 0, 1)
+            var lods = new LOD[siblings.Count];
+            for (int i = 0; i < siblings.Count; i++)
             {
-                var renderers = go.GetComponentsInChildren<Renderer>();
-                lods[lodIndex] = new LOD(lods[lodIndex].screenRelativeTransitionHeight, renderers);
+                var renderers = siblings[i].go.GetComponentsInChildren<Renderer>();
+                lods[i] = new LOD(Mathf.Pow(0.5f, i + 1), renderers);
             }
 
             lodGroup.SetLODs(lods);
