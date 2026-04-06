@@ -35,8 +35,10 @@ namespace LightmapUvTool
         int   convexMaxVertsPerHull = 64;
 
         // ── Results ──
+        CollisionMode generatedMode; // mode used during last Generate (for Apply)
         List<GeneratedCollisionInfo> lastResults = new List<GeneratedCollisionInfo>();
         List<Mesh> generatedMeshes = new List<Mesh>(); // kept alive for Apply and preview
+        List<Transform> sourceTransforms = new List<Transform>(); // per-result source transforms
 
         struct GeneratedCollisionInfo
         {
@@ -45,6 +47,7 @@ namespace LightmapUvTool
             public int resultTriCount;
             public int hullCount;
             public float resultError;
+            public Transform sourceTransform; // renderer transform for correct placement
         }
 
         // ── Lifecycle ──
@@ -59,12 +62,21 @@ namespace LightmapUvTool
         public void OnDeactivate()
         {
             SceneView.duringSceneGui -= OnSceneGUIInternal;
+            DestroyGeneratedMeshes();
         }
 
         public void OnRefresh()
         {
-            lastResults.Clear();
+            DestroyGeneratedMeshes();
+        }
+
+        void DestroyGeneratedMeshes()
+        {
+            foreach (var m in generatedMeshes)
+                if (m != null) UnityEngine.Object.DestroyImmediate(m);
             generatedMeshes.Clear();
+            lastResults.Clear();
+            sourceTransforms.Clear();
         }
 
         // ── UI: Sidebar ──
@@ -179,8 +191,8 @@ namespace LightmapUvTool
 
         void ExecuteGenerate()
         {
-            lastResults.Clear();
-            generatedMeshes.Clear();
+            DestroyGeneratedMeshes();
+            generatedMode = mode;
 
             var sourceMeshEntries = ctx.MeshEntries
                 .Where(e => e.lodIndex == ctx.SourceLodIndex && e.include)
@@ -224,11 +236,12 @@ namespace LightmapUvTool
             generatedMeshes.Add(result.mesh);
             lastResults.Add(new GeneratedCollisionInfo
             {
-                meshName       = sourceMesh.name,
-                sourceTriCount = result.sourceTriCount,
-                resultTriCount = result.resultTriCount,
-                hullCount      = 1,
-                resultError    = result.resultError
+                meshName        = sourceMesh.name,
+                sourceTriCount  = result.sourceTriCount,
+                resultTriCount  = result.resultTriCount,
+                hullCount       = 1,
+                resultError     = result.resultError,
+                sourceTransform = entry.renderer != null ? entry.renderer.transform : null
             });
         }
 
@@ -259,10 +272,11 @@ namespace LightmapUvTool
 
             lastResults.Add(new GeneratedCollisionInfo
             {
-                meshName       = sourceMesh.name,
-                sourceTriCount = result.sourceTriCount,
-                resultTriCount = totalTris,
-                hullCount      = result.hulls.Count
+                meshName        = sourceMesh.name,
+                sourceTriCount  = result.sourceTriCount,
+                resultTriCount  = totalTris,
+                hullCount       = result.hulls.Count,
+                sourceTransform = entry.renderer != null ? entry.renderer.transform : null
             });
         }
 
@@ -275,19 +289,31 @@ namespace LightmapUvTool
             Transform root = ctx.LodGroup.transform;
             int undoGroup = Undo.GetCurrentGroup();
 
-            if (mode == CollisionMode.Simplified)
+            if (generatedMode == CollisionMode.Simplified)
             {
                 // One _COL child per generated mesh
-                for (int i = 0; i < generatedMeshes.Count; i++)
+                int meshIdx = 0;
+                foreach (var r in lastResults)
                 {
-                    string name = generatedMeshes[i].name.Replace("_collision", "_COL");
+                    if (meshIdx >= generatedMeshes.Count) break;
+
+                    string name = generatedMeshes[meshIdx].name.Replace("_collision", "_COL");
                     var go = new GameObject(name);
                     Undo.RegisterCreatedObjectUndo(go, "Create Collision Mesh");
                     go.transform.SetParent(root, false);
 
+                    // Preserve source renderer transform offset
+                    if (r.sourceTransform != null && r.sourceTransform != root)
+                    {
+                        go.transform.localPosition = root.InverseTransformPoint(r.sourceTransform.position);
+                        go.transform.localRotation = Quaternion.Inverse(root.rotation) * r.sourceTransform.rotation;
+                        go.transform.localScale = r.sourceTransform.localScale;
+                    }
+
                     var mc = Undo.AddComponent<MeshCollider>(go);
-                    mc.sharedMesh = generatedMeshes[i];
+                    mc.sharedMesh = generatedMeshes[meshIdx];
                     mc.convex = false;
+                    meshIdx++;
                 }
             }
             else
@@ -300,6 +326,14 @@ namespace LightmapUvTool
                     var container = new GameObject(containerName);
                     Undo.RegisterCreatedObjectUndo(container, "Create Collision Container");
                     container.transform.SetParent(root, false);
+
+                    // Preserve source renderer transform offset
+                    if (r.sourceTransform != null && r.sourceTransform != root)
+                    {
+                        container.transform.localPosition = root.InverseTransformPoint(r.sourceTransform.position);
+                        container.transform.localRotation = Quaternion.Inverse(root.rotation) * r.sourceTransform.rotation;
+                        container.transform.localScale = r.sourceTransform.localScale;
+                    }
 
                     for (int h = 0; h < r.hullCount && meshIdx < generatedMeshes.Count; h++, meshIdx++)
                     {
