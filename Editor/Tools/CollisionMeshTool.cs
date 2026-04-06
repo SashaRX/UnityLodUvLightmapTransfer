@@ -138,6 +138,17 @@ namespace LightmapUvTool
                     }
                 }
 
+                EditorGUILayout.Space(4);
+                var bgcClear = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(.9f, .3f, .3f);
+                if (GUILayout.Button("Clear Results", GUILayout.Height(20)))
+                {
+                    DestroyGeneratedMeshes();
+                    SceneView.RepaintAll();
+                    requestRepaint?.Invoke();
+                }
+                GUI.backgroundColor = bgcClear;
+
                 EditorGUILayout.Space(8);
                 EditorGUILayout.LabelField("Scene", EditorStyles.boldLabel);
 
