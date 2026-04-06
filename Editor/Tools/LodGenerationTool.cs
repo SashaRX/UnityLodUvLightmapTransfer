@@ -266,6 +266,10 @@ namespace LightmapUvTool
                     var lodRenderers = new List<Renderer>();
                     int lodLevel = startLod + lodIdx;
 
+                    // Build source parent → LOD container mapping for hierarchy preservation
+                    // If source renderers are nested (e.g. LOD0/Door_LOD0), create matching containers
+                    var parentToContainer = new Dictionary<Transform, Transform>();
+
                     foreach (var (entry, srcMesh) in sourceMeshes)
                     {
                         var r = MeshSimplifier.Simplify(srcMesh, settings);
@@ -295,11 +299,31 @@ namespace LightmapUvTool
                             hitErrorLimit = hitLimit
                         });
 
-                        // Create scene GameObject + add to LODGroup
+                        // Create scene GameObject preserving source hierarchy
                         if (entry.renderer != null)
                         {
                             var go = new GameObject(meshName);
-                            go.transform.SetParent(ctx.LodGroup.transform, false);
+
+                            // Determine correct parent: mirror source hierarchy
+                            Transform srcParent = entry.renderer.transform.parent;
+                            Transform lodGroupTransform = ctx.LodGroup.transform;
+
+                            if (srcParent != lodGroupTransform && srcParent != null)
+                            {
+                                // Nested renderer — find or create matching container
+                                if (parentToContainer.TryGetValue(srcParent, out var container))
+                                    go.transform.SetParent(container, false);
+                                else
+                                    go.transform.SetParent(lodGroupTransform, false);
+                            }
+                            else
+                            {
+                                go.transform.SetParent(lodGroupTransform, false);
+                            }
+
+                            // Register this GO as container for its source transform
+                            // so nested renderers can be parented under it
+                            parentToContainer[entry.renderer.transform] = go.transform;
                             go.transform.localPosition = entry.renderer.transform.localPosition;
                             go.transform.localRotation = entry.renderer.transform.localRotation;
                             go.transform.localScale    = entry.renderer.transform.localScale;
