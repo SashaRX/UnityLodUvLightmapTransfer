@@ -87,7 +87,7 @@ namespace LightmapUvTool
             ActiveTool?.OnDeactivate();
 
             // Restore all previews
-            if (canvas != null && canvas.CheckerEnabled)
+            if (canvas != null && (canvas.CheckerEnabled || CheckerTexturePreview.IsActive))
             {
                 canvas.CheckerEnabled = false;
                 CheckerTexturePreview.Restore();
@@ -95,17 +95,20 @@ namespace LightmapUvTool
             if (ShellColorModelPreview.IsActive)
                 ShellColorModelPreview.Restore();
             RestoreLightmapPreview();
+            if (canvas != null) canvas.CurrentPreviewMode = UvCanvasView.PreviewMode.Off;
 
             if (ctx?.LodGroup != null)
                 ctx.LodGroup.ForceLOD(-1);
 
             canvas?.Cleanup();
 
-            // Cleanup working meshes
+            // Cleanup working meshes — restore fbxMesh on MeshFilter first
             if (ctx?.MeshEntries != null)
             {
                 foreach (var e in ctx.MeshEntries)
                 {
+                    if (e.meshFilter != null && e.fbxMesh != null)
+                        e.meshFilter.sharedMesh = e.fbxMesh;
                     if (e.transferredMesh != null) { DestroyImmediate(e.transferredMesh); e.transferredMesh = null; }
                     if (e.repackedMesh != null) { DestroyImmediate(e.repackedMesh); e.repackedMesh = null; }
                     if (e.originalMesh != null && e.originalMesh != e.fbxMesh) { DestroyImmediate(e.originalMesh); e.originalMesh = null; }
@@ -664,6 +667,8 @@ namespace LightmapUvTool
             Repaint();
             SceneView.RepaintAll();
         }
+
+        internal void RestoreLightmapPreviewSafe() => RestoreLightmapPreview();
 
         void RestoreLightmapPreview()
         {

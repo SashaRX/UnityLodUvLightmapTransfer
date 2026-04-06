@@ -58,6 +58,10 @@ namespace LightmapUvTool
             var windows = Resources.FindObjectsOfTypeAll<UvTransferWindow>();
             foreach (var w in windows)
                 w.RestoreLightmapPreviewSafe();
+
+            var hubs = Resources.FindObjectsOfTypeAll<UvToolHub>();
+            foreach (var h in hubs)
+                h.RestoreLightmapPreviewSafe();
         }
     }
 
