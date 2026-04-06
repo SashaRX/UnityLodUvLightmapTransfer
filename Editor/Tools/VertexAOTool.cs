@@ -288,7 +288,6 @@ namespace LightmapUvTool
             var channel = (AOTargetChannel)targetChannel;
             foreach (var kvp in bakedFinalAO)
             {
-                Undo.RecordObject(kvp.Key, "Apply Vertex AO");
                 VertexAOBaker.WriteToChannel(kvp.Key, kvp.Value, channel);
                 EditorUtility.SetDirty(kvp.Key);
             }

@@ -48,6 +48,8 @@ namespace LightmapUvTool
         {
             if (mesh == null || aoValues == null || aoValues.Length != mesh.vertexCount) return;
 
+            Undo.RecordObject(mesh, "Write AO Channel");
+
             int ch = (int)channel;
             if (ch <= (int)AOTargetChannel.VertexColorA)
             {
