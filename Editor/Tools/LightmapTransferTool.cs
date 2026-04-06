@@ -832,27 +832,34 @@ namespace LightmapUvTool
             if (sourceMesh.vertexCount != exportMesh.vertexCount) return;
             for (int ch = 0; ch < 8; ch++)
             {
-                // Skip if export mesh already has this channel
                 var attr = (VertexAttribute)((int)VertexAttribute.TexCoord0 + ch);
                 if (exportMesh.HasVertexAttribute(attr)) continue;
                 if (!sourceMesh.HasVertexAttribute(attr)) continue;
 
-                var uv = new List<Vector2>();
-                sourceMesh.GetUVs(ch, uv);
-                if (uv.Count == 0) continue;
-
-                // Skip trivial data: all zeros or all ones
-                bool allZero = true, allOne = true;
-                for (int i = 0; i < uv.Count; i++)
+                int dim = sourceMesh.GetVertexAttributeDimension(attr);
+                if (dim <= 2)
                 {
-                    var v = uv[i];
-                    if (v.x != 0f || v.y != 0f) allZero = false;
-                    if (v.x != 1f || v.y != 1f) allOne = false;
-                    if (!allZero && !allOne) break;
+                    var uv = new List<Vector2>();
+                    sourceMesh.GetUVs(ch, uv);
+                    if (uv.Count == 0) continue;
+                    bool allZero = true;
+                    for (int i = 0; i < uv.Count; i++)
+                        if (uv[i].x != 0f || uv[i].y != 0f) { allZero = false; break; }
+                    if (allZero) continue;
+                    exportMesh.SetUVs(ch, uv);
                 }
-                if (allZero || allOne) continue;
-
-                exportMesh.SetUVs(ch, uv);
+                else if (dim == 3)
+                {
+                    var uv = new List<Vector3>();
+                    sourceMesh.GetUVs(ch, uv);
+                    if (uv.Count > 0) exportMesh.SetUVs(ch, uv);
+                }
+                else
+                {
+                    var uv = new List<Vector4>();
+                    sourceMesh.GetUVs(ch, uv);
+                    if (uv.Count > 0) exportMesh.SetUVs(ch, uv);
+                }
             }
         }
 
@@ -977,6 +984,12 @@ namespace LightmapUvTool
                         }
                         var child = new GameObject(meshName);
                         child.transform.SetParent(tempRoot.transform, false);
+                        if (entry.renderer != null)
+                        {
+                            child.transform.localPosition = entry.renderer.transform.localPosition;
+                            child.transform.localRotation = entry.renderer.transform.localRotation;
+                            child.transform.localScale = entry.renderer.transform.localScale;
+                        }
                         var newMf = child.AddComponent<MeshFilter>();
                         var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
                         Mesh srcUvMesh = entry.fbxMesh ?? entry.originalMesh;
