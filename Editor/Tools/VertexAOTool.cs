@@ -209,12 +209,12 @@ namespace LightmapUvTool
             RestorePreview();
 
             var entries = ctx.MeshEntries
-                .Where(e => e.lodIndex == ctx.SourceLodIndex && e.include && e.renderer != null)
+                .Where(e => e.include && e.renderer != null)
                 .ToList();
 
             if (entries.Count == 0)
             {
-                UvtLog.Warn("[Vertex AO] No source meshes found.");
+                UvtLog.Warn("[Vertex AO] No meshes found.");
                 return;
             }
 
@@ -252,7 +252,8 @@ namespace LightmapUvTool
             if (blurIterations > 0)
                 ApplyBlurInternal();
 
-            UvtLog.Info($"[Vertex AO] Baked {bakedVertexCount} vertices in {bakeTimeSeconds:F1}s");
+            int lodCount = entries.Select(e => e.lodIndex).Distinct().Count();
+            UvtLog.Info($"[Vertex AO] Baked {bakedVertexCount} vertices across {lodCount} LOD(s) in {bakeTimeSeconds:F1}s");
             requestRepaint?.Invoke();
         }
 
