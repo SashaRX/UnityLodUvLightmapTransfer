@@ -60,17 +60,27 @@ namespace LightmapUvTool
             public string description;
         }
 
+        struct MergeGroup
+        {
+            public int lodIndex;
+            public Material material;
+            public List<MeshEntry> entries;
+        }
+
         class MeshReport
         {
             public List<LodInfo> lods = new List<LodInfo>();
             public List<MeshEntry> weldCandidates = new List<MeshEntry>();
             public List<EmptyUvEntry> emptyUvEntries = new List<EmptyUvEntry>();
+            public List<MeshEntry> multiMatEntries = new List<MeshEntry>();
+            public List<MergeGroup> mergeGroups = new List<MergeGroup>();
         }
 
         struct EmptyUvEntry
         {
             public MeshEntry entry;
             public List<int> channels;
+            public bool hasZeroColors;
         }
 
         struct MeshStats
@@ -84,6 +94,7 @@ namespace LightmapUvTool
         {
             public int lodIndex;
             public int totalVerts, totalTris;
+            public int deltaVerts, deltaTris;
             public List<MeshStats> meshes;
         }
 
@@ -717,8 +728,11 @@ namespace LightmapUvTool
                 EditorGUILayout.LabelField("Vertex / Triangle Summary", EditorStyles.boldLabel);
                 foreach (var lod in meshReport.lods)
                 {
+                    string delta = lod.lodIndex > 0 && meshReport.lods.Count > 1
+                        ? $" (Δ {lod.deltaVerts:+#,##0;-#,##0;0} v, {lod.deltaTris:+#,##0;-#,##0;0} t)"
+                        : "";
                     EditorGUILayout.LabelField(
-                        $"LOD{lod.lodIndex}: {lod.totalVerts:N0} verts, {lod.totalTris:N0} tris");
+                        $"LOD{lod.lodIndex}: {lod.totalVerts:N0} verts, {lod.totalTris:N0} tris{delta}");
                     EditorGUI.indentLevel++;
                     foreach (var m in lod.meshes)
                         EditorGUILayout.LabelField($"{m.name}: {m.verts:N0} v, {m.tris:N0} t");
@@ -742,19 +756,69 @@ namespace LightmapUvTool
                 // Empty UV channels
                 if (meshReport.emptyUvEntries.Count > 0)
                 {
-                    int totalEmpty = meshReport.emptyUvEntries.Sum(e => e.channels.Count);
+                    int totalEmptyUvs = meshReport.emptyUvEntries.Sum(e => e.channels.Count);
+                    int totalZeroColors = meshReport.emptyUvEntries.Count(e => e.hasZeroColors);
                     EditorGUILayout.Space(4);
+
+                    var parts = new List<string>();
+                    if (totalEmptyUvs > 0)
+                        parts.Add($"{totalEmptyUvs} empty UV channel(s)");
+                    if (totalZeroColors > 0)
+                        parts.Add($"{totalZeroColors} mesh(es) with zero vertex colors");
                     EditorGUILayout.HelpBox(
-                        $"{totalEmpty} empty UV channel(s) across {meshReport.emptyUvEntries.Count} mesh(es).",
+                        string.Join(", ", parts) + $" across {meshReport.emptyUvEntries.Count} mesh(es).",
                         MessageType.Info);
 
                     GUI.backgroundColor = new Color(.4f, .8f, .4f);
-                    if (GUILayout.Button("Strip Empty UV Channels", GUILayout.Height(28)))
+                    if (GUILayout.Button("Strip Empty Channels", GUILayout.Height(28)))
                         FixMeshStripUvs();
                     GUI.backgroundColor = bgc;
                 }
 
-                if (meshReport.weldCandidates.Count == 0 && meshReport.emptyUvEntries.Count == 0)
+                // Multi-material split
+                if (meshReport.multiMatEntries.Count > 0)
+                {
+                    EditorGUILayout.Space(4);
+                    EditorGUILayout.HelpBox(
+                        $"{meshReport.multiMatEntries.Count} mesh(es) with multiple materials (can split).",
+                        MessageType.Info);
+                    foreach (var e in meshReport.multiMatEntries)
+                    {
+                        var mesh = e.originalMesh ?? e.fbxMesh;
+                        EditorGUILayout.LabelField(
+                            $"  {e.renderer.name}: {mesh.subMeshCount} submeshes",
+                            EditorStyles.miniLabel);
+                    }
+
+                    GUI.backgroundColor = new Color(.7f, .4f, .95f);
+                    if (GUILayout.Button("Split by Material", GUILayout.Height(28)))
+                        FixMeshSplitByMaterial();
+                    GUI.backgroundColor = bgc;
+                }
+
+                // Merge same-material
+                if (meshReport.mergeGroups.Count > 0)
+                {
+                    int totalMergeable = meshReport.mergeGroups.Sum(g => g.entries.Count);
+                    EditorGUILayout.Space(4);
+                    EditorGUILayout.HelpBox(
+                        $"{totalMergeable} object(s) in {meshReport.mergeGroups.Count} group(s) can be merged by material.",
+                        MessageType.Info);
+                    foreach (var g in meshReport.mergeGroups)
+                    {
+                        EditorGUILayout.LabelField(
+                            $"  LOD{g.lodIndex} \"{g.material.name}\": {g.entries.Count} objects",
+                            EditorStyles.miniLabel);
+                    }
+
+                    GUI.backgroundColor = new Color(.7f, .4f, .95f);
+                    if (GUILayout.Button("Merge Same-Material", GUILayout.Height(28)))
+                        FixMeshMerge();
+                    GUI.backgroundColor = bgc;
+                }
+
+                if (meshReport.weldCandidates.Count == 0 && meshReport.emptyUvEntries.Count == 0
+                    && meshReport.multiMatEntries.Count == 0 && meshReport.mergeGroups.Count == 0)
                 {
                     EditorGUILayout.Space(4);
                     EditorGUILayout.HelpBox("No mesh issues found.", MessageType.Info);
@@ -815,12 +879,28 @@ namespace LightmapUvTool
                         if (allZero)
                             emptyChannels.Add(ch);
                     }
-                    if (emptyChannels.Count > 0)
+                    // Check for zero vertex colors
+                    bool hasZeroColors = false;
+                    var colors = mesh.colors;
+                    if (colors != null && colors.Length > 0)
+                    {
+                        bool allZero = true;
+                        for (int vi = 0; vi < colors.Length; vi++)
+                        {
+                            var c = colors[vi];
+                            if (c.r > 0f || c.g > 0f || c.b > 0f || c.a > 0f)
+                            { allZero = false; break; }
+                        }
+                        hasZeroColors = allZero;
+                    }
+
+                    if (emptyChannels.Count > 0 || hasZeroColors)
                     {
                         meshReport.emptyUvEntries.Add(new EmptyUvEntry
                         {
                             entry = e,
-                            channels = emptyChannels
+                            channels = emptyChannels,
+                            hasZeroColors = hasZeroColors
                         });
                     }
                 }
@@ -828,8 +908,62 @@ namespace LightmapUvTool
                 meshReport.lods.Add(lodInfo);
             }
 
+            // Compute delta from LOD0
+            if (meshReport.lods.Count > 1)
+            {
+                var lod0 = meshReport.lods[0];
+                for (int i = 1; i < meshReport.lods.Count; i++)
+                {
+                    var l = meshReport.lods[i];
+                    l.deltaVerts = l.totalVerts - lod0.totalVerts;
+                    l.deltaTris = l.totalTris - lod0.totalTris;
+                    meshReport.lods[i] = l;
+                }
+            }
+
+            // Detect multi-material meshes and merge candidates
+            var mergeMap = new Dictionary<string, MergeGroup>(); // key: "lodIndex_materialInstanceId"
+            for (int li = 0; li < ctx.LodCount; li++)
+            {
+                var entries = ctx.ForLod(li);
+                foreach (var e in entries)
+                {
+                    var mesh = e.originalMesh ?? e.fbxMesh;
+                    if (mesh == null || e.renderer == null) continue;
+
+                    // Multi-material detection
+                    if (mesh.subMeshCount > 1)
+                        meshReport.multiMatEntries.Add(e);
+
+                    // Merge candidates: single-submesh, single-material objects
+                    var mats = e.renderer.sharedMaterials;
+                    if (mesh.subMeshCount == 1 && mats.Length == 1 && mats[0] != null)
+                    {
+                        string key = $"{li}_{mats[0].GetInstanceID()}";
+                        if (!mergeMap.ContainsKey(key))
+                            mergeMap[key] = new MergeGroup
+                            {
+                                lodIndex = li,
+                                material = mats[0],
+                                entries = new List<MeshEntry>()
+                            };
+                        mergeMap[key].entries.Add(e);
+                    }
+                }
+            }
+            // Only keep groups with 2+ entries
+            foreach (var kvp in mergeMap)
+            {
+                if (kvp.Value.entries.Count > 1)
+                    meshReport.mergeGroups.Add(kvp.Value);
+            }
+
+            int colorCount = meshReport.emptyUvEntries.Count(e => e.hasZeroColors);
             UvtLog.Info($"Mesh scan: {meshReport.weldCandidates.Count} weld candidate(s), " +
-                        $"{meshReport.emptyUvEntries.Count} mesh(es) with empty UV channels.");
+                        $"{meshReport.emptyUvEntries.Count} mesh(es) with empty channels" +
+                        (colorCount > 0 ? $" ({colorCount} with zero vertex colors)" : "") +
+                        $", {meshReport.multiMatEntries.Count} multi-material mesh(es)" +
+                        $", {meshReport.mergeGroups.Count} merge group(s).");
         }
 
         void FixMeshWeld()
@@ -889,22 +1023,399 @@ namespace LightmapUvTool
                 {
                     var clone = UnityEngine.Object.Instantiate(mesh);
                     clone.name = mesh.name;
-                    Undo.RecordObject(entry.meshFilter, "Strip Empty UVs");
+                    Undo.RecordObject(entry.meshFilter, "Strip Empty Channels");
                     entry.meshFilter.sharedMesh = clone;
                     entry.originalMesh = clone;
                     mesh = clone;
                 }
 
-                Undo.RecordObject(mesh, "Strip Empty UVs");
+                Undo.RecordObject(mesh, "Strip Empty Channels");
                 foreach (int ch in channels)
                     mesh.SetUVs(ch, (List<Vector2>)null);
+                if (uvEntry.hasZeroColors)
+                    mesh.colors = null;
 
-                stripped += channels.Count;
-                UvtLog.Info($"Stripped {channels.Count} empty UV channel(s) from {mesh.name}");
+                stripped += channels.Count + (uvEntry.hasZeroColors ? 1 : 0);
+                UvtLog.Info($"Stripped {channels.Count} empty UV channel(s)" +
+                            (uvEntry.hasZeroColors ? " + zero vertex colors" : "") +
+                            $" from {mesh.name}");
             }
 
             Undo.CollapseUndoOperations(undoGroup);
-            UvtLog.Info($"Stripped {stripped} empty UV channel(s) total.");
+            UvtLog.Info($"Stripped {stripped} empty channel(s) total.");
+            meshReport = null;
+            requestRepaint?.Invoke();
+        }
+
+        void FixMeshSplitByMaterial()
+        {
+            if (meshReport == null || meshReport.multiMatEntries.Count == 0) return;
+
+            int undoGroup = Undo.GetCurrentGroup();
+            int split = 0;
+
+            foreach (var e in meshReport.multiMatEntries)
+            {
+                var srcMesh = e.originalMesh ?? e.fbxMesh;
+                if (srcMesh == null || e.renderer == null || e.meshFilter == null) continue;
+
+                var mats = e.renderer.sharedMaterials;
+                int subCount = srcMesh.subMeshCount;
+                if (subCount <= 1) continue;
+
+                var parent = e.renderer.transform.parent;
+                var srcTransform = e.renderer.transform;
+                var newRenderers = new List<Renderer>();
+
+                for (int s = 0; s < subCount; s++)
+                {
+                    // Extract submesh
+                    var subTris = srcMesh.GetTriangles(s);
+                    if (subTris.Length == 0) continue;
+
+                    // Build vertex remap: old index → new compact index
+                    var usedVerts = new HashSet<int>(subTris);
+                    var oldToNew = new Dictionary<int, int>();
+                    int newIdx = 0;
+                    foreach (int vi in usedVerts.OrderBy(v => v))
+                        oldToNew[vi] = newIdx++;
+                    int newVertCount = newIdx;
+
+                    // Extract vertex data
+                    var srcPos = srcMesh.vertices;
+                    var srcNorm = srcMesh.normals;
+                    var srcTan = srcMesh.tangents;
+                    var srcColors = srcMesh.colors;
+                    var srcBw = srcMesh.boneWeights;
+
+                    var newPos = new Vector3[newVertCount];
+                    Vector3[] newNorm = srcNorm != null && srcNorm.Length > 0 ? new Vector3[newVertCount] : null;
+                    Vector4[] newTan = srcTan != null && srcTan.Length > 0 ? new Vector4[newVertCount] : null;
+                    Color[] newColors = srcColors != null && srcColors.Length > 0 ? new Color[newVertCount] : null;
+                    BoneWeight[] newBw = srcBw != null && srcBw.Length > 0 ? new BoneWeight[newVertCount] : null;
+
+                    foreach (var kvp in oldToNew)
+                    {
+                        int oi = kvp.Key, ni = kvp.Value;
+                        newPos[ni] = srcPos[oi];
+                        if (newNorm != null) newNorm[ni] = srcNorm[oi];
+                        if (newTan != null) newTan[ni] = srcTan[oi];
+                        if (newColors != null) newColors[ni] = srcColors[oi];
+                        if (newBw != null) newBw[ni] = srcBw[oi];
+                    }
+
+                    // Remap triangle indices
+                    var newTris = new int[subTris.Length];
+                    for (int t = 0; t < subTris.Length; t++)
+                        newTris[t] = oldToNew[subTris[t]];
+
+                    // Build new mesh
+                    var newMesh = new Mesh();
+                    newMesh.name = $"{srcMesh.name}_sub{s}";
+                    newMesh.SetVertices(newPos);
+                    if (newNorm != null) newMesh.normals = newNorm;
+                    if (newTan != null) newMesh.tangents = newTan;
+                    if (newColors != null) newMesh.colors = newColors;
+                    if (newBw != null) newMesh.boneWeights = newBw;
+
+                    // Copy UV channels
+                    var tmpUv2 = new List<Vector2>();
+                    var tmpUv3 = new List<Vector3>();
+                    var tmpUv4 = new List<Vector4>();
+                    for (int ch = 0; ch < 8; ch++)
+                    {
+                        // Try Vector4 first (preserves dimension)
+                        tmpUv4.Clear();
+                        srcMesh.GetUVs(ch, tmpUv4);
+                        if (tmpUv4.Count > 0)
+                        {
+                            var chData = new List<Vector4>(newVertCount);
+                            for (int vi = 0; vi < newVertCount; vi++) chData.Add(default);
+                            foreach (var kvp in oldToNew)
+                                chData[kvp.Value] = tmpUv4[kvp.Key];
+                            newMesh.SetUVs(ch, chData);
+                            continue;
+                        }
+                    }
+
+                    newMesh.SetTriangles(newTris, 0);
+                    newMesh.RecalculateBounds();
+
+                    // Create new GameObject
+                    string matName = s < mats.Length && mats[s] != null ? mats[s].name : $"mat{s}";
+                    var go = new GameObject($"{e.renderer.name}_{matName}");
+                    Undo.RegisterCreatedObjectUndo(go, "Split by Material");
+                    go.transform.SetParent(parent, false);
+                    go.transform.localPosition = srcTransform.localPosition;
+                    go.transform.localRotation = srcTransform.localRotation;
+                    go.transform.localScale = srcTransform.localScale;
+
+                    var mf = go.AddComponent<MeshFilter>();
+                    mf.sharedMesh = newMesh;
+                    var mr = go.AddComponent<MeshRenderer>();
+                    mr.sharedMaterial = s < mats.Length ? mats[s] : null;
+
+                    newRenderers.Add(mr);
+                }
+
+                // Update LODGroup to replace original renderer with new renderers
+                if (ctx.LodGroup != null)
+                {
+                    Undo.RecordObject(ctx.LodGroup, "Split by Material");
+                    var lods = ctx.LodGroup.GetLODs();
+                    for (int li = 0; li < lods.Length; li++)
+                    {
+                        if (lods[li].renderers == null) continue;
+                        var renderers = new List<Renderer>(lods[li].renderers);
+                        int idx = renderers.IndexOf(e.renderer);
+                        if (idx >= 0)
+                        {
+                            renderers.RemoveAt(idx);
+                            renderers.InsertRange(idx, newRenderers);
+                            lods[li].renderers = renderers.ToArray();
+                        }
+                    }
+                    ctx.LodGroup.SetLODs(lods);
+                }
+
+                // Destroy original
+                UvtLog.Info($"Split {e.renderer.name}: {subCount} submeshes → {newRenderers.Count} objects");
+                Undo.DestroyObjectImmediate(e.renderer.gameObject);
+                split++;
+            }
+
+            Undo.CollapseUndoOperations(undoGroup);
+            UvtLog.Info($"Split {split} multi-material mesh(es).");
+
+            if (split > 0 && ctx.LodGroup != null)
+                ctx.Refresh(ctx.LodGroup);
+
+            meshReport = null;
+            requestRepaint?.Invoke();
+        }
+
+        void FixMeshMerge()
+        {
+            if (meshReport == null || meshReport.mergeGroups.Count == 0) return;
+
+            int undoGroup = Undo.GetCurrentGroup();
+            int merged = 0;
+
+            foreach (var group in meshReport.mergeGroups)
+            {
+                if (group.entries.Count < 2) continue;
+
+                // Determine which vertex attributes exist across all meshes
+                bool hasNormals = false, hasTangents = false, hasColors = false;
+                bool[] hasUv = new bool[8];
+                int totalVerts = 0, totalTris = 0;
+
+                foreach (var e in group.entries)
+                {
+                    var mesh = e.originalMesh ?? e.fbxMesh;
+                    if (mesh == null) continue;
+                    totalVerts += mesh.vertexCount;
+                    totalTris += (int)(mesh.triangles.Length);
+                    if (mesh.normals != null && mesh.normals.Length > 0) hasNormals = true;
+                    if (mesh.tangents != null && mesh.tangents.Length > 0) hasTangents = true;
+                    if (mesh.colors != null && mesh.colors.Length > 0) hasColors = true;
+                    var tmpCheck = new List<Vector2>();
+                    for (int ch = 0; ch < 8; ch++)
+                    {
+                        tmpCheck.Clear();
+                        mesh.GetUVs(ch, tmpCheck);
+                        if (tmpCheck.Count > 0) hasUv[ch] = true;
+                    }
+                }
+
+                // Merge vertex data
+                var allPos = new List<Vector3>(totalVerts);
+                var allNorm = hasNormals ? new List<Vector3>(totalVerts) : null;
+                var allTan = hasTangents ? new List<Vector4>(totalVerts) : null;
+                var allColors = hasColors ? new List<Color>(totalVerts) : null;
+                var allUvs = new List<Vector4>[8];
+                for (int ch = 0; ch < 8; ch++)
+                    allUvs[ch] = hasUv[ch] ? new List<Vector4>(totalVerts) : null;
+                var allTrisArr = new List<int>(totalTris);
+
+                var parent = group.entries[0].renderer.transform.parent;
+                var firstEntry = group.entries[0];
+                var destroyList = new List<GameObject>();
+
+                foreach (var e in group.entries)
+                {
+                    var mesh = e.originalMesh ?? e.fbxMesh;
+                    if (mesh == null || e.renderer == null) continue;
+
+                    int vertOffset = allPos.Count;
+
+                    // Transform vertices to local space of first entry
+                    var srcTransform = e.renderer.transform;
+                    var dstTransform = firstEntry.renderer.transform;
+                    var pos = mesh.vertices;
+                    for (int vi = 0; vi < pos.Length; vi++)
+                    {
+                        // world → dst local
+                        var worldPos = srcTransform.TransformPoint(pos[vi]);
+                        allPos.Add(dstTransform.InverseTransformPoint(worldPos));
+                    }
+
+                    if (allNorm != null)
+                    {
+                        var norms = mesh.normals;
+                        if (norms != null && norms.Length > 0)
+                        {
+                            for (int vi = 0; vi < norms.Length; vi++)
+                            {
+                                var worldNorm = srcTransform.TransformDirection(norms[vi]);
+                                allNorm.Add(dstTransform.InverseTransformDirection(worldNorm));
+                            }
+                        }
+                        else
+                        {
+                            for (int vi = 0; vi < pos.Length; vi++)
+                                allNorm.Add(Vector3.up);
+                        }
+                    }
+
+                    if (allTan != null)
+                    {
+                        var tans = mesh.tangents;
+                        if (tans != null && tans.Length > 0)
+                        {
+                            for (int vi = 0; vi < tans.Length; vi++)
+                            {
+                                var t = tans[vi];
+                                var worldTan = srcTransform.TransformDirection(new Vector3(t.x, t.y, t.z));
+                                var localTan = dstTransform.InverseTransformDirection(worldTan);
+                                allTan.Add(new Vector4(localTan.x, localTan.y, localTan.z, t.w));
+                            }
+                        }
+                        else
+                        {
+                            for (int vi = 0; vi < pos.Length; vi++)
+                                allTan.Add(new Vector4(1, 0, 0, 1));
+                        }
+                    }
+
+                    if (allColors != null)
+                    {
+                        var cols = mesh.colors;
+                        if (cols != null && cols.Length > 0)
+                        {
+                            allColors.AddRange(cols);
+                        }
+                        else
+                        {
+                            for (int vi = 0; vi < pos.Length; vi++)
+                                allColors.Add(Color.white);
+                        }
+                    }
+
+                    var tmpUv4 = new List<Vector4>();
+                    for (int ch = 0; ch < 8; ch++)
+                    {
+                        if (allUvs[ch] == null) continue;
+                        tmpUv4.Clear();
+                        mesh.GetUVs(ch, tmpUv4);
+                        if (tmpUv4.Count > 0)
+                        {
+                            allUvs[ch].AddRange(tmpUv4);
+                        }
+                        else
+                        {
+                            for (int vi = 0; vi < pos.Length; vi++)
+                                allUvs[ch].Add(Vector4.zero);
+                        }
+                    }
+
+                    // Offset triangle indices
+                    var tris = mesh.triangles;
+                    for (int t = 0; t < tris.Length; t++)
+                        allTrisArr.Add(tris[t] + vertOffset);
+
+                    destroyList.Add(e.renderer.gameObject);
+                }
+
+                // Build merged mesh
+                var mergedMesh = new Mesh();
+                if (allPos.Count > 65535) mergedMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+                mergedMesh.name = $"{firstEntry.renderer.name}_merged";
+                mergedMesh.SetVertices(allPos);
+                if (allNorm != null) mergedMesh.SetNormals(allNorm);
+                if (allTan != null) mergedMesh.SetTangents(allTan);
+                if (allColors != null) mergedMesh.SetColors(allColors);
+                for (int ch = 0; ch < 8; ch++)
+                {
+                    if (allUvs[ch] != null)
+                        mergedMesh.SetUVs(ch, allUvs[ch]);
+                }
+                mergedMesh.SetTriangles(allTrisArr, 0);
+                mergedMesh.RecalculateBounds();
+
+                // Create new GameObject at first entry's position
+                var srcT = firstEntry.renderer.transform;
+                var mergedGo = new GameObject(mergedMesh.name);
+                Undo.RegisterCreatedObjectUndo(mergedGo, "Merge Same-Material");
+                mergedGo.transform.SetParent(parent, false);
+                mergedGo.transform.localPosition = srcT.localPosition;
+                mergedGo.transform.localRotation = srcT.localRotation;
+                mergedGo.transform.localScale = srcT.localScale;
+
+                var mergedMf = mergedGo.AddComponent<MeshFilter>();
+                mergedMf.sharedMesh = mergedMesh;
+                var mergedMr = mergedGo.AddComponent<MeshRenderer>();
+                mergedMr.sharedMaterial = group.material;
+
+                // Update LODGroup
+                if (ctx.LodGroup != null)
+                {
+                    Undo.RecordObject(ctx.LodGroup, "Merge Same-Material");
+                    var lods = ctx.LodGroup.GetLODs();
+                    for (int li = 0; li < lods.Length; li++)
+                    {
+                        if (lods[li].renderers == null) continue;
+                        var renderers = new List<Renderer>(lods[li].renderers);
+                        bool replaced = false;
+                        for (int ri = renderers.Count - 1; ri >= 0; ri--)
+                        {
+                            if (renderers[ri] == null) continue;
+                            if (destroyList.Contains(renderers[ri].gameObject))
+                            {
+                                if (!replaced)
+                                {
+                                    renderers[ri] = mergedMr;
+                                    replaced = true;
+                                }
+                                else
+                                {
+                                    renderers.RemoveAt(ri);
+                                }
+                            }
+                        }
+                        lods[li].renderers = renderers.ToArray();
+                    }
+                    ctx.LodGroup.SetLODs(lods);
+                }
+
+                // Destroy originals
+                foreach (var go in destroyList)
+                {
+                    if (go == null) continue;
+                    UvtLog.Info($"Merged: {go.name}");
+                    Undo.DestroyObjectImmediate(go);
+                }
+
+                merged++;
+                UvtLog.Info($"Created merged object: {mergedMesh.name} ({allPos.Count} verts)");
+            }
+
+            Undo.CollapseUndoOperations(undoGroup);
+            UvtLog.Info($"Merged {merged} group(s).");
+
+            if (merged > 0 && ctx.LodGroup != null)
+                ctx.Refresh(ctx.LodGroup);
+
             meshReport = null;
             requestRepaint?.Invoke();
         }
