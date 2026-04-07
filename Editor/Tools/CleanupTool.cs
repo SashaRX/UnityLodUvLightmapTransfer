@@ -56,7 +56,7 @@ namespace LightmapUvTool
 
         struct ColliderIssue
         {
-            public enum Kind { ExtraAttributes, Duplicate }
+            public enum Kind { ExtraAttributes, Duplicate, RendererActive }
             public Kind kind;
             public GameObject gameObject;
             public Mesh mesh;
@@ -727,6 +727,32 @@ namespace LightmapUvTool
                 if (mesh == null) continue;
                 checkedMeshes.Add(mesh.GetInstanceID());
                 CheckColliderMesh(mesh, go.name, go);
+
+                // Check if _COL has active Renderer (should be collision-only)
+                var renderer = go.GetComponent<Renderer>();
+                bool hasMeshCollider = go.GetComponent<MeshCollider>() != null;
+                if (renderer != null && renderer.enabled)
+                {
+                    colliderIssues.Add(new ColliderIssue
+                    {
+                        kind = ColliderIssue.Kind.RendererActive,
+                        gameObject = go,
+                        mesh = mesh,
+                        description = $"{go.name}: has active Renderer" +
+                            (!hasMeshCollider ? " and no MeshCollider" : "") +
+                            " — should be collision-only"
+                    });
+                }
+                else if (!hasMeshCollider && mesh != null)
+                {
+                    colliderIssues.Add(new ColliderIssue
+                    {
+                        kind = ColliderIssue.Kind.RendererActive,
+                        gameObject = go,
+                        mesh = mesh,
+                        description = $"{go.name}: no MeshCollider assigned — collision mesh unused"
+                    });
+                }
             }
 
             // 2. Scan FBX sub-assets for _COL meshes not in scene
@@ -897,6 +923,28 @@ namespace LightmapUvTool
                         {
                             UvtLog.Info($"Removed duplicate collider: {issue.gameObject.name}");
                             Undo.DestroyObjectImmediate(issue.gameObject);
+                        }
+                        break;
+
+                    case ColliderIssue.Kind.RendererActive:
+                        if (issue.gameObject == null) break;
+
+                        // Add MeshCollider if missing
+                        var existingMc = issue.gameObject.GetComponent<MeshCollider>();
+                        if (existingMc == null && issue.mesh != null)
+                        {
+                            var mc = Undo.AddComponent<MeshCollider>(issue.gameObject);
+                            mc.sharedMesh = issue.mesh;
+                            UvtLog.Info($"Added MeshCollider to {issue.gameObject.name}");
+                        }
+
+                        // Disable Renderer
+                        var colRenderer = issue.gameObject.GetComponent<Renderer>();
+                        if (colRenderer != null && colRenderer.enabled)
+                        {
+                            Undo.RecordObject(colRenderer, "Disable COL Renderer");
+                            colRenderer.enabled = false;
+                            UvtLog.Info($"Disabled Renderer on {issue.gameObject.name}");
                         }
                         break;
                 }
