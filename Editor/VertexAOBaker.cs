@@ -711,7 +711,8 @@ namespace LightmapUvTool
 
             Bounds combinedBounds = ComputeCombinedBounds(meshes);
             float extent = combinedBounds.extents.magnitude;
-            float normalOffset = 0.0005f * extent;
+            float normalOffset = 0.001f * extent;
+            float minHitDist   = 0.003f * extent; // skip self-intersection on sharp edges
             float groundY = settings.groundPlane
                 ? combinedBounds.min.y - settings.groundOffset
                 : float.NegativeInfinity;
@@ -764,7 +765,7 @@ namespace LightmapUvTool
                         totalWeight += ndot;
 
                         var hit = bvh.Raycast(origin, directions[d], maxDist);
-                        if (hit.triangleIndex >= 0)
+                        if (hit.triangleIndex >= 0 && hit.t > minHitDist)
                         {
                             // Backface culling: skip if ray hit the back side of a triangle
                             if (faceNormals != null &&
