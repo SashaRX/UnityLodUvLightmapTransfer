@@ -73,7 +73,10 @@ namespace LightmapUvTool
 
         // ── Helpers ──
         public List<MeshEntry> ForLod(int li) => MeshEntries.Where(e => e.lodIndex == li && e.include).ToList();
-        public int LodCount => LodGroup != null ? LodGroup.GetLODs().Length : 0;
+        public int LodCount => LodGroup != null ? LodGroup.GetLODs().Length : StandaloneMesh ? 1 : 0;
+
+        /// <summary>True when displaying a standalone MeshRenderer without LODGroup.</summary>
+        public bool StandaloneMesh;
 
         /// <summary>
         /// Strip trailing LOD/COL suffixes to get a stable group key.
@@ -131,6 +134,7 @@ namespace LightmapUvTool
             ShellColorKeyCacheDirty = true;
 
             LodGroup = lodGroup;
+            StandaloneMesh = false;
             if (LodGroup == null) return;
 
             CompactLodArray(LodGroup);
@@ -182,6 +186,58 @@ namespace LightmapUvTool
                         { SourceFbxPath = p; break; }
                     }
                 }
+            }
+
+            OnMeshEntriesChanged?.Invoke();
+        }
+
+        /// <summary>
+        /// Populate context from a single MeshRenderer without LODGroup (view-only UV inspection).
+        /// </summary>
+        public void RefreshStandalone(MeshRenderer mr)
+        {
+            MeshEntries.Clear();
+            HasRepack = HasTransfer = false;
+            SrcCache.Clear();
+            BoundaryEdgeCache.Clear();
+            UvPreviewShellCache.Clear();
+            PreviewShellDataCache.Clear();
+            OccupiedTilesPerMesh.Clear();
+            ShellColorKeyCache.Clear();
+            Uv0ShellMapCache.Clear();
+            ShellColorKeyCacheDirty = true;
+
+            LodGroup = null;
+            StandaloneMesh = false;
+            if (mr == null) return;
+
+            var mf = mr.GetComponent<MeshFilter>();
+            if (mf == null || mf.sharedMesh == null) return;
+
+            var fbm = mf.sharedMesh;
+            var uv2Check = new List<Vector2>();
+            fbm.GetUVs(1, uv2Check);
+            MeshEntries.Add(new MeshEntry
+            {
+                lodIndex = 0,
+                renderer = mr,
+                meshFilter = mf,
+                originalMesh = fbm,
+                fbxMesh = fbm,
+                hasExistingUv2 = uv2Check.Count > 0,
+                meshGroupKey = ExtractGroupKey(mr.name)
+            });
+            StandaloneMesh = true;
+            PreviewLod = 0;
+            SourceLodIndex = 0;
+
+            // Resolve source FBX path
+            if (string.IsNullOrEmpty(SourceFbxPath) || !System.IO.File.Exists(SourceFbxPath))
+            {
+                SourceFbxPath = null;
+                string p = UnityEditor.AssetDatabase.GetAssetPath(fbm);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                    SourceFbxPath = p;
             }
 
             OnMeshEntriesChanged?.Invoke();
