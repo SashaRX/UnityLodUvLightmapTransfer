@@ -22,7 +22,11 @@ namespace LightmapUvTool
         public Action RequestRepaint { set => requestRepaint = value; }
 
         // ── Foldout state ──
-        bool foldMaterials = true, foldColliders, foldScene, foldMesh;
+        bool foldMaterials = true, foldColliders, foldScene, foldMesh, foldAttributes;
+
+        // ── Ensure-attribute toggles ──
+        bool ensureNormals, ensureTangents, ensureColors;
+        bool[] ensureUv = new bool[8];
 
         // ── Scan results (null = not scanned yet, empty = scanned, no issues) ──
         List<MaterialIssue> materialIssues;
@@ -74,6 +78,7 @@ namespace LightmapUvTool
             public List<EmptyUvEntry> emptyUvEntries = new List<EmptyUvEntry>();
             public List<MeshEntry> multiMatEntries = new List<MeshEntry>();
             public List<MergeGroup> mergeGroups = new List<MergeGroup>();
+            public List<MeshAttributeInfo> attributes = new List<MeshAttributeInfo>();
         }
 
         struct EmptyUvEntry
@@ -81,6 +86,15 @@ namespace LightmapUvTool
             public MeshEntry entry;
             public List<int> channels;
             public bool hasZeroColors;
+        }
+
+        struct MeshAttributeInfo
+        {
+            public MeshEntry entry;
+            public string meshName;
+            public int vertexCount;
+            public bool hasNormals, hasTangents, hasColors;
+            public bool[] hasUv; // [8]
         }
 
         struct MeshStats
@@ -136,6 +150,7 @@ namespace LightmapUvTool
             DrawCollidersSection();
             DrawSceneSection();
             DrawMeshSection();
+            DrawAttributesSection();
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -858,6 +873,25 @@ namespace LightmapUvTool
                         tris = tris
                     });
 
+                    // Attribute info
+                    var attrInfo = new MeshAttributeInfo
+                    {
+                        entry = e,
+                        meshName = mesh.name,
+                        vertexCount = verts,
+                        hasNormals = mesh.normals != null && mesh.normals.Length > 0,
+                        hasTangents = mesh.tangents != null && mesh.tangents.Length > 0,
+                        hasColors = mesh.colors != null && mesh.colors.Length > 0,
+                        hasUv = new bool[8]
+                    };
+                    for (int ch = 0; ch < 8; ch++)
+                    {
+                        tmpUv.Clear();
+                        mesh.GetUVs(ch, tmpUv);
+                        attrInfo.hasUv[ch] = tmpUv.Count > 0;
+                    }
+                    meshReport.attributes.Add(attrInfo);
+
                     // Weld check
                     var report = Uv0Analyzer.Analyze(mesh);
                     if (report.HasIssues)
@@ -1417,6 +1451,203 @@ namespace LightmapUvTool
                 ctx.Refresh(ctx.LodGroup);
 
             meshReport = null;
+            requestRepaint?.Invoke();
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Section 5: Mesh Attributes
+        // ═══════════════════════════════════════════════════════════════
+
+        void DrawAttributesSection()
+        {
+            EditorGUILayout.Space(8);
+            foldAttributes = EditorGUILayout.Foldout(foldAttributes, "Mesh Attributes", true);
+            if (!foldAttributes) return;
+
+            EditorGUI.indentLevel++;
+
+            if (meshReport == null || meshReport.attributes.Count == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    "Click Scan in the Mesh section above to inspect attributes.",
+                    MessageType.Info);
+                EditorGUI.indentLevel--;
+                return;
+            }
+
+            // Attribute table header
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Channel Map", EditorStyles.boldLabel);
+
+            // Compact header row
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Mesh", EditorStyles.miniLabel, GUILayout.MinWidth(120));
+            EditorGUILayout.LabelField("N", EditorStyles.miniLabel, GUILayout.Width(18));
+            EditorGUILayout.LabelField("T", EditorStyles.miniLabel, GUILayout.Width(18));
+            EditorGUILayout.LabelField("C", EditorStyles.miniLabel, GUILayout.Width(18));
+            for (int ch = 0; ch < 8; ch++)
+                EditorGUILayout.LabelField($"U{ch}", EditorStyles.miniLabel, GUILayout.Width(22));
+            EditorGUILayout.EndHorizontal();
+
+            // Per-mesh rows
+            foreach (var attr in meshReport.attributes)
+            {
+                EditorGUILayout.BeginHorizontal();
+                string label = attr.meshName;
+                if (label.Length > 20) label = label.Substring(0, 17) + "...";
+                EditorGUILayout.LabelField(label, EditorStyles.miniLabel, GUILayout.MinWidth(120));
+                DrawAttrCell(attr.hasNormals);
+                DrawAttrCell(attr.hasTangents);
+                DrawAttrCell(attr.hasColors);
+                for (int ch = 0; ch < 8; ch++)
+                    DrawAttrCell(attr.hasUv[ch]);
+                EditorGUILayout.EndHorizontal();
+            }
+
+            // Ensure toggles
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("Ensure Attributes", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(
+                "Check attributes below and click Fix to add missing channels with default values. " +
+                "Useful for GPU batching compatibility.",
+                MessageType.None);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.BeginHorizontal();
+            ensureNormals  = EditorGUILayout.ToggleLeft("Normals", ensureNormals, GUILayout.Width(80));
+            ensureTangents = EditorGUILayout.ToggleLeft("Tangents", ensureTangents, GUILayout.Width(80));
+            ensureColors   = EditorGUILayout.ToggleLeft("Colors", ensureColors, GUILayout.Width(72));
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            for (int ch = 0; ch < 4; ch++)
+                ensureUv[ch] = EditorGUILayout.ToggleLeft($"UV{ch}", ensureUv[ch], GUILayout.Width(55));
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.BeginHorizontal();
+            for (int ch = 4; ch < 8; ch++)
+                ensureUv[ch] = EditorGUILayout.ToggleLeft($"UV{ch}", ensureUv[ch], GUILayout.Width(55));
+            EditorGUILayout.EndHorizontal();
+
+            // Count how many meshes are missing checked attributes
+            int missing = 0;
+            foreach (var attr in meshReport.attributes)
+            {
+                if (ensureNormals && !attr.hasNormals) missing++;
+                if (ensureTangents && !attr.hasTangents) missing++;
+                if (ensureColors && !attr.hasColors) missing++;
+                for (int ch = 0; ch < 8; ch++)
+                    if (ensureUv[ch] && !attr.hasUv[ch]) missing++;
+            }
+
+            EditorGUILayout.Space(4);
+            bool anyChecked = ensureNormals || ensureTangents || ensureColors || ensureUv.Any(u => u);
+            var bgc = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(.4f, .8f, .4f);
+            GUI.enabled = anyChecked && missing > 0;
+            if (GUILayout.Button($"Ensure Attributes ({missing} missing)", GUILayout.Height(28)))
+                FixEnsureAttributes();
+            GUI.enabled = true;
+            GUI.backgroundColor = bgc;
+
+            if (anyChecked && missing == 0)
+            {
+                EditorGUILayout.HelpBox("All checked attributes are already present.", MessageType.Info);
+            }
+
+            EditorGUI.indentLevel--;
+        }
+
+        static void DrawAttrCell(bool present)
+        {
+            var prev = GUI.color;
+            GUI.color = present ? new Color(.3f, .9f, .3f) : new Color(.6f, .6f, .6f);
+            EditorGUILayout.LabelField(present ? "\u2713" : "\u2013", EditorStyles.miniLabel, GUILayout.Width(18));
+            GUI.color = prev;
+        }
+
+        void FixEnsureAttributes()
+        {
+            if (meshReport == null) return;
+
+            int undoGroup = Undo.GetCurrentGroup();
+            int fixed_ = 0;
+
+            foreach (var attr in meshReport.attributes)
+            {
+                var entry = attr.entry;
+                var mesh = entry.originalMesh ?? entry.fbxMesh;
+                if (mesh == null || entry.meshFilter == null) continue;
+
+                bool needsFix = false;
+                if (ensureNormals && !attr.hasNormals) needsFix = true;
+                if (ensureTangents && !attr.hasTangents) needsFix = true;
+                if (ensureColors && !attr.hasColors) needsFix = true;
+                for (int ch = 0; ch < 8; ch++)
+                    if (ensureUv[ch] && !attr.hasUv[ch]) needsFix = true;
+
+                if (!needsFix) continue;
+
+                // Clone if asset-backed
+                if (AssetDatabase.Contains(mesh))
+                {
+                    var clone = UnityEngine.Object.Instantiate(mesh);
+                    clone.name = mesh.name;
+                    Undo.RecordObject(entry.meshFilter, "Ensure Attributes");
+                    entry.meshFilter.sharedMesh = clone;
+                    entry.originalMesh = clone;
+                    mesh = clone;
+                }
+
+                Undo.RecordObject(mesh, "Ensure Attributes");
+                int vertCount = mesh.vertexCount;
+
+                if (ensureNormals && !attr.hasNormals)
+                {
+                    mesh.RecalculateNormals();
+                    UvtLog.Info($"[Cleanup] {mesh.name}: calculated normals");
+                }
+
+                if (ensureTangents && !attr.hasTangents)
+                {
+                    // Tangents require normals and UV0
+                    if ((attr.hasNormals || ensureNormals) && attr.hasUv[0])
+                        mesh.RecalculateTangents();
+                    else
+                    {
+                        // Fallback: set default tangents
+                        var tangents = new Vector4[vertCount];
+                        for (int vi = 0; vi < vertCount; vi++)
+                            tangents[vi] = new Vector4(1f, 0f, 0f, 1f);
+                        mesh.tangents = tangents;
+                    }
+                    UvtLog.Info($"[Cleanup] {mesh.name}: ensured tangents");
+                }
+
+                if (ensureColors && !attr.hasColors)
+                {
+                    var colors = new Color[vertCount];
+                    for (int vi = 0; vi < vertCount; vi++)
+                        colors[vi] = Color.white;
+                    mesh.colors = colors;
+                    UvtLog.Info($"[Cleanup] {mesh.name}: added default vertex colors (white)");
+                }
+
+                for (int ch = 0; ch < 8; ch++)
+                {
+                    if (ensureUv[ch] && !attr.hasUv[ch])
+                    {
+                        var uvs = new Vector2[vertCount];
+                        mesh.SetUVs(ch, uvs);
+                        UvtLog.Info($"[Cleanup] {mesh.name}: added empty UV{ch}");
+                    }
+                }
+
+                fixed_++;
+            }
+
+            Undo.CollapseUndoOperations(undoGroup);
+            UvtLog.Info($"Ensured attributes on {fixed_} mesh(es).");
+            meshReport = null; // force re-scan
             requestRepaint?.Invoke();
         }
 
