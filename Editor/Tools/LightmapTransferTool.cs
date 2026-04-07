@@ -955,10 +955,33 @@ namespace LightmapUvTool
             string sourceFbxFile = null;
             foreach (var e in ctx.MeshEntries)
             {
-                if (e.lodIndex != ctx.SourceLodIndex || e.fbxMesh == null) continue;
+                if (e.fbxMesh == null) continue;
                 string p = AssetDatabase.GetAssetPath(e.fbxMesh);
                 if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
                 { sourceFbxFile = p; break; }
+            }
+            // Fallback: try prefab/model source of the LODGroup GameObject
+            if (string.IsNullOrEmpty(sourceFbxFile) && ctx.LodGroup != null)
+            {
+                var prefabSrc = PrefabUtility.GetCorrespondingObjectFromSource(ctx.LodGroup.gameObject);
+                if (prefabSrc != null)
+                {
+                    string p = AssetDatabase.GetAssetPath(prefabSrc);
+                    if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                        sourceFbxFile = p;
+                }
+                // Also try child renderers
+                if (string.IsNullOrEmpty(sourceFbxFile))
+                {
+                    foreach (var r in ctx.LodGroup.GetComponentsInChildren<Renderer>(true))
+                    {
+                        var rSrc = PrefabUtility.GetCorrespondingObjectFromSource(r);
+                        if (rSrc == null) continue;
+                        string p = AssetDatabase.GetAssetPath(rSrc);
+                        if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                        { sourceFbxFile = p; break; }
+                    }
+                }
             }
 
             var fbxGroups = new Dictionary<string, List<(MeshEntry entry, Mesh resultMesh)>>();
