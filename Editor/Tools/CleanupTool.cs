@@ -1527,42 +1527,33 @@ namespace LightmapUvTool
                 return;
             }
 
-            // Attribute table
+            // Current state per mesh
             EditorGUILayout.Space(4);
-            EditorGUILayout.LabelField("Channel Map", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField(
-                "  N=Normals T=Tangents C=Colors  UV0..UV7",
-                EditorStyles.miniLabel);
-            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField("Current Channels", EditorStyles.boldLabel);
 
-            // Per-mesh rows as single-line strings
             foreach (var attr in meshReport.attributes)
             {
                 string meshName = attr.meshName;
-                if (meshName.Length > 24) meshName = meshName.Substring(0, 21) + "...";
+                if (meshName.Length > 28) meshName = meshName.Substring(0, 25) + "...";
 
-                // Build attribute string: "NTC UV01--3---"
-                string ntc = (attr.hasNormals ? "N" : "-")
-                           + (attr.hasTangents ? "T" : "-")
-                           + (attr.hasColors ? "C" : "-");
-
-                var uvStr = new char[8];
+                // Build compact presence list
+                var present = new List<string>();
+                if (attr.hasNormals) present.Add("N");
+                if (attr.hasTangents) present.Add("T");
+                if (attr.hasColors) present.Add("C");
                 for (int ch = 0; ch < 8; ch++)
-                    uvStr[ch] = attr.hasUv[ch] ? (char)('0' + ch) : '-';
+                    if (attr.hasUv[ch]) present.Add($"UV{ch}");
 
-                EditorGUILayout.LabelField(
-                    $"  {meshName}",
-                    $"{ntc}  UV:{new string(uvStr)}",
-                    EditorStyles.miniLabel);
+                string channels = present.Count > 0 ? string.Join(" ", present) : "(none)";
+                EditorGUILayout.LabelField($"  {meshName}", channels, EditorStyles.miniLabel);
             }
 
-            // Ensure toggles
+            // Desired state toggles
             EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Ensure Attributes", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox(
-                "Check attributes below and click Fix to add missing channels with default values. " +
-                "Useful for GPU batching compatibility.",
-                MessageType.None);
+            EditorGUILayout.LabelField("Desired Channels", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                "Check = add if missing.  Uncheck = remove if present.",
+                EditorStyles.miniLabel);
 
             EditorGUILayout.Space(2);
             EditorGUILayout.BeginHorizontal();
@@ -1580,42 +1571,50 @@ namespace LightmapUvTool
                 ensureUv[ch] = EditorGUILayout.ToggleLeft($"UV{ch}", ensureUv[ch], GUILayout.Width(55));
             EditorGUILayout.EndHorizontal();
 
-            // Count how many meshes are missing checked attributes
-            int missing = 0;
+            // Count changes needed
+            int toAdd = 0, toRemove = 0;
             foreach (var attr in meshReport.attributes)
             {
-                if (ensureNormals && !attr.hasNormals) missing++;
-                if (ensureTangents && !attr.hasTangents) missing++;
-                if (ensureColors && !attr.hasColors) missing++;
+                if (ensureNormals && !attr.hasNormals) toAdd++;
+                if (!ensureNormals && attr.hasNormals) toRemove++;
+                if (ensureTangents && !attr.hasTangents) toAdd++;
+                if (!ensureTangents && attr.hasTangents) toRemove++;
+                if (ensureColors && !attr.hasColors) toAdd++;
+                if (!ensureColors && attr.hasColors) toRemove++;
                 for (int ch = 0; ch < 8; ch++)
-                    if (ensureUv[ch] && !attr.hasUv[ch]) missing++;
+                {
+                    if (ensureUv[ch] && !attr.hasUv[ch]) toAdd++;
+                    if (!ensureUv[ch] && attr.hasUv[ch]) toRemove++;
+                }
             }
 
             EditorGUILayout.Space(4);
-            bool anyChecked = ensureNormals || ensureTangents || ensureColors || ensureUv.Any(u => u);
             var bgc = GUI.backgroundColor;
             GUI.backgroundColor = new Color(.4f, .8f, .4f);
-            GUI.enabled = anyChecked && missing > 0;
-            if (GUILayout.Button($"Ensure Attributes ({missing} missing)", GUILayout.Height(28)))
-                FixEnsureAttributes();
+            GUI.enabled = toAdd > 0 || toRemove > 0;
+            string btnLabel = toAdd > 0 && toRemove > 0
+                ? $"Apply (+{toAdd} add, -{toRemove} remove)"
+                : toAdd > 0 ? $"Apply (+{toAdd} add)"
+                : toRemove > 0 ? $"Apply (-{toRemove} remove)"
+                : "Apply (no changes)";
+            if (GUILayout.Button(btnLabel, GUILayout.Height(28)))
+                FixApplyAttributes();
             GUI.enabled = true;
             GUI.backgroundColor = bgc;
 
-            if (anyChecked && missing == 0)
-            {
-                EditorGUILayout.HelpBox("All checked attributes are already present.", MessageType.Info);
-            }
+            if (toAdd == 0 && toRemove == 0)
+                EditorGUILayout.HelpBox("All meshes already match desired state.", MessageType.Info);
 
             EditorGUI.indentLevel--;
         }
 
 
-        void FixEnsureAttributes()
+        void FixApplyAttributes()
         {
             if (meshReport == null) return;
 
             int undoGroup = Undo.GetCurrentGroup();
-            int fixed_ = 0;
+            int changed = 0;
 
             foreach (var attr in meshReport.attributes)
             {
@@ -1623,76 +1622,98 @@ namespace LightmapUvTool
                 var mesh = entry.originalMesh ?? entry.fbxMesh;
                 if (mesh == null || entry.meshFilter == null || !mesh.isReadable) continue;
 
-                bool needsFix = false;
-                if (ensureNormals && !attr.hasNormals) needsFix = true;
-                if (ensureTangents && !attr.hasTangents) needsFix = true;
-                if (ensureColors && !attr.hasColors) needsFix = true;
+                // Check if any change needed
+                bool needsChange = false;
+                if (ensureNormals != attr.hasNormals) needsChange = true;
+                if (ensureTangents != attr.hasTangents) needsChange = true;
+                if (ensureColors != attr.hasColors) needsChange = true;
                 for (int ch = 0; ch < 8; ch++)
-                    if (ensureUv[ch] && !attr.hasUv[ch]) needsFix = true;
+                    if (ensureUv[ch] != attr.hasUv[ch]) needsChange = true;
 
-                if (!needsFix) continue;
+                if (!needsChange) continue;
 
                 // Clone if asset-backed
                 if (AssetDatabase.Contains(mesh))
                 {
                     var clone = UnityEngine.Object.Instantiate(mesh);
                     clone.name = mesh.name;
-                    Undo.RecordObject(entry.meshFilter, "Ensure Attributes");
+                    Undo.RecordObject(entry.meshFilter, "Apply Attributes");
                     entry.meshFilter.sharedMesh = clone;
                     entry.originalMesh = clone;
                     mesh = clone;
                 }
 
-                Undo.RecordObject(mesh, "Ensure Attributes");
+                Undo.RecordObject(mesh, "Apply Attributes");
                 int vertCount = mesh.vertexCount;
 
+                // Normals
                 if (ensureNormals && !attr.hasNormals)
                 {
                     mesh.RecalculateNormals();
-                    UvtLog.Info($"[Cleanup] {mesh.name}: calculated normals");
+                    UvtLog.Info($"[Cleanup] {mesh.name}: added normals");
+                }
+                else if (!ensureNormals && attr.hasNormals)
+                {
+                    mesh.normals = null;
+                    UvtLog.Info($"[Cleanup] {mesh.name}: removed normals");
                 }
 
+                // Tangents
                 if (ensureTangents && !attr.hasTangents)
                 {
-                    // Tangents require normals and UV0
                     if ((attr.hasNormals || ensureNormals) && attr.hasUv[0])
                         mesh.RecalculateTangents();
                     else
                     {
-                        // Fallback: set default tangents
                         var tangents = new Vector4[vertCount];
                         for (int vi = 0; vi < vertCount; vi++)
                             tangents[vi] = new Vector4(1f, 0f, 0f, 1f);
                         mesh.tangents = tangents;
                     }
-                    UvtLog.Info($"[Cleanup] {mesh.name}: ensured tangents");
+                    UvtLog.Info($"[Cleanup] {mesh.name}: added tangents");
+                }
+                else if (!ensureTangents && attr.hasTangents)
+                {
+                    mesh.tangents = null;
+                    UvtLog.Info($"[Cleanup] {mesh.name}: removed tangents");
                 }
 
+                // Colors
                 if (ensureColors && !attr.hasColors)
                 {
                     var colors = new Color[vertCount];
                     for (int vi = 0; vi < vertCount; vi++)
                         colors[vi] = Color.white;
                     mesh.colors = colors;
-                    UvtLog.Info($"[Cleanup] {mesh.name}: added default vertex colors (white)");
+                    UvtLog.Info($"[Cleanup] {mesh.name}: added vertex colors");
+                }
+                else if (!ensureColors && attr.hasColors)
+                {
+                    mesh.colors = null;
+                    UvtLog.Info($"[Cleanup] {mesh.name}: removed vertex colors");
                 }
 
+                // UV channels
                 for (int ch = 0; ch < 8; ch++)
                 {
                     if (ensureUv[ch] && !attr.hasUv[ch])
                     {
-                        var uvs = new Vector2[vertCount];
-                        mesh.SetUVs(ch, uvs);
-                        UvtLog.Info($"[Cleanup] {mesh.name}: added empty UV{ch}");
+                        mesh.SetUVs(ch, new Vector2[vertCount]);
+                        UvtLog.Info($"[Cleanup] {mesh.name}: added UV{ch}");
+                    }
+                    else if (!ensureUv[ch] && attr.hasUv[ch])
+                    {
+                        mesh.SetUVs(ch, (List<Vector2>)null);
+                        UvtLog.Info($"[Cleanup] {mesh.name}: removed UV{ch}");
                     }
                 }
 
-                fixed_++;
+                changed++;
             }
 
             Undo.CollapseUndoOperations(undoGroup);
-            UvtLog.Info($"Ensured attributes on {fixed_} mesh(es).");
-            meshReport = null; // force re-scan
+            UvtLog.Info($"Applied attribute changes to {changed} mesh(es).");
+            meshReport = null;
             requestRepaint?.Invoke();
         }
 
