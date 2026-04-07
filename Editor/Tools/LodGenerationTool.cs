@@ -464,6 +464,22 @@ namespace LightmapUvTool
             }
             finally { EditorUtility.ClearProgressBar(); }
 
+            // Rename source LOD0 renderers to add _LOD0 suffix for cross-LOD matching
+            foreach (var (entry, srcMesh) in sourceMeshes)
+            {
+                if (entry.renderer == null) continue;
+                bool hasLodSuffix = Regex.IsMatch(
+                    entry.renderer.name, @"[_\-\s]+LOD\d+$",
+                    RegexOptions.IgnoreCase);
+                if (!hasLodSuffix)
+                {
+                    Undo.RecordObject(entry.renderer.gameObject, "Rename LOD0");
+                    string newName = entry.renderer.gameObject.name + "_LOD0";
+                    UvtLog.Info($"[GenerateLOD] Renamed source: {entry.renderer.gameObject.name} → {newName}");
+                    entry.renderer.gameObject.name = newName;
+                }
+            }
+
             // Add new MeshEntries for generated LODs without touching existing state
             var currentLods = ctx.LodGroup.GetLODs();
             for (int li = 0; li < currentLods.Length; li++)
