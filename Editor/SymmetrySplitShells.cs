@@ -338,6 +338,8 @@ namespace LightmapUvTool
 
                 // Rebuild original shell as group A
                 origShell.faceIndices = groupA;
+                origShell.symSplitAxis = info.axis;
+                origShell.symSplitSide = +1;
                 origShell.vertexIndices.Clear();
                 Vector2 mnA = new Vector2(float.MaxValue, float.MaxValue);
                 Vector2 mxA = new Vector2(float.MinValue, float.MinValue);
@@ -359,7 +361,7 @@ namespace LightmapUvTool
                 origShell.bboxArea = Mathf.Max(0f, (mxA.x - mnA.x) * (mxA.y - mnA.y));
 
                 // Create new shell for group B
-                var newShell = new UvShell { shellId = shells.Count };
+                var newShell = new UvShell { shellId = shells.Count, symSplitAxis = info.axis, symSplitSide = -1 };
                 newShell.faceIndices = groupB;
                 Vector2 mnB = new Vector2(float.MaxValue, float.MaxValue);
                 Vector2 mxB = new Vector2(float.MinValue, float.MinValue);
