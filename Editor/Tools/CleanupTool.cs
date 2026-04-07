@@ -65,7 +65,7 @@ namespace LightmapUvTool
 
         struct SceneIssue
         {
-            public enum Kind { OrphanedLod, LodGroupMismatch }
+            public enum Kind { OrphanedLod, LodGroupMismatch, MissingLod0Suffix }
             public Kind kind;
             public GameObject gameObject;
             public string description;
@@ -1108,6 +1108,32 @@ namespace LightmapUvTool
                 }
             }
 
+            // Check for LOD0 renderers without _LOD0 suffix
+            // (only if other LODs exist with _LOD1, _LOD2 etc.)
+            if (lodChildren.Count > 0)
+            {
+                var lods = ctx.LodGroup.GetLODs();
+                if (lods.Length > 1 && lods[0].renderers != null)
+                {
+                    foreach (var r in lods[0].renderers)
+                    {
+                        if (r == null) continue;
+                        bool hasLodSuffix = System.Text.RegularExpressions.Regex.IsMatch(
+                            r.name, @"[_\-\s]+LOD\d+$",
+                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (!hasLodSuffix)
+                        {
+                            sceneIssues.Add(new SceneIssue
+                            {
+                                kind = SceneIssue.Kind.MissingLod0Suffix,
+                                gameObject = r.gameObject,
+                                description = $"{r.name}: LOD0 renderer missing _LOD0 suffix"
+                            });
+                        }
+                    }
+                }
+            }
+
             UvtLog.Info($"Scene scan: {sceneIssues.Count} issue(s) found.");
         }
 
@@ -1138,6 +1164,19 @@ namespace LightmapUvTool
                 RebuildLodGroupFromHierarchy();
                 needsRefresh = true;
                 break; // only one rebuild needed
+            }
+
+            // Third pass: add _LOD0 suffix to LOD0 renderers
+            foreach (var issue in sceneIssues)
+            {
+                if (issue.kind != SceneIssue.Kind.MissingLod0Suffix) continue;
+                if (issue.gameObject == null) continue;
+
+                string newName = issue.gameObject.name + "_LOD0";
+                Undo.RecordObject(issue.gameObject, "Add _LOD0 Suffix");
+                issue.gameObject.name = newName;
+                UvtLog.Info($"Renamed: {issue.description.Split(':')[0]} → {newName}");
+                needsRefresh = true;
             }
 
             Undo.CollapseUndoOperations(undoGroup);
@@ -1829,10 +1868,23 @@ namespace LightmapUvTool
                     destroyList.Add(e.renderer.gameObject);
                 }
 
+                // Build merged mesh name — preserve LOD suffix at end
+                string mergeSrcName = firstEntry.renderer.name;
+                string mergeLodSuffix = "";
+                var mergeLodMatch = System.Text.RegularExpressions.Regex.Match(
+                    mergeSrcName, @"([_\-\s]+LOD\d+)$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (mergeLodMatch.Success)
+                {
+                    mergeLodSuffix = mergeLodMatch.Value;
+                    mergeSrcName = mergeSrcName.Substring(0, mergeSrcName.Length - mergeLodSuffix.Length);
+                }
+                string mergedName = $"{mergeSrcName}_merged{mergeLodSuffix}";
+
                 // Build merged mesh
                 var mergedMesh = new Mesh();
                 if (allPos.Count > 65535) mergedMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-                mergedMesh.name = $"{firstEntry.renderer.name}_merged";
+                mergedMesh.name = mergedName;
                 mergedMesh.SetVertices(allPos);
                 if (allNorm != null) mergedMesh.SetNormals(allNorm);
                 if (allTan != null) mergedMesh.SetTangents(allTan);
@@ -2048,11 +2100,24 @@ namespace LightmapUvTool
                                     $"        {e.renderer.name} ({verts:N0} v)",
                                     EditorStyles.miniLabel);
                             }
-                            string mergedName = g.entries[0].renderer != null
-                                ? $"{g.entries[0].renderer.name}_merged" : "merged";
+                            string previewMergeName = "merged";
+                            if (g.entries[0].renderer != null)
+                            {
+                                string pn = g.entries[0].renderer.name;
+                                string pSuffix = "";
+                                var pMatch = System.Text.RegularExpressions.Regex.Match(
+                                    pn, @"([_\-\s]+LOD\d+)$",
+                                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                                if (pMatch.Success)
+                                {
+                                    pSuffix = pMatch.Value;
+                                    pn = pn.Substring(0, pn.Length - pSuffix.Length);
+                                }
+                                previewMergeName = $"{pn}_merged{pSuffix}";
+                            }
                             EditorGUILayout.LabelField("      Create:", EditorStyles.miniLabel);
                             EditorGUILayout.LabelField(
-                                $"        {mergedName} ({totalVerts:N0} v)",
+                                $"        {previewMergeName} ({totalVerts:N0} v)",
                                 EditorStyles.miniLabel);
                         }
                     }
