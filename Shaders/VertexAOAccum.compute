@@ -1,13 +1,16 @@
 // VertexAOAccum.compute — GPU vertex AO accumulation via depth-map hemisphere sampling.
 // Two kernels: AccumulateAO (per direction) and FinalizeAO (compute final AO values).
+// Uses cosine-weighted fixed-point accumulation with distance falloff.
 
 #pragma kernel AccumulateAO
 #pragma kernel FinalizeAO
 
+#define FP_SCALE 100000u
+
 // ── Buffers ──
 StructuredBuffer<float3>   _Positions;
 StructuredBuffer<float3>   _Normals;
-RWStructuredBuffer<uint2>  _AOCounters;  // (occluded, sampled) per vertex
+RWStructuredBuffer<uint2>  _AOCounters;  // (occludedWeight, totalWeight) per vertex, fixed-point
 RWStructuredBuffer<float>  _AOResult;    // final AO per vertex
 
 // ── Depth texture from current direction ──
@@ -21,6 +24,8 @@ float    _NormalOffset;
 float    _Intensity;
 uint     _VertexCount;
 uint     _DepthTexSize;
+float    _DepthRange;    // = 2 * extent (ortho near-to-far in world units)
+float    _MaxDist;       // max occlusion distance for falloff (0 = no falloff)
 
 // ══════════════════════════════════════════════════════════
 // Kernel 0: AccumulateAO — dispatch once per hemisphere direction
@@ -38,6 +43,9 @@ void AccumulateAO(uint3 id : SV_DispatchThreadID)
     float ndot = dot(_SampleDir, normal);
     if (ndot <= 0.0) return;
 
+    // Cosine weight in fixed-point
+    uint wNdot = (uint)(ndot * FP_SCALE);
+
     // Offset position along normal to avoid self-intersection
     float3 offsetPos = pos + normal * _NormalOffset;
 
@@ -54,7 +62,7 @@ void AccumulateAO(uint3 id : SV_DispatchThreadID)
     // Out of bounds → not occluded from this direction
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
     {
-        InterlockedAdd(_AOCounters[id.x].y, 1u); // sampled++
+        InterlockedAdd(_AOCounters[id.x].y, wNdot);
         return;
     }
 
@@ -66,9 +74,15 @@ void AccumulateAO(uint3 id : SV_DispatchThreadID)
     // Compare: vertex is occluded if something closer blocks it
     if (vertexDepth > sampledDepth + _DepthBias)
     {
-        InterlockedAdd(_AOCounters[id.x].x, 1u); // occluded++
+        // Distance falloff: closer occluders contribute more
+        float depthDiff = vertexDepth - sampledDepth;
+        float worldDist = depthDiff * _DepthRange;
+        float falloff = (_MaxDist > 0.0) ? saturate(1.0 - worldDist / _MaxDist) : 1.0;
+
+        uint wOccluded = (uint)(ndot * falloff * FP_SCALE);
+        InterlockedAdd(_AOCounters[id.x].x, wOccluded);
     }
-    InterlockedAdd(_AOCounters[id.x].y, 1u); // sampled++
+    InterlockedAdd(_AOCounters[id.x].y, wNdot);
 }
 
 // ══════════════════════════════════════════════════════════

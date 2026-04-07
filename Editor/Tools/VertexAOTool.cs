@@ -64,6 +64,8 @@ namespace LightmapUvTool
         float ppContrast   = 1f;
         // Bake settings
         bool  backfaceCulling = true;
+        int   bakeMode = 0; // 0=GPU, 1=CPU
+        static readonly string[] bakeModeLabels = { "GPU", "CPU" };
 
         // ── Results ──
         Dictionary<Mesh, float[]> bakedRawAO;       // raw vertex AO (no face-area fix)
@@ -124,16 +126,17 @@ namespace LightmapUvTool
                 return;
             }
 
-            // Bake mode indicator
+            // Bake mode selector
             bool gpuAvailable = SystemInfo.supportsComputeShaders;
             if (gpuAvailable)
             {
-                EditorGUILayout.HelpBox(
-                    "GPU mode (" + SystemInfo.graphicsDeviceType + ") — depth-map hemisphere sampling via compute shader.",
-                    MessageType.None);
+                bakeMode = EditorGUILayout.Popup(
+                    new GUIContent("Bake Mode", "GPU: fast depth-map hemisphere sampling via compute shader.\nCPU: BVH ray tracing, slower but works on all platforms."),
+                    bakeMode, bakeModeLabels);
             }
             else
             {
+                bakeMode = 1; // force CPU
                 EditorGUILayout.HelpBox(
                     "CPU mode (" + SystemInfo.graphicsDeviceType + " — no compute support). " +
                     "Switch to DX11/DX12/Vulkan/Metal for GPU acceleration.",
@@ -157,7 +160,7 @@ namespace LightmapUvTool
             sampleCountIndex = EditorGUILayout.Popup(
                 new GUIContent("Sample Count", "Number of hemisphere directions to sample. Higher = smoother AO, slower bake."),
                 sampleCountIndex, sampleLabels);
-            if (gpuAvailable)
+            if (gpuAvailable && bakeMode == 0)
             {
                 resolutionIndex = EditorGUILayout.Popup(
                     new GUIContent("Resolution", "Depth map resolution per sample. Higher = sharper shadow edges. GPU only."),
@@ -333,7 +336,8 @@ namespace LightmapUvTool
                 groundPlane     = groundPlane,
                 groundOffset    = groundOffset,
                 faceAreaCorrection = false, // raw first
-                backfaceCulling = backfaceCulling
+                backfaceCulling = backfaceCulling,
+                useGPU          = bakeMode == 0
             };
 
             var sw = Stopwatch.StartNew();

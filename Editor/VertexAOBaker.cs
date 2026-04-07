@@ -29,6 +29,7 @@ namespace LightmapUvTool
         public float groundOffset = 0.01f;
         public bool faceAreaCorrection = false;
         public bool backfaceCulling = true;
+        public bool useGPU        = true;
     }
 
     public static class VertexAOBaker
@@ -42,9 +43,10 @@ namespace LightmapUvTool
             if (meshes == null || meshes.Count == 0)
                 return new Dictionary<Mesh, float[]>();
 
-            if (!SystemInfo.supportsComputeShaders)
+            if (!settings.useGPU || !SystemInfo.supportsComputeShaders)
             {
-                UvtLog.Warn("[Vertex AO] Compute shaders not supported (GPU: " + SystemInfo.graphicsDeviceType + "). Switch to DX11/DX12/Vulkan/Metal for GPU bake.");
+                if (settings.useGPU && !SystemInfo.supportsComputeShaders)
+                    UvtLog.Warn("[Vertex AO] Compute shaders not supported (GPU: " + SystemInfo.graphicsDeviceType + "). Falling back to CPU.");
                 return BakeMultiMeshCPU(meshes, settings);
             }
 
@@ -601,7 +603,8 @@ namespace LightmapUvTool
                     // Render depth pass
                     cmd.Clear();
                     cmd.SetRenderTarget(rt);
-                    cmd.ClearRenderTarget(true, true, Color.white, 1f);
+                    float depthClear = SystemInfo.usesReversedZBuffer ? 0f : 1f;
+                    cmd.ClearRenderTarget(true, true, Color.white, depthClear);
                     cmd.SetViewProjectionMatrices(view, proj);
                     foreach (var (mesh, xform) in meshes)
                     {
@@ -618,6 +621,8 @@ namespace LightmapUvTool
                     computeShader.SetVector("_SampleDir", dir);
                     computeShader.SetFloat("_DepthBias", bias);
                     computeShader.SetFloat("_NormalOffset", normalOffset);
+                    computeShader.SetFloat("_DepthRange", 2f * extent);
+                    computeShader.SetFloat("_MaxDist", settings.maxRadius > 0 ? settings.maxRadius : 0f);
                     computeShader.SetInt("_DepthTexSize", res);
 
                     foreach (var (mesh, posBuf, normBuf, counterBuf, vertCount) in meshBuffers)
@@ -672,7 +677,7 @@ namespace LightmapUvTool
             List<(Mesh mesh, Matrix4x4 transform)> meshes,
             VertexAOSettings settings)
         {
-            UvtLog.Info("[Vertex AO] Using CPU fallback (no compute shader support).");
+            UvtLog.Info("[Vertex AO] Using CPU mode (BVH ray tracing).");
             var result = new Dictionary<Mesh, float[]>();
 
             // Build combined BVH from all meshes
