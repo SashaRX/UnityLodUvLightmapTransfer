@@ -64,6 +64,7 @@ namespace LightmapUvTool
         float ppContrast   = 1f;
         // Bake settings
         bool  backfaceCulling = true;
+        bool  cosineWeighted  = true;
         int   bakeMode = 0; // 0=GPU, 1=CPU
         static readonly string[] bakeModeLabels = { "GPU", "CPU" };
 
@@ -192,6 +193,9 @@ namespace LightmapUvTool
             backfaceCulling = EditorGUILayout.Toggle(
                 new GUIContent("Backface Culling", "Ignore hits on back side of triangles. Reduces false occlusion on thin walls."),
                 backfaceCulling);
+            cosineWeighted = EditorGUILayout.Toggle(
+                new GUIContent("Cosine Weighted", "Cosine: rays near normal contribute more (physically correct).\nUniform: all hemisphere directions contribute equally (harder shadows)."),
+                cosineWeighted);
 
             EditorGUILayout.Space(8);
 
@@ -335,17 +339,16 @@ namespace LightmapUvTool
                 intensity       = intensity,
                 groundPlane     = groundPlane,
                 groundOffset    = groundOffset,
-                faceAreaCorrection = false, // raw first
                 backfaceCulling = backfaceCulling,
+                cosineWeighted  = cosineWeighted,
                 useGPU          = bakeMode == 0
             };
 
             var sw = Stopwatch.StartNew();
             bakedRawAO = VertexAOBaker.BakeMultiMesh(meshList, settings);
 
-            // Compute face-area correction from raw AO
-            settings.faceAreaCorrection = true;
-            bakedFaceAreaAO = VertexAOBaker.BakeMultiMesh(meshList, settings);
+            // Face-area correction as a lightweight post-pass on raw AO
+            bakedFaceAreaAO = VertexAOBaker.ApplyFaceAreaCorrection(bakedRawAO, meshList, settings);
             sw.Stop();
             bakeTimeSeconds = (float)sw.Elapsed.TotalSeconds;
 

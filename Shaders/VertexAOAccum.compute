@@ -28,6 +28,7 @@ uint     _VertexCount;
 uint     _DepthTexSize;
 float    _DepthRange;    // = 2 * extent (ortho near-to-far in world units)
 float    _MaxDist;       // max occlusion distance for falloff (0 = no falloff)
+float    _CosineWeighted; // 1 = cosine-weighted, 0 = uniform
 
 // ══════════════════════════════════════════════════════════
 // Kernel 0: AccumulateAO — dispatch once per hemisphere direction
@@ -57,8 +58,9 @@ void AccumulateAO(uint3 id : SV_DispatchThreadID)
     float ndot = dot(jitteredDir, normal);
     if (ndot <= 0.0) return;
 
-    // Cosine weight in fixed-point
-    uint wNdot = (uint)(ndot * FP_SCALE);
+    // Cosine-weighted: ndot; uniform: 1.0
+    float weight = (_CosineWeighted > 0.5) ? ndot : 1.0;
+    uint wWeight = (uint)(weight * FP_SCALE);
 
     // Offset position along normal to avoid self-intersection
     float3 offsetPos = pos + normal * _NormalOffset;
@@ -80,7 +82,7 @@ void AccumulateAO(uint3 id : SV_DispatchThreadID)
     // Out of bounds → not occluded from this direction
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
     {
-        InterlockedAdd(_AOCounters[id.x].y, wNdot);
+        InterlockedAdd(_AOCounters[id.x].y, wWeight);
         return;
     }
 
@@ -97,10 +99,10 @@ void AccumulateAO(uint3 id : SV_DispatchThreadID)
         float worldDist = depthDiff * _DepthRange;
         float falloff = (_MaxDist > 0.0) ? saturate(1.0 - worldDist / _MaxDist) : 1.0;
 
-        uint wOccluded = (uint)(ndot * falloff * FP_SCALE);
+        uint wOccluded = (uint)(weight * falloff * FP_SCALE);
         InterlockedAdd(_AOCounters[id.x].x, wOccluded);
     }
-    InterlockedAdd(_AOCounters[id.x].y, wNdot);
+    InterlockedAdd(_AOCounters[id.x].y, wWeight);
 }
 
 // ══════════════════════════════════════════════════════════

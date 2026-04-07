@@ -30,6 +30,7 @@ namespace LightmapUvTool
         public bool faceAreaCorrection = false;
         public bool backfaceCulling = true;
         public bool useGPU        = true;
+        public bool cosineWeighted = true;
     }
 
     public static class VertexAOBaker
@@ -51,6 +52,53 @@ namespace LightmapUvTool
             }
 
             return BakeMultiMeshGPU(meshes, settings);
+        }
+
+        /// <summary>
+        /// Apply face-area correction as a post-pass on already-baked AO values.
+        /// Builds a BVH once and corrects dark vertices on large triangles.
+        /// </summary>
+        public static Dictionary<Mesh, float[]> ApplyFaceAreaCorrection(
+            Dictionary<Mesh, float[]> rawAO,
+            List<(Mesh mesh, Matrix4x4 transform)> meshes,
+            VertexAOSettings settings)
+        {
+            if (rawAO == null || rawAO.Count == 0)
+                return rawAO;
+
+            // Build combined BVH
+            var allVerts = new List<Vector3>();
+            var allTris = new List<int>();
+            foreach (var (mesh, xform) in meshes)
+            {
+                int baseVert = allVerts.Count;
+                var verts = mesh.vertices;
+                for (int i = 0; i < verts.Length; i++)
+                    allVerts.Add(xform.MultiplyPoint3x4(verts[i]));
+                var tris = mesh.triangles;
+                for (int i = 0; i < tris.Length; i++)
+                    allTris.Add(tris[i] + baseVert);
+            }
+            var bvh = new TriangleBvh(allVerts.ToArray(), allTris.ToArray());
+            var directions = GenerateSphereDirections(settings.sampleCount);
+
+            Bounds combinedBounds = ComputeCombinedBounds(meshes);
+            float extent = combinedBounds.extents.magnitude;
+            float normalOffset = 0.001f * extent;
+            float maxDist = settings.maxRadius > 0 ? settings.maxRadius : float.MaxValue;
+            float groundY = settings.groundPlane
+                ? combinedBounds.min.y - settings.groundOffset
+                : float.NegativeInfinity;
+
+            var result = new Dictionary<Mesh, float[]>();
+            foreach (var (mesh, xform) in meshes)
+            {
+                if (!rawAO.ContainsKey(mesh))
+                    continue;
+                result[mesh] = FaceAreaCorrection(rawAO[mesh], mesh, xform, bvh,
+                    directions, maxDist, normalOffset, settings, groundY);
+            }
+            return result;
         }
 
         public static void WriteToChannel(Mesh mesh, float[] aoValues, AOTargetChannel channel)
@@ -625,6 +673,7 @@ namespace LightmapUvTool
                     computeShader.SetFloat("_NormalOffset", normalOffset);
                     computeShader.SetFloat("_DepthRange", 2f * extent);
                     computeShader.SetFloat("_MaxDist", settings.maxRadius > 0 ? settings.maxRadius : 0f);
+                    computeShader.SetFloat("_CosineWeighted", settings.cosineWeighted ? 1f : 0f);
                     computeShader.SetInt("_DepthTexSize", res);
 
                     foreach (var (mesh, posBuf, normBuf, counterBuf, vertCount) in meshBuffers)
@@ -668,39 +717,6 @@ namespace LightmapUvTool
                 UnityEngine.Object.DestroyImmediate(rt);
                 UnityEngine.Object.DestroyImmediate(depthMat);
                 if (groundQuad != null) UnityEngine.Object.DestroyImmediate(groundQuad);
-            }
-
-            // Face-area correction (CPU post-pass using BVH)
-            if (settings.faceAreaCorrection)
-            {
-                var allVerts = new List<Vector3>();
-                var allTris = new List<int>();
-                foreach (var (mesh, xform) in meshes)
-                {
-                    int baseVert = allVerts.Count;
-                    var verts = mesh.vertices;
-                    for (int i = 0; i < verts.Length; i++)
-                        allVerts.Add(xform.MultiplyPoint3x4(verts[i]));
-                    var tris = mesh.triangles;
-                    for (int i = 0; i < tris.Length; i++)
-                        allTris.Add(tris[i] + baseVert);
-                }
-                var bvh = new TriangleBvh(allVerts.ToArray(), allTris.ToArray());
-
-                Bounds combinedBoundsFA = ComputeCombinedBounds(meshes);
-                float extentFA = combinedBoundsFA.extents.magnitude;
-                float normalOffsetFA = 0.001f * extentFA;
-                float maxDistFA = settings.maxRadius > 0 ? settings.maxRadius : float.MaxValue;
-                float groundYFA = settings.groundPlane
-                    ? combinedBoundsFA.min.y - settings.groundOffset
-                    : float.NegativeInfinity;
-
-                foreach (var (mesh, xform) in meshes)
-                {
-                    if (!result.ContainsKey(mesh)) continue;
-                    result[mesh] = FaceAreaCorrection(result[mesh], mesh, xform, bvh,
-                        directions, maxDistFA, normalOffsetFA, settings, groundYFA);
-                }
             }
 
             return result;
@@ -800,6 +816,7 @@ namespace LightmapUvTool
                     float jitterAngle = (v * 2654435761u % 360) * Mathf.Deg2Rad;
                     float jCos = Mathf.Cos(jitterAngle), jSin = Mathf.Sin(jitterAngle);
 
+                    bool cosW = settings.cosineWeighted;
                     float occludedWeight = 0f, totalWeight = 0f;
                     for (int d = 0; d < directions.Length; d++)
                     {
@@ -812,8 +829,10 @@ namespace LightmapUvTool
                         float ndot = Vector3.Dot(jitteredDir, worldNorm[v]);
                         if (ndot <= 0) continue;
 
-                        // Cosine-weighted: rays near normal contribute more
-                        totalWeight += ndot;
+                        // Cosine-weighted: rays near normal contribute more;
+                        // uniform: all hemisphere directions contribute equally.
+                        float weight = cosW ? ndot : 1f;
+                        totalWeight += weight;
 
                         var hit = bvh.Raycast(origin, jitteredDir, maxDist);
                         if (hit.triangleIndex >= 0 && hit.t > minHitDist)
@@ -828,7 +847,7 @@ namespace LightmapUvTool
                             {
                                 // Distance falloff: closer hits occlude more
                                 float falloff = 1f - hit.t / maxDist;
-                                occludedWeight += ndot * falloff;
+                                occludedWeight += weight * falloff;
                                 continue;
                             }
                         }
@@ -839,7 +858,7 @@ namespace LightmapUvTool
                             if (t > 0 && t < maxDist)
                             {
                                 float falloff = 1f - t / maxDist;
-                                occludedWeight += ndot * falloff;
+                                occludedWeight += weight * falloff;
                             }
                         }
                     }
@@ -860,12 +879,6 @@ namespace LightmapUvTool
                 }
 
                 processed += verts.Length;
-
-                // Face-area correction: fix large polygons where all vertices
-                // are in occlusion but the surface itself is mostly open.
-                if (settings.faceAreaCorrection)
-                    ao = FaceAreaCorrection(ao, mesh, xform, bvh, directions, maxDist,
-                        normalOffset, settings, groundY);
 
                 result[mesh] = ao;
             }
