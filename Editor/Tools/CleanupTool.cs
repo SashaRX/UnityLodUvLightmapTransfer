@@ -1023,11 +1023,12 @@ namespace LightmapUvTool
                         $", {meshReport.multiMatEntries.Count} multi-material mesh(es)" +
                         $", {meshReport.mergeGroups.Count} merge group(s).");
 
-            // Initialize desired-state toggles from current mesh attributes (union)
-            if (meshReport.attributes.Count > 0)
+            // Initialize desired-state toggles from current mesh attributes (union),
+            // but only on first scan (all toggles false = never initialized)
+            bool anyToggle = ensureNormals || ensureTangents || ensureColors;
+            if (!anyToggle) for (int ch = 0; ch < 8; ch++) if (ensureUv[ch]) { anyToggle = true; break; }
+            if (!anyToggle && meshReport.attributes.Count > 0)
             {
-                ensureNormals = false; ensureTangents = false; ensureColors = false;
-                for (int ch = 0; ch < 8; ch++) ensureUv[ch] = false;
                 foreach (var attr in meshReport.attributes)
                 {
                     if (attr.hasNormals) ensureNormals = true;
