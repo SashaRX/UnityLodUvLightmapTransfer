@@ -1,11 +1,10 @@
 // VertexAOAccum.compute — GPU vertex AO accumulation via depth-map hemisphere sampling.
 // Two kernels: AccumulateAO (per direction) and FinalizeAO (compute final AO values).
 // Uses cosine-weighted fixed-point accumulation with distance falloff.
+// Depth is computed from view-space Z for platform independence (no reversed-Z dependency).
 
 #pragma kernel AccumulateAO
 #pragma kernel FinalizeAO
-
-#include "HLSLSupport.cginc"
 
 #define FP_SCALE 100000u
 
@@ -19,17 +18,19 @@ RWStructuredBuffer<float>  _AOResult;    // final AO per vertex
 Texture2D<float> _DepthTex;
 
 // ── Uniforms ──
-float4x4 _VP;
+float4x4 _VP;              // GPU-adjusted proj * view (for UV projection only)
+float4x4 _ViewMatrix;      // raw view matrix (for linear depth computation)
+float    _InvDepthRange;    // 1 / (2 * extent)
 float3   _SampleDir;
 float    _DepthBias;
 float    _NormalOffset;
 float    _Intensity;
 uint     _VertexCount;
 uint     _DepthTexSize;
-float    _DepthRange;    // = 2 * extent (ortho near-to-far in world units)
-float    _MaxDist;       // max occlusion distance for falloff (0 = no falloff)
-float    _CosineWeighted; // 1 = cosine-weighted, 0 = uniform
-float    _FlipNormals;    // 1 = thickness mode (flip hemisphere), 0 = normal AO
+float    _DepthRange;       // = 2 * extent (ortho near-to-far in world units)
+float    _MaxDist;          // max occlusion distance for falloff (0 = no falloff)
+float    _CosineWeighted;   // 1 = cosine-weighted, 0 = uniform
+float    _FlipNormals;      // 1 = thickness mode (flip hemisphere), 0 = normal AO
 
 // ══════════════════════════════════════════════════════════
 // Kernel 0: AccumulateAO — dispatch once per hemisphere direction
@@ -69,19 +70,14 @@ void AccumulateAO(uint3 id : SV_DispatchThreadID)
     // Offset position along hemisphere normal to avoid self-intersection
     float3 offsetPos = pos + hemisphereNorm * _NormalOffset;
 
-    // Project to clip space (VP includes platform-specific adjustments)
+    // Project to clip space for UV lookup (GPU-adjusted VP handles Y-flip)
     float4 clip = mul(_VP, float4(offsetPos, 1.0));
-    float3 ndc  = clip.xyz / clip.w;
+    float2 ndc_xy = clip.xy / clip.w;
+    float2 uv = ndc_xy * 0.5 + 0.5;
 
-    // NDC → UV (0..1)
-    float2 uv = ndc.xy * 0.5 + 0.5;
-
-    // Normalize depth to 0=near, 1=far (matching depth shader output)
-    #if defined(UNITY_REVERSED_Z)
-    float vertexDepth = 1.0 - ndc.z;
-    #else
-    float vertexDepth = ndc.z * 0.5 + 0.5;  // OpenGL NDC [-1,1] → [0,1]
-    #endif
+    // Compute linear depth from view-space Z (platform-independent, matches depth shader)
+    float viewZ = mul(_ViewMatrix, float4(offsetPos, 1.0)).z;
+    float vertexDepth = -viewZ * _InvDepthRange;
 
     // Out of bounds → not occluded from this direction
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
@@ -124,10 +120,6 @@ void FinalizeAO(uint3 id : SV_DispatchThreadID)
     float ao = 1.0;
     if (sampled > 0)
         ao = 1.0 - (float)occluded / (float)sampled;
-
-    // Thickness: invert — more inward hits = thinner = brighter (1=thin, 0=thick)
-    if (_FlipNormals > 0.5)
-        ao = 1.0 - ao;
 
     ao = pow(saturate(ao), _Intensity);
     _AOResult[id.x] = ao;

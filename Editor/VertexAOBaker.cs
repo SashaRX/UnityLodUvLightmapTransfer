@@ -574,6 +574,7 @@ namespace LightmapUvTool
             Vector3 center = combinedBounds.center;
             float bias = 0.001f * extent;
             float normalOffset = 0.0005f * extent;
+            float invDepthRange = 1f / (2f * extent);
 
             // Create render texture
             int res = settings.depthResolution;
@@ -655,7 +656,7 @@ namespace LightmapUvTool
                     // LookAt returns camera-to-world, we need world-to-camera
                     view = view.inverse;
                     Matrix4x4 proj = Matrix4x4.Ortho(-extent, extent, -extent, extent, 0, 2 * extent);
-                    // GPU projection: handles reversed-Z and Y-flip for render textures
+                    // GPU projection for UV mapping (handles Y-flip for render textures)
                     Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(proj, true);
                     Matrix4x4 vp = gpuProj * view;
 
@@ -664,8 +665,10 @@ namespace LightmapUvTool
                     cmd.SetRenderTarget(rt);
                     float depthClear = SystemInfo.usesReversedZBuffer ? 0f : 1f;
                     cmd.ClearRenderTarget(true, true, Color.white, depthClear);
-                    // Keep depth rasterization matrix consistent with compute-side projection
-                    // (GL.GetGPUProjectionMatrix handles RT Y-flip and reversed-Z differences).
+                    // Pass raw view matrix to depth shader for platform-independent depth
+                    depthMat.SetMatrix("_AO_ViewMatrix", view);
+                    depthMat.SetFloat("_AO_InvDepthRange", invDepthRange);
+                    // Use gpuProj for correct hardware Z-testing between triangles
                     cmd.SetViewProjectionMatrices(view, gpuProj);
                     foreach (var (mesh, xform) in meshes)
                     {
@@ -679,6 +682,8 @@ namespace LightmapUvTool
                     // Dispatch compute per mesh
                     computeShader.SetTexture(accumKernel, "_DepthTex", rt);
                     computeShader.SetMatrix("_VP", vp);
+                    computeShader.SetMatrix("_ViewMatrix", view);
+                    computeShader.SetFloat("_InvDepthRange", invDepthRange);
                     computeShader.SetVector("_SampleDir", dir);
                     computeShader.SetFloat("_DepthBias", bias);
                     computeShader.SetFloat("_NormalOffset", normalOffset);
@@ -884,8 +889,6 @@ namespace LightmapUvTool
                     }
 
                     float aoVal = totalWeight > 0 ? 1f - occludedWeight / totalWeight : 1f;
-                    // Thickness: invert — more inward hits = thinner = brighter (1=thin, 0=thick)
-                    if (isThickness) aoVal = 1f - aoVal;
                     ao[v] = Mathf.Pow(Mathf.Clamp01(aoVal), settings.intensity);
 
                     Interlocked.Increment(ref progressCounter);
