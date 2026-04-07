@@ -42,7 +42,7 @@ namespace LightmapUvTool
 
         struct MaterialIssue
         {
-            public enum Kind { HiddenShader, MismatchedMaterial, ExtraSlot, ImporterRemap }
+            public enum Kind { HiddenShader, MismatchedMaterial, ExtraSlot, ImporterRemap, DuplicateSlot }
             public Kind kind;
             public Renderer renderer;
             public int submeshIndex;
@@ -280,6 +280,33 @@ namespace LightmapUvTool
                         description = $"{e.renderer.name}: {mats.Length} materials but only {mesh.subMeshCount} submesh(es)"
                     });
                 }
+
+                // Check duplicate material slots (same material in multiple submeshes)
+                if (mats.Length > 1 && mesh.subMeshCount > 1)
+                {
+                    var seen = new Dictionary<int, int>(); // materialInstanceID → first slot index
+                    for (int i = 0; i < mats.Length && i < mesh.subMeshCount; i++)
+                    {
+                        if (mats[i] == null) continue;
+                        int matId = mats[i].GetInstanceID();
+                        if (seen.TryGetValue(matId, out int firstSlot))
+                        {
+                            materialIssues.Add(new MaterialIssue
+                            {
+                                kind = MaterialIssue.Kind.DuplicateSlot,
+                                renderer = e.renderer,
+                                submeshIndex = i,
+                                current = mats[i],
+                                suggested = null,
+                                description = $"{e.renderer.name}: material \"{mats[i].name}\" in slots [{firstSlot}] and [{i}] — submeshes can be merged"
+                            });
+                        }
+                        else
+                        {
+                            seen[matId] = i;
+                        }
+                    }
+                }
             }
 
             // Scan FBX importer material remaps
@@ -444,6 +471,98 @@ namespace LightmapUvTool
                             processed.Add(r);
                         }
                         break;
+                }
+            }
+
+            // Fix duplicate material slots — merge submeshes sharing the same material
+            var dupRenderers = new HashSet<Renderer>();
+            foreach (var issue in materialIssues)
+            {
+                if (issue.kind != MaterialIssue.Kind.DuplicateSlot) continue;
+                if (issue.renderer == null || dupRenderers.Contains(issue.renderer)) continue;
+                dupRenderers.Add(issue.renderer);
+
+                var mf = issue.renderer.GetComponent<MeshFilter>();
+                if (mf == null) continue;
+                var mesh = mf.sharedMesh;
+                if (mesh == null || mesh.subMeshCount <= 1) continue;
+
+                var mats = issue.renderer.sharedMaterials;
+
+                // Group submeshes by material
+                var matGroups = new Dictionary<int, List<int>>(); // matInstanceID → list of submesh indices
+                for (int s = 0; s < mesh.subMeshCount && s < mats.Length; s++)
+                {
+                    int matId = mats[s] != null ? mats[s].GetInstanceID() : -1;
+                    if (!matGroups.ContainsKey(matId))
+                        matGroups[matId] = new List<int>();
+                    matGroups[matId].Add(s);
+                }
+
+                if (matGroups.Count == mesh.subMeshCount) continue; // no duplicates
+
+                // Need readable mesh to merge
+                bool cloned = false;
+                if (!mesh.isReadable)
+                {
+                    string assetPath = AssetDatabase.GetAssetPath(mesh);
+                    if (!string.IsNullOrEmpty(assetPath))
+                    {
+                        var imp = AssetImporter.GetAtPath(assetPath) as ModelImporter;
+                        if (imp != null && !imp.isReadable)
+                        {
+                            imp.isReadable = true;
+                            imp.SaveAndReimport();
+                            mesh = mf.sharedMesh; // re-read after reimport
+                        }
+                    }
+                }
+
+                if (!mesh.isReadable) continue;
+
+                // Clone mesh
+                var newMesh = UnityEngine.Object.Instantiate(mesh);
+                newMesh.name = mesh.name;
+                cloned = true;
+
+                // Build merged submeshes
+                var newMats = new List<Material>();
+                var mergedSubs = new List<int[]>();
+                foreach (var kvp in matGroups)
+                {
+                    var indices = kvp.Value;
+                    Material mat = indices[0] < mats.Length ? mats[indices[0]] : null;
+                    newMats.Add(mat);
+
+                    // Combine triangle indices from all submeshes in this group
+                    var combinedTris = new List<int>();
+                    foreach (int s in indices)
+                        combinedTris.AddRange(mesh.GetTriangles(s));
+                    mergedSubs.Add(combinedTris.ToArray());
+                }
+
+                // Apply to new mesh
+                newMesh.subMeshCount = mergedSubs.Count;
+                for (int s = 0; s < mergedSubs.Count; s++)
+                    newMesh.SetTriangles(mergedSubs[s], s);
+
+                Undo.RecordObject(mf, "Merge Duplicate Material Slots");
+                mf.sharedMesh = newMesh;
+                Undo.RecordObject(issue.renderer, "Merge Duplicate Material Slots");
+                issue.renderer.sharedMaterials = newMats.ToArray();
+
+                UvtLog.Info($"Merged submeshes on {issue.renderer.name}: {mesh.subMeshCount} → {mergedSubs.Count} submeshes");
+
+                // Restore isReadable if we changed it
+                string meshPath = AssetDatabase.GetAssetPath(mesh);
+                if (!string.IsNullOrEmpty(meshPath))
+                {
+                    var mimp = AssetImporter.GetAtPath(meshPath) as ModelImporter;
+                    if (mimp != null && mimp.isReadable)
+                    {
+                        mimp.isReadable = false;
+                        mimp.SaveAndReimport();
+                    }
                 }
             }
 
