@@ -1899,7 +1899,7 @@ namespace LightmapUvTool
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (mergeLodMatch.Success)
                     mergeSrcName = mergeSrcName.Substring(0, mergeSrcName.Length - mergeLodMatch.Value.Length);
-                string mergedName = $"{mergeSrcName}_merged_LOD{group.lodIndex}";
+                string mergedName = $"{mergeSrcName}_LOD{group.lodIndex}";
 
                 // Build merged mesh
                 var mergedMesh = new Mesh();
@@ -1978,7 +1978,18 @@ namespace LightmapUvTool
             UvtLog.Info($"Merged {merged} group(s).");
 
             if (merged > 0 && ctx.LodGroup != null)
+            {
                 ctx.Refresh(ctx.LodGroup);
+                ctx.LodGroup.RecalculateBounds();
+
+                // Validate LODGroup integrity after merge
+                var finalLods = ctx.LodGroup.GetLODs();
+                for (int li = 0; li < finalLods.Length; li++)
+                {
+                    if (finalLods[li].renderers == null || finalLods[li].renderers.Length == 0)
+                        UvtLog.Warn($"[Merge] LOD{li} has no renderers after merge.");
+                }
+            }
 
             splitCandidates = null;
             mergeCandidates = null;
@@ -2129,7 +2140,7 @@ namespace LightmapUvTool
                                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                                 if (pMatch.Success)
                                     pn = pn.Substring(0, pn.Length - pMatch.Value.Length);
-                                previewMergeName = $"{pn}_merged_LOD{g.lodIndex}";
+                                previewMergeName = $"{pn}_LOD{g.lodIndex}";
                             }
                             EditorGUILayout.LabelField("      Create:", EditorStyles.miniLabel);
                             EditorGUILayout.LabelField(

@@ -99,6 +99,8 @@ namespace LightmapUvTool
 
             SceneView.duringSceneGui -= OnSceneGUI;
             SceneView.duringSceneGui += OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            Undo.undoRedoPerformed += OnUndoRedo;
         }
 
         void SelectToolById(string toolId)
@@ -120,6 +122,7 @@ namespace LightmapUvTool
             // 5. Destroy working meshes and restore fbxMesh on MeshFilter
 
             SceneView.duringSceneGui -= OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
 
             ActiveTool?.OnDeactivate();
 
@@ -189,29 +192,78 @@ namespace LightmapUvTool
                     _cachedRendererCount = CountValidRenderers(lg);
                     ActiveTool?.OnRefresh();
                 }
-                else if (lg == null && ctx.LodGroup != null)
+                else if (lg == null)
                 {
-                    // Selected object has no LODGroup — clear context only if it
-                    // has mesh-relevant components or LOD children, so clicking a
-                    // Light or Camera doesn't disrupt the workflow.
-                    bool hasMeshRelevance = go.GetComponentInChildren<MeshFilter>() != null
-                                         || go.GetComponentInChildren<MeshRenderer>() != null
-                                         || LodGenerationTool.FindLodSiblings(go) != null;
-                    if (hasMeshRelevance)
+                    // Selected object has no LODGroup — check for standalone mesh
+                    // or LOD siblings so clicking a Light/Camera doesn't disrupt workflow.
+                    var mr = go.GetComponent<MeshRenderer>();
+                    var mf = go.GetComponent<MeshFilter>();
+                    bool isStandaloneMesh = mr != null && mf != null && mf.sharedMesh != null;
+
+                    // Skip if already showing this standalone renderer
+                    bool alreadyShown = isStandaloneMesh && ctx.StandaloneMesh
+                        && ctx.MeshEntries.Count == 1 && ctx.MeshEntries[0].renderer == mr;
+                    if (alreadyShown) { /* no-op */ }
+                    else
                     {
-                        if (canvas.CurrentPreviewMode != UvCanvasView.PreviewMode.Off)
-                            ApplyPreviewMode(UvCanvasView.PreviewMode.Off);
-                        ctx.LodGroup.ForceLOD(-1);
-                        RestoreWorkingMeshes();
-                        ctx.Refresh(null);
-                        _cachedLodCount = 0;
-                        _cachedRendererCount = 0;
-                        ActiveTool?.OnRefresh();
+                        bool hasMeshRelevance = isStandaloneMesh
+                                             || go.GetComponentInChildren<MeshFilter>() != null
+                                             || go.GetComponentInChildren<MeshRenderer>() != null
+                                             || LodGenerationTool.FindLodSiblings(go) != null;
+                        if (hasMeshRelevance)
+                        {
+                            if (canvas.CurrentPreviewMode != UvCanvasView.PreviewMode.Off)
+                                ApplyPreviewMode(UvCanvasView.PreviewMode.Off);
+                            if (ctx.LodGroup != null)
+                                ctx.LodGroup.ForceLOD(-1);
+                            RestoreWorkingMeshes();
+
+                            if (isStandaloneMesh)
+                            {
+                                ctx.RefreshStandalone(mr);
+                                _cachedLodCount = 1;
+                                _cachedRendererCount = 1;
+                            }
+                            else
+                            {
+                                ctx.Refresh(null);
+                                _cachedLodCount = 0;
+                                _cachedRendererCount = 0;
+                            }
+                            ActiveTool?.OnRefresh();
+                        }
                     }
                 }
             }
 
             UpdateSelectedSidecar();
+            Repaint();
+        }
+
+        void OnUndoRedo()
+        {
+            if (ctx == null) return;
+
+            if (ctx.LodGroup != null)
+            {
+                ctx.Refresh(ctx.LodGroup);
+                _cachedLodCount = ctx.LodCount;
+                _cachedRendererCount = CountValidRenderers(ctx.LodGroup);
+                ctx.PreviewLod = Mathf.Clamp(ctx.PreviewLod, 0, Mathf.Max(0, ctx.LodCount - 1));
+            }
+            else if (ctx.StandaloneMesh)
+            {
+                if (ctx.MeshEntries.Count > 0 && ctx.MeshEntries[0].renderer != null)
+                    ctx.RefreshStandalone(ctx.MeshEntries[0].renderer as MeshRenderer);
+                else
+                {
+                    ctx.Refresh(null);
+                    _cachedLodCount = 0;
+                    _cachedRendererCount = 0;
+                }
+            }
+
+            ActiveTool?.OnRefresh();
             Repaint();
         }
 
