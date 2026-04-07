@@ -11,7 +11,7 @@ Shader "Hidden/LightmapUvTool/VertexAODepth"
         {
             ZWrite On
             ZTest LEqual
-            Cull Back
+            Cull Off
 
             CGPROGRAM
             #pragma vertex vert
