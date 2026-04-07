@@ -175,23 +175,71 @@ namespace LightmapUvTool
         void DrawMaterialsSection()
         {
             EditorGUILayout.Space(8);
+            int fixableCount = materialIssues != null
+                ? materialIssues.Count(i => i.kind != MaterialIssue.Kind.ImporterRemap)
+                : 0;
+            int totalCount = materialIssues != null ? materialIssues.Count : 0;
             string label = materialIssues != null
-                ? $"Fix Materials ({materialIssues.Count} issue{(materialIssues.Count == 1 ? "" : "s")})"
+                ? $"Fix Materials ({totalCount} issue{(totalCount == 1 ? "" : "s")})"
                 : "Fix Materials";
             foldMaterials = EditorGUILayout.Foldout(foldMaterials, label, true);
             if (!foldMaterials) return;
 
             EditorGUI.indentLevel++;
 
-            DrawScanFixButtons(ScanMaterials, FixMaterials, materialIssues);
+            // Scan/Fix buttons — Fix only enabled if fixable (non-ImporterRemap) issues exist
+            EditorGUILayout.Space(4);
+            EditorGUILayout.BeginHorizontal();
+            var bgc2 = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(.6f, .75f, .9f);
+            if (GUILayout.Button("Scan", GUILayout.Height(24)))
+                ScanMaterials();
+            GUI.backgroundColor = new Color(.4f, .8f, .4f);
+            GUI.enabled = fixableCount > 0;
+            if (GUILayout.Button("Fix", GUILayout.Height(24)))
+            {
+                FixMaterials();
+                GUI.enabled = true;
+                GUI.backgroundColor = bgc2;
+                EditorGUILayout.EndHorizontal();
+                EditorGUI.indentLevel--;
+                return;
+            }
+            GUI.enabled = true;
+            GUI.backgroundColor = bgc2;
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.Space(4);
 
             if (materialIssues != null)
             {
                 if (materialIssues.Count == 0)
+                {
                     EditorGUILayout.HelpBox("No material issues found.", MessageType.Info);
+                }
                 else
+                {
+                    // Fixable issues (scene renderer)
                     foreach (var issue in materialIssues)
+                    {
+                        if (issue.kind == MaterialIssue.Kind.ImporterRemap) continue;
                         EditorGUILayout.HelpBox(issue.description, MessageType.Warning);
+                    }
+
+                    // FBX-embedded issues (not fixable — need re-export)
+                    bool hasImporterIssues = false;
+                    foreach (var issue in materialIssues)
+                    {
+                        if (issue.kind != MaterialIssue.Kind.ImporterRemap) continue;
+                        hasImporterIssues = true;
+                        EditorGUILayout.HelpBox(issue.description, MessageType.Info);
+                    }
+                    if (hasImporterIssues)
+                    {
+                        EditorGUILayout.HelpBox(
+                            "FBX source material names can only be fixed by \"Overwrite Source FBX\".",
+                            MessageType.None);
+                    }
+                }
             }
 
             EditorGUI.indentLevel--;
@@ -566,33 +614,9 @@ namespace LightmapUvTool
                 }
             }
 
-            // Fix FBX importer remap issues
-            var reimportPaths = new HashSet<string>();
-            foreach (var issue in materialIssues)
-            {
-                if (issue.kind != MaterialIssue.Kind.ImporterRemap) continue;
-                if (string.IsNullOrEmpty(issue.fbxPath) || issue.suggested == null) continue;
-
-                var imp = AssetImporter.GetAtPath(issue.fbxPath) as ModelImporter;
-                if (imp == null) continue;
-
-                var sourceId = new AssetImporter.SourceAssetIdentifier(
-                    typeof(Material), issue.remapSourceName);
-                imp.AddRemap(sourceId, issue.suggested);
-                UvtLog.Info($"Fixed FBX remap \"{issue.remapSourceName}\" → \"{issue.suggested.name}\" in {System.IO.Path.GetFileName(issue.fbxPath)}");
-                reimportPaths.Add(issue.fbxPath);
-            }
+            // ImporterRemap issues are not fixable — they require "Overwrite Source FBX"
 
             Undo.CollapseUndoOperations(undoGroup);
-
-            // Reimport FBX files with updated remaps
-            foreach (string path in reimportPaths)
-            {
-                UvtLog.Info($"Reimporting {System.IO.Path.GetFileName(path)}...");
-                AssetDatabase.WriteImportSettingsIfDirty(path);
-                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
-            }
-
             materialIssues = null;
             requestRepaint?.Invoke();
         }
@@ -741,9 +765,16 @@ namespace LightmapUvTool
                     case ColliderIssue.Kind.ExtraAttributes:
                         if (issue.mesh == null) break;
 
+                        // For FBX sub-asset colliders (no scene object) — info only,
+                        // needs "Overwrite Source FBX" to strip attributes
+                        if (issue.gameObject == null)
+                        {
+                            UvtLog.Warn($"Cannot strip {issue.mesh.name} — FBX sub-asset. Use \"Overwrite Source FBX\".");
+                            break;
+                        }
+
                         if (issue.mesh.isReadable)
                         {
-                            // Mesh is readable — strip in-place
                             Undo.RecordObject(issue.mesh, "Strip Collider Attributes");
                             var pos = issue.mesh.vertices;
                             var tris = issue.mesh.triangles;
@@ -751,16 +782,13 @@ namespace LightmapUvTool
                             issue.mesh.SetVertices(pos);
                             issue.mesh.SetTriangles(tris, 0);
                             issue.mesh.RecalculateBounds();
-                            UvtLog.Info($"Stripped extra attributes from {issue.gameObject.name} (in-place)");
+                            UvtLog.Info($"Stripped extra attributes from {issue.gameObject.name}");
                         }
                         else
                         {
-                            // Mesh is not readable — need to clone with read enabled,
-                            // strip, then assign to MeshFilter/MeshCollider
                             var mf = issue.gameObject.GetComponent<MeshFilter>();
                             var mc = issue.gameObject.GetComponent<MeshCollider>();
 
-                            // Try to enable Read/Write on the FBX source and reimport
                             string assetPath = AssetDatabase.GetAssetPath(issue.mesh);
                             if (!string.IsNullOrEmpty(assetPath))
                             {
@@ -774,7 +802,6 @@ namespace LightmapUvTool
                                         imp.SaveAndReimport();
                                     }
 
-                                    // Now mesh should be readable — reload and strip
                                     Mesh freshMesh = mf != null ? mf.sharedMesh : (mc != null ? mc.sharedMesh : null);
                                     if (freshMesh != null && freshMesh.isReadable)
                                     {
@@ -797,10 +824,9 @@ namespace LightmapUvTool
                                             Undo.RecordObject(mc, "Strip Collider Attributes");
                                             mc.sharedMesh = clone;
                                         }
-                                        UvtLog.Info($"Stripped extra attributes from {issue.gameObject.name} (cloned)");
+                                        UvtLog.Info($"Stripped extra attributes from {issue.gameObject.name}");
                                     }
 
-                                    // Restore Read/Write setting
                                     if (!wasReadable)
                                     {
                                         imp.isReadable = false;
