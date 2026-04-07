@@ -1112,10 +1112,10 @@ namespace LightmapUvTool
             // (only if other LODs exist with _LOD1, _LOD2 etc.)
             if (lodChildren.Count > 0)
             {
-                var lods = ctx.LodGroup.GetLODs();
-                if (lods.Length > 1 && lods[0].renderers != null)
+                var currentLods = ctx.LodGroup.GetLODs();
+                if (currentLods.Length > 1 && currentLods[0].renderers != null)
                 {
-                    foreach (var r in lods[0].renderers)
+                    foreach (var r in currentLods[0].renderers)
                     {
                         if (r == null) continue;
                         bool hasLodSuffix = System.Text.RegularExpressions.Regex.IsMatch(
