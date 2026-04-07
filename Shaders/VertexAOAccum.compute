@@ -121,6 +121,10 @@ void FinalizeAO(uint3 id : SV_DispatchThreadID)
     if (sampled > 0)
         ao = 1.0 - (float)occluded / (float)sampled;
 
+    // Thickness: invert so closer hits = brighter (1=thin, 0=thick)
+    if (_FlipNormals > 0.5)
+        ao = 1.0 - ao;
+
     ao = pow(saturate(ao), _Intensity);
     _AOResult[id.x] = ao;
 }

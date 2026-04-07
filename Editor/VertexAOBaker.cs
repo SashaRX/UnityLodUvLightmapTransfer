@@ -889,6 +889,8 @@ namespace LightmapUvTool
                     }
 
                     float aoVal = totalWeight > 0 ? 1f - occludedWeight / totalWeight : 1f;
+                    // Thickness: invert so closer hits = brighter (1=thin, 0=thick)
+                    if (isThickness) aoVal = 1f - aoVal;
                     ao[v] = Mathf.Pow(Mathf.Clamp01(aoVal), settings.intensity);
 
                     Interlocked.Increment(ref progressCounter);
