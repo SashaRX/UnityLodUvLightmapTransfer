@@ -1587,21 +1587,45 @@ namespace LightmapUvTool
                 ensureUv[ch] = EditorGUILayout.ToggleLeft($"UV{ch}", ensureUv[ch], GUILayout.Width(55));
             EditorGUILayout.EndHorizontal();
 
-            // Count changes needed
+            // Per-mesh change preview
             int toAdd = 0, toRemove = 0;
+            EditorGUILayout.Space(4);
             foreach (var attr in meshReport.attributes)
             {
-                if (ensureNormals && !attr.hasNormals) toAdd++;
-                if (!ensureNormals && attr.hasNormals) toRemove++;
-                if (ensureTangents && !attr.hasTangents) toAdd++;
-                if (!ensureTangents && attr.hasTangents) toRemove++;
-                if (ensureColors && !attr.hasColors) toAdd++;
-                if (!ensureColors && attr.hasColors) toRemove++;
+                var adds = new List<string>();
+                var removes = new List<string>();
+
+                if (ensureNormals && !attr.hasNormals) adds.Add("N");
+                if (!ensureNormals && attr.hasNormals) removes.Add("N");
+                if (ensureTangents && !attr.hasTangents) adds.Add("T");
+                if (!ensureTangents && attr.hasTangents) removes.Add("T");
+                if (ensureColors && !attr.hasColors) adds.Add("C");
+                if (!ensureColors && attr.hasColors) removes.Add("C");
                 for (int ch = 0; ch < 8; ch++)
                 {
-                    if (ensureUv[ch] && !attr.hasUv[ch]) toAdd++;
-                    if (!ensureUv[ch] && attr.hasUv[ch]) toRemove++;
+                    if (ensureUv[ch] && !attr.hasUv[ch]) adds.Add($"UV{ch}");
+                    if (!ensureUv[ch] && attr.hasUv[ch]) removes.Add($"UV{ch}");
                 }
+
+                toAdd += adds.Count;
+                toRemove += removes.Count;
+
+                if (adds.Count == 0 && removes.Count == 0) continue;
+
+                string meshName = attr.meshName;
+                if (meshName.Length > 22) meshName = meshName.Substring(0, 19) + "...";
+
+                var parts = new List<string>();
+                if (adds.Count > 0) parts.Add("+" + string.Join(" +", adds));
+                if (removes.Count > 0) parts.Add("-" + string.Join(" -", removes));
+
+                EditorGUILayout.LabelField(
+                    $"  {meshName}", string.Join("  ", parts), EditorStyles.miniLabel);
+            }
+
+            if (toAdd == 0 && toRemove == 0)
+            {
+                EditorGUILayout.HelpBox("All meshes already match desired state.", MessageType.Info);
             }
 
             EditorGUILayout.Space(4);
@@ -1617,9 +1641,6 @@ namespace LightmapUvTool
                 FixApplyAttributes();
             GUI.enabled = true;
             GUI.backgroundColor = bgc;
-
-            if (toAdd == 0 && toRemove == 0)
-                EditorGUILayout.HelpBox("All meshes already match desired state.", MessageType.Info);
 
             EditorGUI.indentLevel--;
         }
