@@ -42,13 +42,16 @@ namespace LightmapUvTool
 
         struct MaterialIssue
         {
-            public enum Kind { HiddenShader, MismatchedMaterial, ExtraSlot }
+            public enum Kind { HiddenShader, MismatchedMaterial, ExtraSlot, ImporterRemap }
             public Kind kind;
             public Renderer renderer;
             public int submeshIndex;
             public Material current;
             public Material suggested;
             public string description;
+            // For ImporterRemap kind
+            public string fbxPath;
+            public string remapSourceName;
         }
 
         struct ColliderIssue
@@ -279,6 +282,73 @@ namespace LightmapUvTool
                 }
             }
 
+            // Scan FBX importer material remaps
+            var fbxPaths = new HashSet<string>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                Mesh m = e.fbxMesh ?? e.originalMesh;
+                if (m == null) continue;
+                string p = AssetDatabase.GetAssetPath(m);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                    fbxPaths.Add(p);
+            }
+
+            // Collect correct materials from LOD0 scene renderers
+            var correctMats = new Dictionary<string, Material>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (e.lodIndex != 0 || e.renderer == null) continue;
+                foreach (var mat in e.renderer.sharedMaterials)
+                {
+                    if (mat != null && !mat.shader.name.StartsWith("Hidden/LightmapUvTool/"))
+                        correctMats[mat.name] = mat;
+                }
+            }
+
+            foreach (string fbxPath in fbxPaths)
+            {
+                var imp = AssetImporter.GetAtPath(fbxPath) as ModelImporter;
+                if (imp == null) continue;
+
+                var map = imp.GetExternalObjectMap();
+                foreach (var kvp in map)
+                {
+                    if (kvp.Key.type != typeof(Material)) continue;
+                    var mat = kvp.Value as Material;
+                    if (mat == null) continue;
+
+                    bool isHidden = mat.shader.name.StartsWith("Hidden/LightmapUvTool/");
+                    bool isDefault = mat.shader.name == "Lit" || mat.shader.name == "Standard"
+                                  || mat.shader.name == "Universal Render Pipeline/Lit";
+
+                    // Check if remapped material name doesn't match source name
+                    bool nameMismatch = !string.IsNullOrEmpty(kvp.Key.name) && mat.name != kvp.Key.name;
+
+                    if (isHidden || (isDefault && nameMismatch))
+                    {
+                        // Try to find correct material
+                        Material suggested = null;
+                        if (correctMats.TryGetValue(kvp.Key.name, out var found))
+                            suggested = found;
+
+                        string issue = isHidden
+                            ? $"FBX remap \"{kvp.Key.name}\" → hidden shader \"{mat.shader.name}\""
+                            : $"FBX remap \"{kvp.Key.name}\" → \"{mat.name}\" (name mismatch)";
+
+                        materialIssues.Add(new MaterialIssue
+                        {
+                            kind = MaterialIssue.Kind.ImporterRemap,
+                            fbxPath = fbxPath,
+                            remapSourceName = kvp.Key.name,
+                            current = mat,
+                            suggested = suggested,
+                            description = $"{System.IO.Path.GetFileName(fbxPath)}: {issue}" +
+                                (suggested != null ? $" → suggest \"{suggested.name}\"" : " (no suggestion)")
+                        });
+                    }
+                }
+            }
+
             UvtLog.Info($"Material scan: {materialIssues.Count} issue(s) found.");
         }
 
@@ -299,8 +369,11 @@ namespace LightmapUvTool
                     lod0Mats[key] = e.renderer.sharedMaterials;
             }
 
+            // Fix scene renderer issues
             foreach (var issue in materialIssues)
             {
+                if (issue.kind == MaterialIssue.Kind.ImporterRemap) continue;
+
                 var r = issue.renderer;
                 if (r == null) continue;
 
@@ -340,8 +413,34 @@ namespace LightmapUvTool
                 }
             }
 
+            // Fix FBX importer remap issues
+            var reimportPaths = new HashSet<string>();
+            foreach (var issue in materialIssues)
+            {
+                if (issue.kind != MaterialIssue.Kind.ImporterRemap) continue;
+                if (string.IsNullOrEmpty(issue.fbxPath) || issue.suggested == null) continue;
+
+                var imp = AssetImporter.GetAtPath(issue.fbxPath) as ModelImporter;
+                if (imp == null) continue;
+
+                var sourceId = new AssetImporter.SourceAssetIdentifier(
+                    typeof(Material), issue.remapSourceName);
+                imp.AddRemap(sourceId, issue.suggested);
+                UvtLog.Info($"Fixed FBX remap \"{issue.remapSourceName}\" → \"{issue.suggested.name}\" in {System.IO.Path.GetFileName(issue.fbxPath)}");
+                reimportPaths.Add(issue.fbxPath);
+            }
+
             Undo.CollapseUndoOperations(undoGroup);
-            materialIssues = null; // force re-scan
+
+            // Reimport FBX files with updated remaps
+            foreach (string path in reimportPaths)
+            {
+                UvtLog.Info($"Reimporting {System.IO.Path.GetFileName(path)}...");
+                AssetDatabase.WriteImportSettingsIfDirty(path);
+                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+            }
+
+            materialIssues = null;
             requestRepaint?.Invoke();
         }
 
