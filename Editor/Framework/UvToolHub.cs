@@ -99,6 +99,8 @@ namespace LightmapUvTool
 
             SceneView.duringSceneGui -= OnSceneGUI;
             SceneView.duringSceneGui += OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            Undo.undoRedoPerformed += OnUndoRedo;
         }
 
         void SelectToolById(string toolId)
@@ -120,6 +122,7 @@ namespace LightmapUvTool
             // 5. Destroy working meshes and restore fbxMesh on MeshFilter
 
             SceneView.duringSceneGui -= OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
 
             ActiveTool?.OnDeactivate();
 
@@ -234,6 +237,33 @@ namespace LightmapUvTool
             }
 
             UpdateSelectedSidecar();
+            Repaint();
+        }
+
+        void OnUndoRedo()
+        {
+            if (ctx == null) return;
+
+            if (ctx.LodGroup != null)
+            {
+                ctx.Refresh(ctx.LodGroup);
+                _cachedLodCount = ctx.LodCount;
+                _cachedRendererCount = CountValidRenderers(ctx.LodGroup);
+                ctx.PreviewLod = Mathf.Clamp(ctx.PreviewLod, 0, Mathf.Max(0, ctx.LodCount - 1));
+            }
+            else if (ctx.StandaloneMesh)
+            {
+                if (ctx.MeshEntries.Count > 0 && ctx.MeshEntries[0].renderer != null)
+                    ctx.RefreshStandalone(ctx.MeshEntries[0].renderer as MeshRenderer);
+                else
+                {
+                    ctx.Refresh(null);
+                    _cachedLodCount = 0;
+                    _cachedRendererCount = 0;
+                }
+            }
+
+            ActiveTool?.OnRefresh();
             Repaint();
         }
 
