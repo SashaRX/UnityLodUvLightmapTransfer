@@ -59,7 +59,6 @@ namespace LightmapUvTool
         public TransferQualityEvaluator.TransferReport? report;
         public GroupedShellTransfer.TransferResult shellTransferResult;
         public TransferValidator.ValidationReport validationReport;
-        public BorderRepairAdapter.AdapterReport? borderRepairReport;
 
         public bool hasExistingUv2;
         /// <summary>
