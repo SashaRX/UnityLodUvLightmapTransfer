@@ -76,13 +76,16 @@ namespace LightmapUvTool
             // Build combined BVH
             var allVerts = new List<Vector3>();
             var allTris = new List<int>();
+            var copies = new List<Mesh>();
             foreach (var (mesh, xform) in meshes)
             {
+                var readable = EnsureReadable(mesh);
+                if (readable != mesh) copies.Add(readable);
                 int baseVert = allVerts.Count;
-                var verts = mesh.vertices;
+                var verts = readable.vertices;
                 for (int i = 0; i < verts.Length; i++)
                     allVerts.Add(xform.MultiplyPoint3x4(verts[i]));
-                var tris = mesh.triangles;
+                var tris = readable.triangles;
                 for (int i = 0; i < tris.Length; i++)
                     allTris.Add(tris[i] + baseVert);
             }
@@ -105,6 +108,8 @@ namespace LightmapUvTool
                 result[mesh] = FaceAreaCorrection(rawAO[mesh], mesh, xform, bvh,
                     directions, maxDist, normalOffset, settings, groundY);
             }
+            foreach (var c in copies)
+                UnityEngine.Object.DestroyImmediate(c);
             return result;
         }
 
@@ -598,16 +603,17 @@ namespace LightmapUvTool
 
             // Per-mesh GPU buffers
             var meshBuffers = new List<(Mesh mesh, ComputeBuffer pos, ComputeBuffer norm, ComputeBuffer counters, int vertCount)>();
+            var readableCopies = new List<Mesh>();
             foreach (var (mesh, xform) in meshes)
             {
-                var verts = mesh.vertices;
-                var norms = mesh.normals;
+                var readable = EnsureReadable(mesh);
+                if (readable != mesh) readableCopies.Add(readable);
+                var verts = readable.vertices;
+                var norms = readable.normals;
                 if (norms == null || norms.Length != verts.Length)
                 {
-                    var tmp = UnityEngine.Object.Instantiate(mesh);
-                    tmp.RecalculateNormals();
-                    norms = tmp.normals;
-                    UnityEngine.Object.DestroyImmediate(tmp);
+                    readable.RecalculateNormals();
+                    norms = readable.normals;
                 }
 
                 // Transform to world space
@@ -787,6 +793,8 @@ namespace LightmapUvTool
                 UnityEngine.Object.DestroyImmediate(rt);
                 UnityEngine.Object.DestroyImmediate(depthMat);
                 if (groundQuad != null) UnityEngine.Object.DestroyImmediate(groundQuad);
+                foreach (var copy in readableCopies)
+                    UnityEngine.Object.DestroyImmediate(copy);
             }
 
             return result;
@@ -804,13 +812,16 @@ namespace LightmapUvTool
             // Build combined BVH from all meshes
             var allVerts = new List<Vector3>();
             var allTris = new List<int>();
+            var cpuCopies = new List<Mesh>();
             foreach (var (mesh, xform) in meshes)
             {
+                var readable = EnsureReadable(mesh);
+                if (readable != mesh) cpuCopies.Add(readable);
                 int baseVert = allVerts.Count;
-                var verts = mesh.vertices;
+                var verts = readable.vertices;
                 for (int i = 0; i < verts.Length; i++)
                     allVerts.Add(xform.MultiplyPoint3x4(verts[i]));
-                var tris = mesh.triangles;
+                var tris = readable.triangles;
                 for (int i = 0; i < tris.Length; i++)
                     allTris.Add(tris[i] + baseVert);
             }
@@ -849,14 +860,13 @@ namespace LightmapUvTool
 
             foreach (var (mesh, xform) in meshes)
             {
-                var verts = mesh.vertices;
-                var norms = mesh.normals;
+                var readable = EnsureReadable(mesh);
+                var verts = readable.vertices;
+                var norms = readable.normals;
                 if (norms == null || norms.Length != verts.Length)
                 {
-                    var tmp = UnityEngine.Object.Instantiate(mesh);
-                    tmp.RecalculateNormals();
-                    norms = tmp.normals;
-                    UnityEngine.Object.DestroyImmediate(tmp);
+                    readable.RecalculateNormals();
+                    norms = readable.normals;
                 }
 
                 var ao = new float[verts.Length];
@@ -959,14 +969,29 @@ namespace LightmapUvTool
 
                 processed += verts.Length;
 
+                if (readable != mesh) UnityEngine.Object.DestroyImmediate(readable);
                 result[mesh] = ao;
             }
 
+            foreach (var c in cpuCopies)
+                UnityEngine.Object.DestroyImmediate(c);
             EditorUtility.ClearProgressBar();
             return result;
         }
 
         // ── Helpers ──
+
+        /// <summary>
+        /// Returns a readable copy of the mesh if needed.
+        /// Caller must DestroyImmediate the copy when done (if copy != original).
+        /// </summary>
+        static Mesh EnsureReadable(Mesh mesh)
+        {
+            if (mesh.isReadable) return mesh;
+            var copy = UnityEngine.Object.Instantiate(mesh);
+            copy.hideFlags = HideFlags.HideAndDontSave;
+            return copy;
+        }
 
         static Vector3[] GenerateSphereDirections(int count)
         {
