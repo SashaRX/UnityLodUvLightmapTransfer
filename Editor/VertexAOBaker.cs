@@ -753,7 +753,7 @@ namespace LightmapUvTool
                             Vector4 clipCS = vp * new Vector4(dbgP[0].x, dbgP[0].y, dbgP[0].z, 1f);
                             Vector2 uvCS = new Vector2(clipCS.x / clipCS.w * 0.5f + 0.5f, clipCS.y / clipCS.w * 0.5f + 0.5f);
                             float viewZCS = (view * new Vector4(dbgP[0].x, dbgP[0].y, dbgP[0].z, 1f)).z;
-                            float depthCS = -viewZCS * invDepthRange;
+                            float depthCS = viewZCS * invDepthRange;
                             sb.Append($" | v0 proj: uv=({uvCS.x:F3},{uvCS.y:F3}) viewZ={viewZCS:F3} depth={depthCS:F4}");
                             sb.Append($" | dir={dir}");
                             UvtLog.Info(sb.ToString());
