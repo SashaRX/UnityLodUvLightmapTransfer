@@ -662,7 +662,9 @@ namespace LightmapUvTool
                     // LookAt returns camera-to-world, we need world-to-camera
                     view = view.inverse;
                     Matrix4x4 proj = Matrix4x4.Ortho(-extent, extent, -extent, extent, 0, 2 * extent);
-                    Matrix4x4 vp = proj * view;
+                    // Z adjustment for DX reversed-Z, but NO Y-flip for render texture
+                    Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(proj, false);
+                    Matrix4x4 vp = gpuProj * view;
 
                     // Render depth pass
                     cmd.Clear();
@@ -671,7 +673,7 @@ namespace LightmapUvTool
                     cmd.ClearRenderTarget(true, true, Color.white, depthClear);
                     depthMat.SetMatrix("_AO_ViewMatrix", view);
                     depthMat.SetFloat("_AO_InvDepthRange", invDepthRange);
-                    cmd.SetViewProjectionMatrices(view, proj);
+                    cmd.SetViewProjectionMatrices(view, gpuProj);
                     foreach (var (mesh, xform) in meshes)
                     {
                         for (int sub = 0; sub < mesh.subMeshCount; sub++)
