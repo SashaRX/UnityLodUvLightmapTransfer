@@ -696,54 +696,72 @@ namespace LightmapUvTool
                     // Debug: log after first direction
                     if (d == 0)
                     {
-                        // Check shader/material state
-                        UvtLog.Info($"[Vertex AO] GPU shader check: shader={depthMat.shader.name} supported={depthMat.shader.isSupported} passCount={depthMat.passCount} meshCount={meshes.Count}");
+                        UvtLog.Info($"[Vertex AO] GPU shader: {depthMat.shader.name} supported={depthMat.shader.isSupported} pass={depthMat.passCount} meshes={meshes.Count}");
 
-                        // Read rt and rtRead
-                        var dbgTex = new Texture2D(4, 4, TextureFormat.RFloat, false);
+                        // Read rt full scan
+                        var dbgFull = new Texture2D(res, res, TextureFormat.RFloat, false);
                         RenderTexture.active = rt;
-                        dbgTex.ReadPixels(new Rect(res / 2 - 2, res / 2 - 2, 4, 4), 0, 0);
-                        dbgTex.Apply();
+                        dbgFull.ReadPixels(new Rect(0, 0, res, res), 0, 0);
+                        dbgFull.Apply();
                         RenderTexture.active = null;
-                        float r00 = dbgTex.GetPixel(0, 0).r;
-                        float r11 = dbgTex.GetPixel(1, 1).r;
+                        int nonWhite = 0; float minV = float.MaxValue, maxV = float.MinValue;
+                        for (int py = 0; py < res; py += 2)
+                            for (int px = 0; px < res; px += 2)
+                            {
+                                float v = dbgFull.GetPixel(px, py).r;
+                                if (v < 0.99f) { nonWhite++; if (v < minV) minV = v; if (v > maxV) maxV = v; }
+                            }
+                        float centerV = dbgFull.GetPixel(res / 2, res / 2).r;
+                        UnityEngine.Object.DestroyImmediate(dbgFull);
+                        UvtLog.Info($"[Vertex AO] GPU rt scan: nonWhite={nonWhite}/{(res/2)*(res/2)} center={centerV:F4} range=[{minV:F4},{maxV:F4}]");
 
-                        RenderTexture.active = rtRead;
-                        dbgTex.ReadPixels(new Rect(res / 2 - 2, res / 2 - 2, 4, 4), 0, 0);
-                        dbgTex.Apply();
-                        RenderTexture.active = null;
-                        float c00 = dbgTex.GetPixel(0, 0).r;
-                        float c11 = dbgTex.GetPixel(1, 1).r;
-                        UnityEngine.Object.DestroyImmediate(dbgTex);
+                        // Project first 3 verts of each mesh to check if they land in [0,1] UV
+                        foreach (var (m, x) in meshes)
+                        {
+                            Matrix4x4 mvp = vp * x;
+                            var readable = EnsureReadable(m);
+                            var verts = readable.vertices;
+                            int n = Mathf.Min(verts.Length, 3);
+                            var sb = new System.Text.StringBuilder($"[Vertex AO] GPU clip {m.name}: ");
+                            for (int i = 0; i < n; i++)
+                            {
+                                Vector4 cs = mvp * new Vector4(verts[i].x, verts[i].y, verts[i].z, 1f);
+                                Vector3 ndc = new Vector3(cs.x / cs.w, cs.y / cs.w, cs.z / cs.w);
+                                Vector2 uv = new Vector2(ndc.x * 0.5f + 0.5f, ndc.y * 0.5f + 0.5f);
+                                float vz = (view * x * new Vector4(verts[i].x, verts[i].y, verts[i].z, 1f)).z;
+                                sb.Append($"ndc=({ndc.x:F2},{ndc.y:F2},{ndc.z:F2}) uv=({uv.x:F2},{uv.y:F2}) vZ={vz:F2} | ");
+                            }
+                            if (readable != m) UnityEngine.Object.DestroyImmediate(readable);
+                            UvtLog.Info(sb.ToString());
+                        }
 
-                        // Check what meshes are being drawn
-                        int totalSubs = 0;
-                        foreach (var (m, x) in meshes) totalSubs += m.subMeshCount;
-
-                        UvtLog.Info($"[Vertex AO] GPU debug dir0: rt=[{r00:F4},{r11:F4}] rtRead=[{c00:F4},{c11:F4}] totalSubmeshes={totalSubs} dir={dir} extent={extent:F2} gpuProj[0,0]={gpuProj[0, 0]:F4} gpuProj[1,1]={gpuProj[1, 1]:F4} gpuProj[2,2]={gpuProj[2, 2]:F4}");
-
-                        // Try rendering a test quad directly to see if anything renders at all
+                        // Test: render first mesh with ACTUAL VP (not identity)
                         var testCmd = new CommandBuffer { name = "AO_Test" };
                         testCmd.SetRenderTarget(rt);
                         testCmd.ClearRenderTarget(true, true, new Color(0.5f, 0, 0, 0), 1f);
-                        testCmd.SetViewProjectionMatrices(Matrix4x4.identity, Matrix4x4.identity);
-                        // Draw first mesh at identity to test if DrawMesh works at all
-                        if (meshes.Count > 0)
-                        {
-                            testCmd.DrawMesh(meshes[0].mesh, Matrix4x4.identity, depthMat, 0);
-                        }
+                        testCmd.SetViewProjectionMatrices(view, gpuProj);
+                        depthMat.SetMatrix("_AO_ViewMatrix", view);
+                        depthMat.SetFloat("_AO_InvDepthRange", invDepthRange);
+                        testCmd.DrawMesh(meshes[0].mesh, meshes[0].transform, depthMat, 0);
                         Graphics.ExecuteCommandBuffer(testCmd);
                         testCmd.Dispose();
 
-                        var dbgTex3 = new Texture2D(4, 4, TextureFormat.RFloat, false);
+                        var dbgTest = new Texture2D(res, res, TextureFormat.RFloat, false);
                         RenderTexture.active = rt;
-                        dbgTex3.ReadPixels(new Rect(res / 2 - 2, res / 2 - 2, 4, 4), 0, 0);
-                        dbgTex3.Apply();
+                        dbgTest.ReadPixels(new Rect(0, 0, res, res), 0, 0);
+                        dbgTest.Apply();
                         RenderTexture.active = null;
-                        float t00 = dbgTex3.GetPixel(0, 0).r;
-                        float t11 = dbgTex3.GetPixel(1, 1).r;
-                        UnityEngine.Object.DestroyImmediate(dbgTex3);
-                        UvtLog.Info($"[Vertex AO] GPU test draw: rt after identity draw=[{t00:F4},{t11:F4}] (0.5=clear, other=shader output)");
+                        int testNonClear = 0;
+                        float testMin = float.MaxValue, testMax = float.MinValue;
+                        for (int py = 0; py < res; py += 2)
+                            for (int px = 0; px < res; px += 2)
+                            {
+                                float v = dbgTest.GetPixel(px, py).r;
+                                if (Mathf.Abs(v - 0.5f) > 0.01f) { testNonClear++; if (v < testMin) testMin = v; if (v > testMax) testMax = v; }
+                            }
+                        float testCenter = dbgTest.GetPixel(res / 2, res / 2).r;
+                        UnityEngine.Object.DestroyImmediate(dbgTest);
+                        UvtLog.Info($"[Vertex AO] GPU test VP draw: nonClear={testNonClear}/{(res/2)*(res/2)} center={testCenter:F4} range=[{testMin:F4},{testMax:F4}]");
                     }
 
                     // Dispatch compute — reads from rtRead (separate from render target)
