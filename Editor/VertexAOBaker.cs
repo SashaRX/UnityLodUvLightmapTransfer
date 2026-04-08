@@ -696,6 +696,33 @@ namespace LightmapUvTool
                     // and acts as GPU sync point (like ReadPixels did in debug version)
                     Graphics.Blit(rt, rtRead);
 
+                    // Debug: log after first direction
+                    if (d == 0)
+                    {
+                        var dbgTex = new Texture2D(4, 4, TextureFormat.RFloat, false);
+                        RenderTexture.active = rtRead;
+                        dbgTex.ReadPixels(new Rect(res / 2 - 2, res / 2 - 2, 4, 4), 0, 0);
+                        dbgTex.Apply();
+                        RenderTexture.active = null;
+                        float c00 = dbgTex.GetPixel(0, 0).r;
+                        float c11 = dbgTex.GetPixel(1, 1).r;
+                        float c22 = dbgTex.GetPixel(2, 2).r;
+                        float c33 = dbgTex.GetPixel(3, 3).r;
+                        UnityEngine.Object.DestroyImmediate(dbgTex);
+
+                        // Also check rt directly
+                        var dbgTex2 = new Texture2D(4, 4, TextureFormat.RFloat, false);
+                        RenderTexture.active = rt;
+                        dbgTex2.ReadPixels(new Rect(res / 2 - 2, res / 2 - 2, 4, 4), 0, 0);
+                        dbgTex2.Apply();
+                        RenderTexture.active = null;
+                        float r00 = dbgTex2.GetPixel(0, 0).r;
+                        float r11 = dbgTex2.GetPixel(1, 1).r;
+                        UnityEngine.Object.DestroyImmediate(dbgTex2);
+
+                        UvtLog.Info($"[Vertex AO] GPU debug dir0: rt center=[{r00:F4},{r11:F4}] rtRead center=[{c00:F4},{c11:F4},{c22:F4},{c33:F4}] dir={dir} extent={extent:F2} res={res}");
+                    }
+
                     // Dispatch compute — reads from rtRead (separate from render target)
                     computeShader.SetTexture(accumKernel, "_DepthTex", rtRead);
                     computeShader.SetMatrix("_VP", vp);
@@ -717,6 +744,18 @@ namespace LightmapUvTool
                         computeShader.SetBuffer(accumKernel, "_Normals", normBuf);
                         computeShader.SetBuffer(accumKernel, "_AOCounters", counterBuf);
                         computeShader.Dispatch(accumKernel, Mathf.CeilToInt(vertCount / 64f), 1, 1);
+
+                        // Debug: log counters after first direction
+                        if (d == 0)
+                        {
+                            int n = Mathf.Min(vertCount, 5);
+                            var dbg = new uint[n * 2];
+                            counterBuf.GetData(dbg, 0, 0, dbg.Length);
+                            var sb = new System.Text.StringBuilder($"[Vertex AO] GPU counters dir0 mesh={mesh.name} verts={vertCount}: ");
+                            for (int i = 0; i < n; i++)
+                                sb.Append($"[{dbg[i * 2]},{dbg[i * 2 + 1]}] ");
+                            UvtLog.Info(sb.ToString());
+                        }
                     }
                 }
 
