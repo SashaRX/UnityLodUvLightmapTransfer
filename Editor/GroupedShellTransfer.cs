@@ -4265,7 +4265,7 @@ namespace LightmapUvTool
                 if (group.Count < 2) continue;
 
                 // For each pair in the group, check if they look like SymSplit halves:
-                // same UV0 bbox but 3D centroids on opposite sides of an axis plane.
+                // same UV0 bbox but 3D centroids separated along a dominant axis.
                 for (int i = 0; i < group.Count; i++)
                 {
                     int si = group[i];
@@ -4285,26 +4285,38 @@ namespace LightmapUvTool
                             shells[si].boundsMax.x - shells[si].boundsMin.x,
                             shells[si].boundsMax.y - shells[si].boundsMin.y);
                         if (bboxSize <= 0f) continue;
-                        if ((bboxDistMn + bboxDistMx) / bboxSize > 0.1f) continue;
+                        if ((bboxDistMn + bboxDistMx) / bboxSize > 0.15f) continue;
 
-                        // Check 3D centroids are on opposite sides of an axis plane
+                        // Check 3D centroids are separated along a dominant axis.
+                        // Use RELATIVE comparison (diff between centroids), not absolute
+                        // position vs origin — model may not be centered at origin.
                         Vector3 ci = centroids3D[si];
                         Vector3 cj = centroids3D[sj];
-                        float posDist = Vector3.Distance(ci, cj);
-                        if (posDist < 0.01f) continue; // too close in 3D, not a mirror pair
+                        Vector3 diff = ci - cj;
+                        float posDist = diff.magnitude;
+                        if (posDist < 0.1f) continue; // too close in 3D
 
-                        for (int axis = 0; axis < 3; axis++)
+                        // Find axis with largest separation (must be >30% of total distance)
+                        float absDx = Mathf.Abs(diff.x);
+                        float absDy = Mathf.Abs(diff.y);
+                        float absDz = Mathf.Abs(diff.z);
+                        float minSep = posDist * 0.3f;
+
+                        int bestAxis = -1;
+                        float bestSep = minSep;
+                        if (absDx > bestSep) { bestAxis = 0; bestSep = absDx; }
+                        if (absDy > bestSep) { bestAxis = 1; bestSep = absDy; }
+                        if (absDz > bestSep) { bestAxis = 2; bestSep = absDz; }
+
+                        if (bestAxis >= 0)
                         {
-                            if (ci[axis] * cj[axis] < 0f) // opposite sides of axis=0 plane
-                            {
-                                shells[si].symSplitAxis = axis;
-                                shells[si].symSplitSide = ci[axis] >= 0f ? +1 : -1;
-                                shells[sj].symSplitAxis = axis;
-                                shells[sj].symSplitSide = cj[axis] >= 0f ? +1 : -1;
-                                break;
-                            }
+                            // Assign sides relative to each other: positive diff = si is on + side
+                            shells[si].symSplitAxis = bestAxis;
+                            shells[si].symSplitSide = diff[bestAxis] > 0f ? +1 : -1;
+                            shells[sj].symSplitAxis = bestAxis;
+                            shells[sj].symSplitSide = diff[bestAxis] > 0f ? -1 : +1;
+                            break;
                         }
-                        if (shells[si].symSplitSide != 0) break; // found a pair for si
                     }
                 }
             }
