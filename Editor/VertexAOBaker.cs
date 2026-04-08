@@ -677,7 +677,7 @@ namespace LightmapUvTool
                     view[2, 2] = -view[2, 2];
                     view[2, 3] = -view[2, 3];
                     Matrix4x4 proj = Matrix4x4.Ortho(-extent, extent, -extent, extent, 0, 2 * extent);
-                    Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(proj, true);
+                    Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(proj, false);
                     Matrix4x4 vp = gpuProj * view;
 
                     // Render depth pass
