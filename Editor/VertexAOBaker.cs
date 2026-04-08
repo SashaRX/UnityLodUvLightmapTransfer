@@ -585,7 +585,6 @@ namespace LightmapUvTool
             int res = settings.depthResolution;
             var rt = new RenderTexture(res, res, 24, RenderTextureFormat.RFloat)
             {
-                enableRandomWrite = true,
                 filterMode = FilterMode.Point,
                 wrapMode = TextureWrapMode.Clamp,
                 hideFlags = HideFlags.HideAndDontSave
@@ -595,7 +594,6 @@ namespace LightmapUvTool
             // Second RT for compute shader to read — avoids DX11 RTV/SRV conflict
             var rtRead = new RenderTexture(res, res, 0, RenderTextureFormat.RFloat)
             {
-                enableRandomWrite = true,
                 filterMode = FilterMode.Point,
                 wrapMode = TextureWrapMode.Clamp,
                 hideFlags = HideFlags.HideAndDontSave
