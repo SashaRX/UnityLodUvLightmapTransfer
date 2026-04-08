@@ -47,8 +47,8 @@ namespace LightmapUvTool
             }
             float uv0Diag = (uvMax - uvMin).magnitude;
 
-            float uvNear = uv0Diag > 1e-6f ? uv0Diag * 0.01f : UV_NEAR_DEFAULT;
-            float posFar = meshDiag > 1e-6f ? meshDiag * 0.02f : POS_FAR_DEFAULT;
+            float uvNear = uv0Diag > 1e-6f ? uv0Diag * 0.007f : UV_NEAR_DEFAULT;
+            float posFar = meshDiag > 1e-6f ? meshDiag * 0.001f : POS_FAR_DEFAULT;
             float gridCell = uvNear * 2f;
 
             // ── Precompute per-face centroids ──
