@@ -513,10 +513,16 @@ namespace LightmapUvTool
                 for (int h = 0; h < r.hullCount && meshIdx < savedMeshAssets.Count; h++, meshIdx++)
                 {
                     var m = savedMeshAssets[meshIdx];
-                    posOffsets.Add(allPos.Count);
+                    int posOffset = allPos.Count;
+                    posOffsets.Add(posOffset);
                     triOffsets.Add(allTri.Count);
                     allPos.AddRange(m.vertices);
-                    allTri.AddRange(m.triangles);
+                    // Rebase triangle indices to global vertex offset so
+                    // GetCollisionMeshesFromSidecar can correctly extract per-hull data.
+                    var localTris = m.triangles;
+                    for (int ti = 0; ti < localTris.Length; ti++)
+                        localTris[ti] += posOffset;
+                    allTri.AddRange(localTris);
                 }
 
                 var entry = new CollisionMeshEntry

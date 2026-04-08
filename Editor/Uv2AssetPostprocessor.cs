@@ -115,10 +115,11 @@ namespace LightmapUvTool
 
             // Load sidecar without triggering import loop
             var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
-            if (data == null || data.entries.Count == 0) return;
+            if (data == null) return;
 
             // Strip extra attributes only from collision meshes generated and tracked
             // by this tool in the sidecar. Do not touch arbitrary user-authored _COL nodes.
+            // Must run before the UV2 early-return — a sidecar may have only collision entries.
             if (data.collisionEntries != null && data.collisionEntries.Count > 0)
             {
                 foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
@@ -138,6 +139,8 @@ namespace LightmapUvTool
                     mesh.RecalculateBounds();
                 }
             }
+
+            if (data.entries == null || data.entries.Count == 0) return;
 
             var filters = root.GetComponentsInChildren<MeshFilter>(true);
             var skinned = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);

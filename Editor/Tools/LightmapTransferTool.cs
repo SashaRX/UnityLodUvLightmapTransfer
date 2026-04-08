@@ -1192,6 +1192,7 @@ namespace LightmapUvTool
                                 stripped.SetTriangles(tmp.GetTriangles(s), s);
                             UnityEngine.Object.DestroyImmediate(tmp);
                         }
+                        stripped.RecalculateNormals();
                         stripped.RecalculateBounds();
                         colMf.sharedMesh = stripped;
                     }
