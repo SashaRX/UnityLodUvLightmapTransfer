@@ -727,7 +727,7 @@ namespace LightmapUvTool
                         // Try rendering a test quad directly to see if anything renders at all
                         var testCmd = new CommandBuffer { name = "AO_Test" };
                         testCmd.SetRenderTarget(rt);
-                        testCmd.ClearRenderTarget(true, true, new Color(0.5f, 0, 0, 0), depthClear);
+                        testCmd.ClearRenderTarget(true, true, new Color(0.5f, 0, 0, 0), 1f);
                         testCmd.SetViewProjectionMatrices(Matrix4x4.identity, Matrix4x4.identity);
                         // Draw first mesh at identity to test if DrawMesh works at all
                         if (meshes.Count > 0)
