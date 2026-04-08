@@ -13,7 +13,7 @@ Shader "Hidden/LightmapUvTool/VertexAODepth"
         Pass
         {
             ZWrite On
-            ZTest Always
+            ZTest LEqual
             Cull [_Cull]
 
             CGPROGRAM

@@ -695,79 +695,7 @@ namespace LightmapUvTool
                     Graphics.ExecuteCommandBuffer(cmd);
 
                     // Blit to separate texture — resolves DX11 RTV/SRV conflict
-                    // and acts as GPU sync point (like ReadPixels did in debug version)
                     Graphics.Blit(rt, rtRead);
-
-                    // Debug: log after first direction
-                    if (d == 0)
-                    {
-                        UvtLog.Info($"[Vertex AO] GPU shader: {depthMat.shader.name} supported={depthMat.shader.isSupported} pass={depthMat.passCount} meshes={meshes.Count}");
-
-                        // Read rt full scan
-                        var dbgFull = new Texture2D(res, res, TextureFormat.RFloat, false);
-                        RenderTexture.active = rt;
-                        dbgFull.ReadPixels(new Rect(0, 0, res, res), 0, 0);
-                        dbgFull.Apply();
-                        RenderTexture.active = null;
-                        int nonWhite = 0; float minV = float.MaxValue, maxV = float.MinValue;
-                        for (int py = 0; py < res; py += 2)
-                            for (int px = 0; px < res; px += 2)
-                            {
-                                float v = dbgFull.GetPixel(px, py).r;
-                                if (v < 0.99f) { nonWhite++; if (v < minV) minV = v; if (v > maxV) maxV = v; }
-                            }
-                        float centerV = dbgFull.GetPixel(res / 2, res / 2).r;
-                        UnityEngine.Object.DestroyImmediate(dbgFull);
-                        UvtLog.Info($"[Vertex AO] GPU rt scan: nonWhite={nonWhite}/{(res/2)*(res/2)} center={centerV:F4} range=[{minV:F4},{maxV:F4}]");
-
-                        // Project first 3 verts of each mesh to check if they land in [0,1] UV
-                        foreach (var (m, x) in meshes)
-                        {
-                            Matrix4x4 mvp = vp * x;
-                            var readable = EnsureReadable(m);
-                            var verts = readable.vertices;
-                            int n = Mathf.Min(verts.Length, 3);
-                            var sb = new System.Text.StringBuilder($"[Vertex AO] GPU clip {m.name}: ");
-                            for (int i = 0; i < n; i++)
-                            {
-                                Vector4 cs = mvp * new Vector4(verts[i].x, verts[i].y, verts[i].z, 1f);
-                                Vector3 ndc = new Vector3(cs.x / cs.w, cs.y / cs.w, cs.z / cs.w);
-                                Vector2 uv = new Vector2(ndc.x * 0.5f + 0.5f, ndc.y * 0.5f + 0.5f);
-                                float vz = (view * x * new Vector4(verts[i].x, verts[i].y, verts[i].z, 1f)).z;
-                                sb.Append($"ndc=({ndc.x:F2},{ndc.y:F2},{ndc.z:F2}) uv=({uv.x:F2},{uv.y:F2}) vZ={vz:F2} | ");
-                            }
-                            if (readable != m) UnityEngine.Object.DestroyImmediate(readable);
-                            UvtLog.Info(sb.ToString());
-                        }
-
-                        // Test: render first mesh with ACTUAL VP (not identity)
-                        var testCmd = new CommandBuffer { name = "AO_Test" };
-                        testCmd.SetRenderTarget(rt);
-                        testCmd.ClearRenderTarget(true, true, new Color(0.5f, 0, 0, 0), 1f);
-                        testCmd.SetViewProjectionMatrices(view, gpuProj);
-                        depthMat.SetMatrix("_AO_ViewMatrix", view);
-                        depthMat.SetFloat("_AO_InvDepthRange", invDepthRange);
-                        testCmd.DrawMesh(meshes[0].mesh, meshes[0].transform, depthMat, 0);
-                        Graphics.ExecuteCommandBuffer(testCmd);
-                        testCmd.Dispose();
-
-                        var dbgTest = new Texture2D(res, res, TextureFormat.RFloat, false);
-                        RenderTexture.active = rt;
-                        dbgTest.ReadPixels(new Rect(0, 0, res, res), 0, 0);
-                        dbgTest.Apply();
-                        RenderTexture.active = null;
-                        int testNonClear = 0;
-                        float testMin = float.MaxValue, testMax = float.MinValue;
-                        for (int py = 0; py < res; py += 2)
-                            for (int px = 0; px < res; px += 2)
-                            {
-                                float v = dbgTest.GetPixel(px, py).r;
-                                if (Mathf.Abs(v - 0.5f) > 0.01f) { testNonClear++; if (v < testMin) testMin = v; if (v > testMax) testMax = v; }
-                            }
-                        float testCenter = dbgTest.GetPixel(res / 2, res / 2).r;
-                        UnityEngine.Object.DestroyImmediate(dbgTest);
-                        UvtLog.Info($"[Vertex AO] GPU test VP draw: nonClear={testNonClear}/{(res/2)*(res/2)} center={testCenter:F4} range=[{testMin:F4},{testMax:F4}]");
-                    }
 
                     // Dispatch compute — reads from rtRead (separate from render target)
                     computeShader.SetTexture(accumKernel, "_DepthTex", rtRead);
@@ -790,18 +718,6 @@ namespace LightmapUvTool
                         computeShader.SetBuffer(accumKernel, "_Normals", normBuf);
                         computeShader.SetBuffer(accumKernel, "_AOCounters", counterBuf);
                         computeShader.Dispatch(accumKernel, Mathf.CeilToInt(vertCount / 64f), 1, 1);
-
-                        // Debug: log counters after first direction
-                        if (d == 0)
-                        {
-                            int n = Mathf.Min(vertCount, 5);
-                            var dbg = new uint[n * 2];
-                            counterBuf.GetData(dbg, 0, 0, dbg.Length);
-                            var sb = new System.Text.StringBuilder($"[Vertex AO] GPU counters dir0 mesh={mesh.name} verts={vertCount}: ");
-                            for (int i = 0; i < n; i++)
-                                sb.Append($"[{dbg[i * 2]},{dbg[i * 2 + 1]}] ");
-                            UvtLog.Info(sb.ToString());
-                        }
                     }
                 }
 
