@@ -666,7 +666,7 @@ namespace LightmapUvTool
                     // Build ortho view/proj matrices
                     Vector3 up = Mathf.Abs(Vector3.Dot(dir, Vector3.up)) > 0.99f
                         ? Vector3.forward : Vector3.up;
-                    Matrix4x4 view = Matrix4x4.LookAt(center - dir * extent, center, up);
+                    Matrix4x4 view = Matrix4x4.LookAt(center + dir * extent, center, up);
                     // LookAt returns camera-to-world, we need world-to-camera
                     view = view.inverse;
                     // Flip Z axis: LookAt gives +Z forward, but Ortho expects -Z forward (OpenGL convention)
