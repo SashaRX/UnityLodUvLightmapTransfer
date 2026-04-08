@@ -662,21 +662,16 @@ namespace LightmapUvTool
                     // LookAt returns camera-to-world, we need world-to-camera
                     view = view.inverse;
                     Matrix4x4 proj = Matrix4x4.Ortho(-extent, extent, -extent, extent, 0, 2 * extent);
-                    // GPU projection for UV mapping (handles Y-flip for render textures)
-                    Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(proj, true);
-                    Matrix4x4 vp = gpuProj * view;
+                    Matrix4x4 vp = proj * view;
 
                     // Render depth pass
                     cmd.Clear();
                     cmd.SetRenderTarget(rt);
                     float depthClear = SystemInfo.usesReversedZBuffer ? 0f : 1f;
                     cmd.ClearRenderTarget(true, true, Color.white, depthClear);
-                    // Pass raw view matrix to depth shader for platform-independent depth
                     depthMat.SetMatrix("_AO_ViewMatrix", view);
                     depthMat.SetFloat("_AO_InvDepthRange", invDepthRange);
-                    // Use gpuProj for SetViewProjectionMatrices — it may NOT apply
-                    // GL.GetGPUProjectionMatrix internally in CommandBuffer context
-                    cmd.SetViewProjectionMatrices(view, gpuProj);
+                    cmd.SetViewProjectionMatrices(view, proj);
                     foreach (var (mesh, xform) in meshes)
                     {
                         for (int sub = 0; sub < mesh.subMeshCount; sub++)
