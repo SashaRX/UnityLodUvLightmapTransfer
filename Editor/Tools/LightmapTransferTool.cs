@@ -1168,33 +1168,31 @@ namespace LightmapUvTool
                         }
                     }
 
-                    // Strip extra attributes (normals, tangents, UVs, colors) from _COL meshes
+                    // Strip extra attributes (normals, tangents, UVs, colors) from _COL meshes.
+                    // Keep normals so the FBX Exporter can write valid geometry.
                     foreach (var colMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
                     {
                         if (colMf == null || colMf.sharedMesh == null) continue;
                         if (!IsCollisionNodeName(colMf.gameObject.name)) continue;
                         var srcCol = colMf.sharedMesh;
-                        // Clone to make readable + strip
-                        var stripped = new Mesh { name = srcCol.name };
-                        // Need readable source — clone via Instantiate
                         if (srcCol.isReadable)
                         {
+                            var stripped = new Mesh { name = srcCol.name };
                             stripped.SetVertices(srcCol.vertices);
                             for (int s = 0; s < srcCol.subMeshCount; s++)
                                 stripped.SetTriangles(srcCol.GetTriangles(s), s);
+                            stripped.RecalculateNormals();
+                            stripped.RecalculateBounds();
+                            colMf.sharedMesh = stripped;
                         }
                         else
                         {
-                            // Force-read via Instantiate (copies GPU data)
-                            var tmp = UnityEngine.Object.Instantiate(srcCol);
-                            stripped.SetVertices(tmp.vertices);
-                            for (int s = 0; s < tmp.subMeshCount; s++)
-                                stripped.SetTriangles(tmp.GetTriangles(s), s);
-                            UnityEngine.Object.DestroyImmediate(tmp);
+                            // Non-readable FBX sub-asset — can't strip attributes and
+                            // the FBX Exporter can't export it either. Log a warning;
+                            // the collision data should normally come from the sidecar.
+                            UvtLog.Warn($"[FBX Export] Collision mesh '{srcCol.name}' is not readable — " +
+                                        "skipping strip. Re-save collision to sidecar to fix.");
                         }
-                        stripped.RecalculateNormals();
-                        stripped.RecalculateBounds();
-                        colMf.sharedMesh = stripped;
                     }
 
                     var exportOptions = new ExportModelOptions { ExportFormat = ExportFormat.Binary };
@@ -1242,27 +1240,48 @@ namespace LightmapUvTool
             if (overwriteSource && allGroupsSucceeded)
                 LodGenerationTool.ActiveInstance?.ClearGeneratedLods();
 
-            // For direct FBX workflow, do not keep sidecars after successful overwrite:
-            // UV2/collision data is already baked into the FBX.
+            // UV2 data is now baked into the FBX — clear stale UV2 entries from sidecars.
+            // Keep collision entries so subsequent exports can reconstruct readable _COL
+            // meshes (FBX sub-asset meshes are non-readable and can't be re-exported).
             if (overwriteSource && overwrittenFbxPaths.Count > 0)
-                DeleteSidecarsForFbxPaths(overwrittenFbxPaths);
+                ClearUv2EntriesForFbxPaths(overwrittenFbxPaths);
 
             AssetDatabase.Refresh();
 #endif
         }
 
-        static void DeleteSidecarsForFbxPaths(IEnumerable<string> fbxPaths)
+        static void ClearUv2EntriesForFbxPaths(IEnumerable<string> fbxPaths)
         {
-            int deleted = 0;
+            int cleared = 0;
             foreach (var fbxPath in fbxPaths)
             {
                 if (string.IsNullOrEmpty(fbxPath)) continue;
                 string sidecarPath = Uv2DataAsset.GetSidecarPath(fbxPath);
-                if (AssetDatabase.DeleteAsset(sidecarPath))
-                    deleted++;
+                var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+                if (data == null) continue;
+
+                bool hasCollision = data.collisionEntries != null && data.collisionEntries.Count > 0;
+                bool hasUv2 = data.entries != null && data.entries.Count > 0;
+
+                if (hasUv2)
+                {
+                    data.entries.Clear();
+                    cleared++;
+                }
+
+                if (hasCollision)
+                {
+                    // Keep sidecar alive for collision data
+                    EditorUtility.SetDirty(data);
+                }
+                else if (hasUv2)
+                {
+                    // No collision entries — sidecar is now empty, delete it
+                    AssetDatabase.DeleteAsset(sidecarPath);
+                }
             }
-            if (deleted > 0)
-                UvtLog.Info($"[FBX Export] Deleted {deleted} sidecar asset(s) after overwrite.");
+            if (cleared > 0)
+                UvtLog.Info($"[FBX Export] Cleared UV2 entries from {cleared} sidecar(s) after overwrite (collision entries preserved).");
         }
 
         static Renderer FindLastLodRenderer(List<(MeshEntry entry, Mesh resultMesh)> entries)
