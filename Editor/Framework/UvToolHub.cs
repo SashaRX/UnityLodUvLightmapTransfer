@@ -779,6 +779,7 @@ namespace LightmapUvTool
 
         }
 
+        [MenuItem("Tools/Mesh Lab: Delete All Sidecars and Reset Imports")]
         static void NukeAllSidecars()
         {
             // Phase 1: Find and delete all sidecar assets
