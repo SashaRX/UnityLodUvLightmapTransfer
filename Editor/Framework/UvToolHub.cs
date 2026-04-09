@@ -764,12 +764,37 @@ namespace LightmapUvTool
 #else
             EditorGUILayout.HelpBox("Install com.unity.formats.fbx for FBX export.", MessageType.Info);
 #endif
-            EditorGUILayout.Space(2);
-            if (GUILayout.Button("Apply UV2 (sidecar)", EditorStyles.miniButton))
+            EditorGUILayout.Space(4);
+            // ── Sidecar UV2 mode ──
+            bool sidecarEnabled = PostprocessorDefineManager.IsEnabled();
+            EditorGUI.BeginChangeCheck();
+            sidecarEnabled = EditorGUILayout.ToggleLeft("Sidecar UV2 Mode", sidecarEnabled);
+            if (EditorGUI.EndChangeCheck())
             {
-                foreach (var tool in tools)
-                    if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
+                if (sidecarEnabled)
+                {
+                    if (EditorUtility.DisplayDialog("Enable Sidecar Mode",
+                        "Adds LIGHTMAP_UV_TOOL_POSTPROCESSOR define.\n\n" +
+                        "Unity will recompile and reimport all models (one-time).\n" +
+                        "Required for non-destructive UV2 via sidecar.",
+                        "Enable", "Cancel"))
+                        PostprocessorDefineManager.SetEnabled(true);
+                }
+                else
+                {
+                    PostprocessorDefineManager.SetEnabled(false);
+                }
             }
+
+            if (sidecarEnabled)
+            {
+                if (GUILayout.Button("Apply UV2 (sidecar)", EditorStyles.miniButton))
+                {
+                    foreach (var tool in tools)
+                        if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
+                }
+            }
+
             EditorGUILayout.Space(1);
             if (GUILayout.Button("Save Mesh Assets", EditorStyles.miniButton))
             {
@@ -842,6 +867,16 @@ namespace LightmapUvTool
             }
 
             AssetDatabase.Refresh();
+            // Offer to disable sidecar mode if active
+            if (PostprocessorDefineManager.IsEnabled())
+            {
+                if (EditorUtility.DisplayDialog("Disable Sidecar Mode?",
+                    "Sidecar UV2 Mode is currently enabled.\n" +
+                    "Disable it to prevent the postprocessor from running on reimport?",
+                    "Disable", "Keep Enabled"))
+                    PostprocessorDefineManager.SetEnabled(false);
+            }
+
             UvtLog.Info($"[Cleanup] Deleted {deleted} sidecar(s), restored import settings on {restored} FBX file(s).");
             EditorUtility.DisplayDialog("Done",
                 $"Deleted {deleted} sidecar(s).\nRestored import settings on {restored} FBX file(s).",
