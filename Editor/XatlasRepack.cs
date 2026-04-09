@@ -144,7 +144,7 @@ namespace LightmapUvTool
             float padV = atlasHeight > 0 ? (float)padding / atlasHeight : 0f;
             // Centroid proximity threshold: shells closer than this are considered
             // packed at the same position (e.g., SymSplit halves with identical UV0 shape).
-            float centroidEps = atlasWidth > 0 ? 8f / atlasWidth : 0.02f;
+            float centroidEps = atlasWidth > 0 ? 4f / atlasWidth : 0.02f;
             float centroidEpsSq = centroidEps * centroidEps;
 
             int totalShifted = 0;
