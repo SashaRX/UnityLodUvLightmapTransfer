@@ -861,6 +861,7 @@ namespace LightmapUvTool
                 AssetDatabase.SaveAssets();
 
                 // Reimport FBX so the postprocessor replays UV2
+                Uv2AssetPostprocessor.managedImportPaths.Add(kv.Key);
                 AssetDatabase.ImportAsset(kv.Key);
             }
 

@@ -31,6 +31,14 @@ namespace LightmapUvTool
         /// </summary>
         internal static readonly HashSet<string> fbxOverwritePaths = new HashSet<string>();
 
+        /// <summary>
+        /// Paths where OnPreprocessModel is allowed to modify import settings.
+        /// The tool must explicitly register paths before triggering reimport.
+        /// This prevents the package from silently changing import settings on
+        /// FBX files that happen to have a sidecar nearby.
+        /// </summary>
+        internal static readonly HashSet<string> managedImportPaths = new HashSet<string>();
+
         struct ApplyStats
         {
             public int fbxVerts;              // vertex count from fresh FBX import
@@ -53,27 +61,21 @@ namespace LightmapUvTool
             if (bypassPaths.Contains(assetPath))
                 return;
 
+            // Only modify import settings when the tool explicitly registered this path.
+            // This prevents the package from silently breaking FBX files on install/reimport.
             bool isFbxOverwrite = fbxOverwritePaths.Contains(assetPath);
-            string sidecarPath = Uv2DataAsset.GetSidecarPath(assetPath);
-            if (!isFbxOverwrite && !System.IO.File.Exists(sidecarPath)) return;
+            bool isManaged = managedImportPaths.Remove(assetPath);
+            if (!isFbxOverwrite && !isManaged) return;
 
-            // Disable Unity's built-in lightmap UV generation — we provide our own UV2.
-            // Unity's generator may split vertices along UV seams, changing vertex count
-            // and making our stored remap table invalid.
             if (modelImporter.generateSecondaryUV)
             {
                 modelImporter.generateSecondaryUV = false;
-                UvtLog.Info($"[UV2 Preprocess] Disabled generateSecondaryUV on '{assetPath}' (sidecar provides UV2)");
+                UvtLog.Info($"[UV2 Preprocess] Disabled generateSecondaryUV on '{assetPath}'");
             }
-
-            // Disable Unity's post-import mesh processing that can modify our reconstructed mesh:
-            // - weldVertices: merges vertices at same position, destroying UV seams we need
-            // - meshCompression: quantizes positions, causing vertex shifts
-            // - optimizeMeshPolygons/Vertices: reorders data (usually harmless but disable to be safe)
             if (modelImporter.weldVertices)
             {
                 modelImporter.weldVertices = false;
-                UvtLog.Info($"[UV2 Preprocess] Disabled weldVertices on '{assetPath}' (postprocessor manages mesh topology)");
+                UvtLog.Info($"[UV2 Preprocess] Disabled weldVertices on '{assetPath}'");
             }
             if (modelImporter.meshCompression != ModelImporterMeshCompression.Off)
             {
