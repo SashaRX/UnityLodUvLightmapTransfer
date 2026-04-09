@@ -114,8 +114,8 @@ namespace LightmapUvTool
                             float ay = Mathf.Abs(mid.y);
                             float az = Mathf.Abs(mid.z);
 
-                            if (ax <= ay && ax <= az) axisVotes[0]++;
-                            else if (ay <= az) axisVotes[1]++;
+                            if (ax < ay && ax < az) axisVotes[0]++;
+                            else if (ay < az) axisVotes[1]++;
                             else axisVotes[2]++;
                             found = true;
                         }

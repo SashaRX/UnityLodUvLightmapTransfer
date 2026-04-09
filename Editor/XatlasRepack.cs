@@ -144,7 +144,7 @@ namespace LightmapUvTool
             float padV = atlasHeight > 0 ? (float)padding / atlasHeight : 0f;
             // Centroid proximity threshold: shells closer than this are considered
             // packed at the same position (e.g., SymSplit halves with identical UV0 shape).
-            float centroidEps = atlasWidth > 0 ? 2f / atlasWidth : 0.01f;
+            float centroidEps = atlasWidth > 0 ? 4f / atlasWidth : 0.02f;
             float centroidEpsSq = centroidEps * centroidEps;
 
             int totalShifted = 0;
@@ -206,7 +206,7 @@ namespace LightmapUvTool
                                     float areaI = (mx[i].x - mn[i].x) * (mx[i].y - mn[i].y);
                                     float areaJ = (mx[j].x - mn[j].x) * (mx[j].y - mn[j].y);
                                     float smaller = Mathf.Min(areaI, areaJ);
-                                    bboxOverlap = smaller > 0f && overlapArea / smaller >= 0.5f;
+                                    bboxOverlap = smaller > 0f && overlapArea / smaller >= 0.25f;
                                 }
                             }
 
