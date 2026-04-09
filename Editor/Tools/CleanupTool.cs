@@ -877,6 +877,37 @@ namespace LightmapUvTool
                             break;
                         }
 
+                        // Safety: don't strip if mesh is shared with a Renderer (would destroy render data)
+                        {
+                            bool sharedWithRenderer = false;
+                            var mfCheck = issue.gameObject.GetComponent<MeshFilter>();
+                            if (mfCheck != null)
+                            {
+                                var rendCheck = issue.gameObject.GetComponent<MeshRenderer>();
+                                if (rendCheck != null && rendCheck.enabled)
+                                    sharedWithRenderer = true;
+                            }
+                            if (!sharedWithRenderer)
+                            {
+                                // Also check parent/children with same mesh
+                                var parentFilters = issue.gameObject.GetComponentsInParent<MeshFilter>(true);
+                                foreach (var pf in parentFilters)
+                                {
+                                    if (pf.gameObject == issue.gameObject) continue;
+                                    if (pf.sharedMesh == issue.mesh)
+                                    {
+                                        var pr = pf.GetComponent<MeshRenderer>();
+                                        if (pr != null && pr.enabled) { sharedWithRenderer = true; break; }
+                                    }
+                                }
+                            }
+                            if (sharedWithRenderer)
+                            {
+                                UvtLog.Warn($"Skipping {issue.mesh.name} — mesh is shared with an active Renderer.");
+                                break;
+                            }
+                        }
+
                         if (issue.mesh.isReadable)
                         {
                             Undo.RecordObject(issue.mesh, "Strip Collider Attributes");
@@ -903,6 +934,7 @@ namespace LightmapUvTool
                                     if (!wasReadable)
                                     {
                                         imp.isReadable = true;
+                                        Uv2AssetPostprocessor.bypassPaths.Add(assetPath);
                                         imp.SaveAndReimport();
                                     }
 
@@ -934,6 +966,7 @@ namespace LightmapUvTool
                                     if (!wasReadable)
                                     {
                                         imp.isReadable = false;
+                                        Uv2AssetPostprocessor.bypassPaths.Add(assetPath);
                                         imp.SaveAndReimport();
                                     }
                                 }
@@ -1559,13 +1592,11 @@ namespace LightmapUvTool
                 Undo.RecordObject(mesh, "Strip Empty Channels");
                 foreach (int ch in channels)
                     mesh.SetUVs(ch, (List<Vector2>)null);
-                if (uvEntry.hasZeroColors)
-                    mesh.colors = null;
+                // Note: vertex colors are NOT auto-stripped — they may contain
+                // valid AO/data even when all zeros (full occlusion).
 
-                stripped += channels.Count + (uvEntry.hasZeroColors ? 1 : 0);
-                UvtLog.Info($"Stripped {channels.Count} empty UV channel(s)" +
-                            (uvEntry.hasZeroColors ? " + zero vertex colors" : "") +
-                            $" from {mesh.name}");
+                stripped += channels.Count;
+                UvtLog.Info($"Stripped {channels.Count} empty UV channel(s) from {mesh.name}");
             }
 
             Undo.CollapseUndoOperations(undoGroup);

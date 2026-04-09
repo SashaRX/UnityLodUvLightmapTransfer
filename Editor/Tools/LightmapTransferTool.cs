@@ -1078,9 +1078,12 @@ namespace LightmapUvTool
                     foreach (var (entry, resultMesh) in entries)
                     {
                         var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
-                        Mesh srcUvMesh = entry.fbxMesh ?? entry.originalMesh;
-                        if (srcUvMesh != null)
-                            PreserveUvChannels(exportMesh, srcUvMesh);
+                        // Copy UV channels from fbxMesh first (base UVs),
+                        // then from originalMesh (has AO and other tool modifications).
+                        if (entry.fbxMesh != null)
+                            PreserveUvChannels(exportMesh, entry.fbxMesh);
+                        if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
+                            PreserveUvChannels(exportMesh, entry.originalMesh);
                         string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
                         meshReplacements[meshName] = exportMesh;
                     }
@@ -1125,8 +1128,10 @@ namespace LightmapUvTool
                         }
                         var newMf = child.AddComponent<MeshFilter>();
                         var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
-                        Mesh srcUvMesh = entry.fbxMesh ?? entry.originalMesh;
-                        if (srcUvMesh != null) PreserveUvChannels(exportMesh, srcUvMesh);
+                        if (entry.fbxMesh != null)
+                            PreserveUvChannels(exportMesh, entry.fbxMesh);
+                        if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
+                            PreserveUvChannels(exportMesh, entry.originalMesh);
                         newMf.sharedMesh = exportMesh;
                         var mr = child.AddComponent<MeshRenderer>();
                         if (lastLodRendererTemplate != null)
