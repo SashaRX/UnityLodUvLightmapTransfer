@@ -76,3 +76,49 @@
 
 ### Фаза 4: Coverage (высокий риск, исследование)
 - Реактивация coverage без смены transfer mode
+
+---
+
+## FBX Export & Collision — Known Issues & Constraints
+
+> Обновлено: 2026-04-09
+
+### AssetPostprocessor вызывает массовый реимпорт
+- Наличие `OnPreprocessModel` / `OnPostprocessModel` в пакете заставляет Unity реимпортировать ВСЕ модели при установке.
+- На больших проектах (тысячи FBX) это ломает collision meshes (0 вершин).
+- **Решение**: `OnPostprocessModel` под `#if LIGHTMAP_UV_TOOL_POSTPROCESSOR` — по умолчанию выключен. `OnPreprocessModel` заменён на статический `PrepareImportSettings()`. Пакет полностью пассивен при установке.
+
+### Collision mesh (_COL) — нормали обязательны для FBX Exporter
+- Unity FBX Exporter (`ModelExporter.ExportObjects`) не может корректно записать mesh без нормалей → 0 вершин после реимпорта.
+- **Решение**: `RecalculateNormals()` перед экспортом. Collision mesh в FBX хранит Position + Normal + Tangent.
+- Tangent-ы добавляет FBX Importer при реимпорте — безвредно, MeshCollider их игнорирует.
+- Убрать нормали/tangent-ы без поломки экспорта нельзя (ограничение Unity FBX Exporter).
+
+### Collision mesh — isReadable = false
+- FBX sub-asset meshes по умолчанию не readable.
+- `Object.Instantiate(mesh)` НЕ гарантирует readable копию во всех версиях Unity.
+- **Решение**: перед экспортом временно включается `isReadable = true` на ModelImporter, с bypass для постпроцессора. Для overwrite пути `.meta` восстанавливается из backup.
+
+### Sidecar collision entries — не удалять при FBX overwrite
+- Старый код удалял весь sidecar (включая collision entries) после overwrite.
+- При повторном экспорте collision meshes были недоступны (non-readable FBX sub-assets).
+- **Решение**: `ClearUv2EntriesForFbxPaths()` — удаляет только UV2 entries, сохраняет collision entries.
+
+### Convex hull triangle indices — глобальный offset
+- `SaveToSidecar()` хранит triangle indices как flattened array. Для multi-hull convex decomposition индексы должны быть rebased к глобальному vertex offset.
+- Без rebasing: hull 1+ получает отрицательные индексы → сломанный mesh.
+
+### Import settings (weldVertices и т.д.) безопасно оставлять
+- `PrepareImportSettings()` отключает `weldVertices`, `optimizeMeshPolygons`, `optimizeMeshVertices` для корректной работы UV2 remap.
+- Эти настройки сохраняются в `.meta` и **не ломают mesh-и** — просто отключают minor оптимизации.
+- НЕ нужно восстанавливать после экспорта. Нюк-кнопка НЕ трогает `.meta`.
+
+### AO данные в UV каналах — PreserveUvChannels
+- AO записывается в `originalMesh` (рабочая копия), но экспорт берёт `resultMesh` (repacked/transferred).
+- `PreserveUvChannels()` копирует UV каналы из source mesh если export mesh их не имеет.
+- **Важно**: копировать из ОБОИХ `fbxMesh` (базовые UV) И `originalMesh` (AO и другие модификации).
+
+### Cleanup — опасные операции
+- `FixColliders()` → `mesh.Clear()` стирает ВСЕ атрибуты. Не стрипать если mesh shared с Renderer.
+- `FixMeshStripUvs()` — vertex colors `(0,0,0,0)` может быть валидное AO (полная окклюзия). Авто-стрип colors убран.
+- `SaveAndReimport()` в cleanup — добавлять `bypassPaths` чтобы постпроцессор не вмешался.
