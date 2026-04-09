@@ -860,9 +860,9 @@ namespace LightmapUvTool
                 EditorUtility.SetDirty(data);
                 AssetDatabase.SaveAssets();
 
-                // Reimport FBX so the postprocessor replays UV2
+                // Prepare import settings and reimport FBX so the postprocessor replays UV2
                 Uv2AssetPostprocessor.managedImportPaths.Add(kv.Key);
-                AssetDatabase.ImportAsset(kv.Key);
+                Uv2AssetPostprocessor.PrepareImportSettings(kv.Key);
             }
 
             UvtLog.Info($"[Apply] Done — {fbxGroups.Count} FBX(es) updated.");

@@ -12,8 +12,10 @@ namespace LightmapUvTool
 {
     public class Uv2AssetPostprocessor : AssetPostprocessor
     {
+#if LIGHTMAP_UV_TOOL_POSTPROCESSOR
         // Run well after Bakery and other postprocessors (default order = 0).
         public override int GetPostprocessOrder() => 10000;
+#endif
 
         /// <summary>
         /// Paths to bypass during the next reimport. When ApplyUv2ToFbx needs the
@@ -52,17 +54,17 @@ namespace LightmapUvTool
             public bool stale;                // fingerprint mismatch detected
         }
 
-        void OnPreprocessModel()
+        /// <summary>
+        /// Prepares ModelImporter settings before reimport. Called directly by the tool
+        /// instead of OnPreprocessModel to avoid triggering mass reimport on package install.
+        /// </summary>
+        internal static void PrepareImportSettings(string assetPath)
         {
-            var modelImporter = assetImporter as ModelImporter;
+            if (bypassPaths.Contains(assetPath)) return;
+
+            var modelImporter = AssetImporter.GetAtPath(assetPath) as ModelImporter;
             if (modelImporter == null) return;
 
-            // Bypass: ApplyUv2ToFbx needs the raw FBX mesh without any modifications.
-            if (bypassPaths.Contains(assetPath))
-                return;
-
-            // Only modify import settings when the tool explicitly registered this path.
-            // This prevents the package from silently breaking FBX files on install/reimport.
             bool isFbxOverwrite = fbxOverwritePaths.Contains(assetPath);
             bool isManaged = managedImportPaths.Contains(assetPath);
             if (!isFbxOverwrite && !isManaged) return;
@@ -92,8 +94,13 @@ namespace LightmapUvTool
                 modelImporter.optimizeMeshVertices = false;
                 UvtLog.Info($"[UV2 Preprocess] Disabled optimizeMeshVertices on '{assetPath}'");
             }
+            modelImporter.SaveAndReimport();
         }
 
+// OnPostprocessModel is gated behind LIGHTMAP_UV_TOOL_POSTPROCESSOR to prevent
+// Unity from triggering mass reimport of all models when the package is installed.
+// The define is added automatically when the user first applies UV2 via sidecar.
+#if LIGHTMAP_UV_TOOL_POSTPROCESSOR
         void OnPostprocessModel(GameObject root)
         {
             string modelPath = assetPath;
@@ -120,7 +127,6 @@ namespace LightmapUvTool
             if (data == null) return;
 
             // Collision stripping only runs when explicitly requested via managedImportPaths
-            // to prevent the package from silently modifying _COL meshes on install/reimport.
             if (managedImportPaths.Contains(modelPath) &&
                 data.collisionEntries != null && data.collisionEntries.Count > 0)
             {
@@ -267,6 +273,7 @@ namespace LightmapUvTool
                 };
             }
         }
+#endif // LIGHTMAP_UV_TOOL_POSTPROCESSOR
 
         static bool IsManagedCollisionObjectName(string objectName, Uv2DataAsset data)
         {
