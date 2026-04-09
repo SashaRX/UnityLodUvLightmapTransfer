@@ -135,7 +135,7 @@ namespace LightmapUvTool
         internal static int FixOverlappingUv2Shells(
             Vector2[] uv2, List<UvShell> shells, List<List<int>> overlapGroups,
             uint padding, uint atlasWidth, uint atlasHeight,
-            bool skipRescale = false)
+            bool skipRescale = false, bool centroidOnly = false)
         {
             if (overlapGroups == null || overlapGroups.Count == 0)
                 return 0;
@@ -193,8 +193,10 @@ namespace LightmapUvTool
                                 && vertCount[i] > 0 && vertCount[j] > 0;
 
                             // Detection 2: bbox overlap ratio (catches partial overlaps)
+                            // Skipped in centroidOnly mode (global pass) to avoid
+                            // false positives from bbox intersections on dense atlases.
                             bool bboxOverlap = false;
-                            if (!centroidOverlap)
+                            if (!centroidOverlap && !centroidOnly)
                             {
                                 float oMinX = Mathf.Max(mn[i].x, mn[j].x);
                                 float oMinY = Mathf.Max(mn[i].y, mn[j].y);
@@ -206,7 +208,7 @@ namespace LightmapUvTool
                                     float areaI = (mx[i].x - mn[i].x) * (mx[i].y - mn[i].y);
                                     float areaJ = (mx[j].x - mn[j].x) * (mx[j].y - mn[j].y);
                                     float smaller = Mathf.Min(areaI, areaJ);
-                                    bboxOverlap = smaller > 0f && overlapArea / smaller >= 0.10f;
+                                    bboxOverlap = smaller > 0f && overlapArea / smaller >= 0.25f;
                                 }
                             }
 
@@ -418,14 +420,17 @@ namespace LightmapUvTool
                 FixOverlappingUv2Shells(uv2, shells, overlapGroups,
                     opts.padding, result.atlasWidth, result.atlasHeight, skipRescale: true);
 
-                // Phase 2: global safety net — check ALL shell pairs for UV2 overlaps
+                // Phase 2: global safety net — centroid-only check across ALL shells
+                // catches SymSplit halves packed at same position, without false
+                // positives from bbox intersections on dense atlases.
                 if (shells.Count > 1)
                 {
                     var all = new List<int>(shells.Count);
                     for (int i = 0; i < shells.Count; i++) all.Add(i);
                     var globalGroup = new List<List<int>> { all };
                     FixOverlappingUv2Shells(uv2, shells, globalGroup,
-                        opts.padding, result.atlasWidth, result.atlasHeight);
+                        opts.padding, result.atlasWidth, result.atlasHeight,
+                        centroidOnly: true);
                 }
 
                 // ── Post-process: fix orphan vertices ──
@@ -623,14 +628,14 @@ namespace LightmapUvTool
                     totalShifted += FixOverlappingUv2Shells(uv2, allShells[m], allOverlap[m],
                         opts.padding, atlasW, atlasH, skipRescale: true);
 
-                    // Phase 2: global safety net — check ALL shell pairs
+                    // Phase 2: global safety net — centroid-only across ALL shells
                     if (allShells[m].Count > 1)
                     {
                         var all = new List<int>(allShells[m].Count);
                         for (int si = 0; si < allShells[m].Count; si++) all.Add(si);
                         var globalGroup = new List<List<int>> { all };
                         totalShifted += FixOverlappingUv2Shells(uv2, allShells[m], globalGroup,
-                            opts.padding, atlasW, atlasH, skipRescale: true);
+                            opts.padding, atlasW, atlasH, skipRescale: true, centroidOnly: true);
                     }
 
                     // Fix orphan vertices
