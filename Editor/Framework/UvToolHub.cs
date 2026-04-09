@@ -730,6 +730,14 @@ namespace LightmapUvTool
 
         void DrawSidebarFooter()
         {
+            // Global cleanup — always visible, even without a LODGroup selected
+            EditorGUILayout.Space(4);
+            var bgNuke = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(.7f, .15f, .15f);
+            if (GUILayout.Button("Delete All Sidecars", GUILayout.Height(22)))
+                NukeAllSidecars();
+            GUI.backgroundColor = bgNuke;
+
             if (ctx.LodGroup == null) return;
             EditorGUILayout.Space(2);
             var r = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
@@ -738,36 +746,109 @@ namespace LightmapUvTool
 
             var bg = GUI.backgroundColor;
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            EditorGUILayout.BeginHorizontal();
             GUI.backgroundColor = new Color(.95f, .6f, .2f);
-            if (GUILayout.Button("Overwrite Source FBX", GUILayout.Height(24)))
+            if (GUILayout.Button("Overwrite FBX", GUILayout.Height(24)))
             {
                 foreach (var tool in tools)
                     if (tool is LightmapTransferTool ltt) { ltt.ExportFbxPublic(true); break; }
             }
-            GUI.backgroundColor = bg;
-            EditorGUILayout.Space(2);
             GUI.backgroundColor = new Color(.4f, .7f, .95f);
-            if (GUILayout.Button("Export as New FBX", GUILayout.Height(20)))
+            if (GUILayout.Button("Export New FBX", GUILayout.Height(24)))
             {
                 foreach (var tool in tools)
                     if (tool is LightmapTransferTool ltt) { ltt.ExportFbxPublic(false); break; }
             }
             GUI.backgroundColor = bg;
+            EditorGUILayout.EndHorizontal();
 #else
             EditorGUILayout.HelpBox("Install com.unity.formats.fbx for FBX export.", MessageType.Info);
 #endif
-            EditorGUILayout.Space(2);
-            if (GUILayout.Button("Apply UV2 (sidecar)", EditorStyles.miniButton))
+            EditorGUILayout.Space(4);
+            // ── Sidecar UV2 mode ──
+            bool sidecarEnabled = PostprocessorDefineManager.IsEnabled();
+            EditorGUI.BeginChangeCheck();
+            sidecarEnabled = EditorGUILayout.ToggleLeft("Sidecar UV2 Mode", sidecarEnabled);
+            if (EditorGUI.EndChangeCheck())
             {
-                foreach (var tool in tools)
-                    if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
+                if (sidecarEnabled)
+                {
+                    if (EditorUtility.DisplayDialog("Enable Sidecar Mode",
+                        "Adds LIGHTMAP_UV_TOOL_POSTPROCESSOR define.\n\n" +
+                        "Unity will recompile and reimport all models (one-time).\n" +
+                        "Required for non-destructive UV2 via sidecar.",
+                        "Enable", "Cancel"))
+                        PostprocessorDefineManager.SetEnabled(true);
+                }
+                else
+                {
+                    PostprocessorDefineManager.SetEnabled(false);
+                }
             }
+
+            if (sidecarEnabled)
+            {
+                if (GUILayout.Button("Apply UV2 (sidecar)", EditorStyles.miniButton))
+                {
+                    foreach (var tool in tools)
+                        if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
+                }
+            }
+
             EditorGUILayout.Space(1);
             if (GUILayout.Button("Save Mesh Assets", EditorStyles.miniButton))
             {
                 foreach (var tool in tools)
                     if (tool is LightmapTransferTool ltt) { ltt.SaveAllPublic(); break; }
             }
+
+        }
+
+        static void NukeAllSidecars()
+        {
+            // Find and delete all sidecar assets
+            var sidecarGuids = AssetDatabase.FindAssets("_uv2data t:Uv2DataAsset");
+            var sidecarPaths = new List<string>();
+            foreach (var guid in sidecarGuids)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!string.IsNullOrEmpty(path) && path.EndsWith("_uv2data.asset", System.StringComparison.OrdinalIgnoreCase))
+                    sidecarPaths.Add(path);
+            }
+
+            if (sidecarPaths.Count == 0)
+            {
+                EditorUtility.DisplayDialog("Nothing to clean",
+                    "No sidecar assets found in the project.", "OK");
+                return;
+            }
+
+            if (!EditorUtility.DisplayDialog("Delete All Sidecars",
+                $"This will delete {sidecarPaths.Count} sidecar asset(s).\n\n" +
+                "Import settings (weldVertices etc.) are left as-is —\n" +
+                "they do not break meshes.\n\nThis cannot be undone.",
+                "Delete", "Cancel"))
+                return;
+
+            int deleted = 0;
+            foreach (var sp in sidecarPaths)
+            {
+                if (AssetDatabase.DeleteAsset(sp))
+                    deleted++;
+            }
+
+            // Offer to disable sidecar mode if active
+            if (PostprocessorDefineManager.IsEnabled())
+            {
+                if (EditorUtility.DisplayDialog("Disable Sidecar Mode?",
+                    "Sidecar UV2 Mode is currently enabled.\n" +
+                    "Disable it to prevent the postprocessor from running on reimport?",
+                    "Disable", "Keep Enabled"))
+                    PostprocessorDefineManager.SetEnabled(false);
+            }
+
+            UvtLog.Info($"[Cleanup] Deleted {deleted} sidecar(s).");
+            EditorUtility.DisplayDialog("Done", $"Deleted {deleted} sidecar(s).", "OK");
         }
 
         void DrawResizeHandle()

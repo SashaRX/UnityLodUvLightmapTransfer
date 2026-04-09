@@ -12,8 +12,10 @@ namespace LightmapUvTool
 {
     public class Uv2AssetPostprocessor : AssetPostprocessor
     {
+#if LIGHTMAP_UV_TOOL_POSTPROCESSOR
         // Run well after Bakery and other postprocessors (default order = 0).
         public override int GetPostprocessOrder() => 10000;
+#endif
 
         /// <summary>
         /// Paths to bypass during the next reimport. When ApplyUv2ToFbx needs the
@@ -31,6 +33,14 @@ namespace LightmapUvTool
         /// </summary>
         internal static readonly HashSet<string> fbxOverwritePaths = new HashSet<string>();
 
+        /// <summary>
+        /// Paths where OnPreprocessModel is allowed to modify import settings.
+        /// The tool must explicitly register paths before triggering reimport.
+        /// This prevents the package from silently changing import settings on
+        /// FBX files that happen to have a sidecar nearby.
+        /// </summary>
+        internal static readonly HashSet<string> managedImportPaths = new HashSet<string>();
+
         struct ApplyStats
         {
             public int fbxVerts;              // vertex count from fresh FBX import
@@ -44,36 +54,30 @@ namespace LightmapUvTool
             public bool stale;                // fingerprint mismatch detected
         }
 
-        void OnPreprocessModel()
+        /// <summary>
+        /// Prepares ModelImporter settings before reimport. Called directly by the tool
+        /// instead of OnPreprocessModel to avoid triggering mass reimport on package install.
+        /// </summary>
+        internal static void PrepareImportSettings(string assetPath)
         {
-            var modelImporter = assetImporter as ModelImporter;
+            if (bypassPaths.Contains(assetPath)) return;
+
+            var modelImporter = AssetImporter.GetAtPath(assetPath) as ModelImporter;
             if (modelImporter == null) return;
 
-            // Bypass: ApplyUv2ToFbx needs the raw FBX mesh without any modifications.
-            if (bypassPaths.Contains(assetPath))
-                return;
-
             bool isFbxOverwrite = fbxOverwritePaths.Contains(assetPath);
-            string sidecarPath = Uv2DataAsset.GetSidecarPath(assetPath);
-            if (!isFbxOverwrite && !System.IO.File.Exists(sidecarPath)) return;
+            bool isManaged = managedImportPaths.Contains(assetPath);
+            if (!isFbxOverwrite && !isManaged) return;
 
-            // Disable Unity's built-in lightmap UV generation — we provide our own UV2.
-            // Unity's generator may split vertices along UV seams, changing vertex count
-            // and making our stored remap table invalid.
             if (modelImporter.generateSecondaryUV)
             {
                 modelImporter.generateSecondaryUV = false;
-                UvtLog.Info($"[UV2 Preprocess] Disabled generateSecondaryUV on '{assetPath}' (sidecar provides UV2)");
+                UvtLog.Info($"[UV2 Preprocess] Disabled generateSecondaryUV on '{assetPath}'");
             }
-
-            // Disable Unity's post-import mesh processing that can modify our reconstructed mesh:
-            // - weldVertices: merges vertices at same position, destroying UV seams we need
-            // - meshCompression: quantizes positions, causing vertex shifts
-            // - optimizeMeshPolygons/Vertices: reorders data (usually harmless but disable to be safe)
             if (modelImporter.weldVertices)
             {
                 modelImporter.weldVertices = false;
-                UvtLog.Info($"[UV2 Preprocess] Disabled weldVertices on '{assetPath}' (postprocessor manages mesh topology)");
+                UvtLog.Info($"[UV2 Preprocess] Disabled weldVertices on '{assetPath}'");
             }
             if (modelImporter.meshCompression != ModelImporterMeshCompression.Off)
             {
@@ -90,8 +94,13 @@ namespace LightmapUvTool
                 modelImporter.optimizeMeshVertices = false;
                 UvtLog.Info($"[UV2 Preprocess] Disabled optimizeMeshVertices on '{assetPath}'");
             }
+            modelImporter.SaveAndReimport();
         }
 
+// OnPostprocessModel is gated behind LIGHTMAP_UV_TOOL_POSTPROCESSOR to prevent
+// Unity from triggering mass reimport of all models when the package is installed.
+// The define is added automatically when the user first applies UV2 via sidecar.
+#if LIGHTMAP_UV_TOOL_POSTPROCESSOR
         void OnPostprocessModel(GameObject root)
         {
             string modelPath = assetPath;
@@ -115,11 +124,11 @@ namespace LightmapUvTool
 
             // Load sidecar without triggering import loop
             var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
-            if (data == null || data.entries.Count == 0) return;
+            if (data == null) return;
 
-            // Strip extra attributes only from collision meshes generated and tracked
-            // by this tool in the sidecar. Do not touch arbitrary user-authored _COL nodes.
-            if (data.collisionEntries != null && data.collisionEntries.Count > 0)
+            // Collision stripping only runs when explicitly requested via managedImportPaths
+            if (managedImportPaths.Contains(modelPath) &&
+                data.collisionEntries != null && data.collisionEntries.Count > 0)
             {
                 foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
                 {
@@ -138,6 +147,11 @@ namespace LightmapUvTool
                     mesh.RecalculateBounds();
                 }
             }
+
+            if (data.entries == null || data.entries.Count == 0) return;
+
+            // UV2 application only runs when the tool explicitly registered this path.
+            if (!managedImportPaths.Remove(modelPath)) return;
 
             var filters = root.GetComponentsInChildren<MeshFilter>(true);
             var skinned = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
@@ -259,6 +273,7 @@ namespace LightmapUvTool
                 };
             }
         }
+#endif // LIGHTMAP_UV_TOOL_POSTPROCESSOR
 
         static bool IsManagedCollisionObjectName(string objectName, Uv2DataAsset data)
         {
