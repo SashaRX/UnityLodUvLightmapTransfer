@@ -1148,8 +1148,8 @@ namespace LightmapUvTool
                         }
                     }
 
-                    // Strip extra attributes (normals, tangents, UVs, colors) from _COL meshes.
-                    // Keep normals so the FBX Exporter can write valid geometry.
+                    // Strip _COL meshes to bare minimum: vertices + triangles +
+                    // averaged normals + tangents. No UVs, colors, or other channels.
                     foreach (var colMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
                     {
                         if (colMf == null || colMf.sharedMesh == null) continue;
@@ -1162,6 +1162,19 @@ namespace LightmapUvTool
                             for (int s = 0; s < srcCol.subMeshCount; s++)
                                 stripped.SetTriangles(srcCol.GetTriangles(s), s);
                             stripped.RecalculateNormals();
+                            // Generate tangents from normals (no UVs to derive from)
+                            var normals = stripped.normals;
+                            var tangents = new Vector4[normals.Length];
+                            for (int ti = 0; ti < normals.Length; ti++)
+                            {
+                                Vector3 n = normals[ti];
+                                Vector3 t = Vector3.Cross(n, Vector3.up);
+                                if (t.sqrMagnitude < 0.001f)
+                                    t = Vector3.Cross(n, Vector3.right);
+                                t.Normalize();
+                                tangents[ti] = new Vector4(t.x, t.y, t.z, 1f);
+                            }
+                            stripped.tangents = tangents;
                             stripped.RecalculateBounds();
                             colMf.sharedMesh = stripped;
                         }
