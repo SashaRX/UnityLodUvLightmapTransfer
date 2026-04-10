@@ -1464,15 +1464,11 @@ namespace LightmapUvTool
         }
 
         /// <summary>
-        /// Ensures the export root follows the convention:
-        ///   Root (baseName, identity transform, no mesh)
-        ///     ├── baseName_LOD0
-        ///     ├── baseName_LOD1
-        ///     └── baseName_Collider / baseName_COL
-        /// If a child has the same name as the root (LOD0 without suffix),
-        /// it is renamed to baseName_LOD0.  Root transform is reset to identity.
-        /// Existing sub-hierarchies (intermediate pivots with their own LODs)
-        /// are left intact — only the root and its direct children are touched.
+        /// Normalizes the export hierarchy:
+        /// - Root transform reset to identity (clean pivot at 0,0,0).
+        /// - Direct child with same name as root (LOD0 without suffix) renamed to _LOD0.
+        /// - Collision node transforms baked into vertices (pivot at origin).
+        /// Does NOT move meshes off the root — preserves original FBX structure.
         /// </summary>
         static void NormalizeExportHierarchy(GameObject root)
         {
@@ -1482,25 +1478,6 @@ namespace LightmapUvTool
             root.transform.localPosition = Vector3.zero;
             root.transform.localRotation = Quaternion.identity;
             root.transform.localScale = Vector3.one;
-
-            // If root itself has a MeshFilter, it's acting as both pivot and LOD0.
-            // Move the mesh to a new child named baseName_LOD0.
-            var rootMf = root.GetComponent<MeshFilter>();
-            if (rootMf != null && rootMf.sharedMesh != null)
-            {
-                var lod0Child = new GameObject(baseName + "_LOD0");
-                lod0Child.transform.SetParent(root.transform, false);
-                var newMf = lod0Child.AddComponent<MeshFilter>();
-                newMf.sharedMesh = rootMf.sharedMesh;
-                var rootMr = root.GetComponent<MeshRenderer>();
-                if (rootMr != null)
-                {
-                    var newMr = lod0Child.AddComponent<MeshRenderer>();
-                    newMr.sharedMaterials = rootMr.sharedMaterials;
-                    UnityEngine.Object.DestroyImmediate(rootMr);
-                }
-                UnityEngine.Object.DestroyImmediate(rootMf);
-            }
 
             // Rename direct child that matches root name (LOD0 without suffix) to baseName_LOD0
             foreach (Transform child in root.transform)
