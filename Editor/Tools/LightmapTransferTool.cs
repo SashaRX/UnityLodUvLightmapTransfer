@@ -1188,6 +1188,21 @@ namespace LightmapUvTool
                         }
                     }
 
+                    // Trim material arrays to match submesh count — prevents
+                    // FBX Exporter from creating spurious default "Lit" material entries.
+                    foreach (var mr in tempRoot.GetComponentsInChildren<MeshRenderer>(true))
+                    {
+                        var mesh = mr.GetComponent<MeshFilter>()?.sharedMesh;
+                        if (mesh == null) continue;
+                        var mats = mr.sharedMaterials;
+                        if (mats.Length > mesh.subMeshCount)
+                        {
+                            var trimmed = new Material[mesh.subMeshCount];
+                            System.Array.Copy(mats, trimmed, trimmed.Length);
+                            mr.sharedMaterials = trimmed;
+                        }
+                    }
+
                     var exportOptions = new ExportModelOptions { ExportFormat = ExportFormat.Binary };
                     ModelExporter.ExportObjects(exportPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
                     int totalExported = entries.Count + collisionMeshCount;
