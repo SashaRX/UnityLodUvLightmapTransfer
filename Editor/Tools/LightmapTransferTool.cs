@@ -1148,8 +1148,8 @@ namespace LightmapUvTool
                         }
                     }
 
-                    // Strip extra attributes (normals, tangents, UVs, colors) from _COL meshes.
-                    // Keep normals so the FBX Exporter can write valid geometry.
+                    // Strip _COL meshes to bare minimum: vertices + triangles +
+                    // averaged normals + tangents. No UVs, colors, or other channels.
                     foreach (var colMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
                     {
                         if (colMf == null || colMf.sharedMesh == null) continue;
@@ -1162,6 +1162,19 @@ namespace LightmapUvTool
                             for (int s = 0; s < srcCol.subMeshCount; s++)
                                 stripped.SetTriangles(srcCol.GetTriangles(s), s);
                             stripped.RecalculateNormals();
+                            // Generate tangents from normals (no UVs to derive from)
+                            var normals = stripped.normals;
+                            var tangents = new Vector4[normals.Length];
+                            for (int ti = 0; ti < normals.Length; ti++)
+                            {
+                                Vector3 n = normals[ti];
+                                Vector3 t = Vector3.Cross(n, Vector3.up);
+                                if (t.sqrMagnitude < 0.001f)
+                                    t = Vector3.Cross(n, Vector3.right);
+                                t.Normalize();
+                                tangents[ti] = new Vector4(t.x, t.y, t.z, 1f);
+                            }
+                            stripped.tangents = tangents;
                             stripped.RecalculateBounds();
                             colMf.sharedMesh = stripped;
                         }
@@ -1218,10 +1231,17 @@ namespace LightmapUvTool
                 if (!groupSucceeded)
                     allGroupsSucceeded = false;
 
-                // Prevent the sidecar postprocessor from applying stale UV2 remap data
-                // to the overwritten FBX — the UV2 is already baked into the exported mesh.
-                if (overwriteSource)
-                    Uv2AssetPostprocessor.fbxOverwritePaths.Add(sourceFbxPath);
+                // Save sidecar entries so our postprocessor (order=10000) can
+                // re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
+                // Also disables generateSecondaryUV, weldVertices, etc. via PrepareImportSettings.
+                // Only when Sidecar UV2 Mode is enabled — otherwise the postprocessor
+                // is compiled out and the sidecar would be created for nothing.
+                if (overwriteSource && PostprocessorDefineManager.IsEnabled())
+                {
+                    SaveSidecarForExport(sourceFbxPath, entries);
+                    Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
+                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath);
+                }
             }
 
             // Clean up scene-generated LOD objects from LodGenerationTool.
@@ -1229,14 +1249,69 @@ namespace LightmapUvTool
             if (overwriteSource && allGroupsSucceeded)
                 LodGenerationTool.ActiveInstance?.ClearGeneratedLods();
 
-            // UV2 data is now baked into the FBX — clear stale UV2 entries from sidecars.
-            // Keep collision entries so subsequent exports can reconstruct readable _COL
-            // meshes (FBX sub-asset meshes are non-readable and can't be re-exported).
-            if (overwriteSource && overwrittenFbxPaths.Count > 0)
-                ClearUv2EntriesForFbxPaths(overwrittenFbxPaths);
+            // UV2 is baked into the FBX AND saved in sidecar (for re-application after
+            // third-party postprocessors like Bakery). Don't clear sidecar entries.
 
             AssetDatabase.Refresh();
 #endif
+        }
+
+        /// <summary>
+        /// Build and save sidecar UV2 entries from export data so the postprocessor
+        /// can re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
+        /// </summary>
+        void SaveSidecarForExport(string fbxPath, List<(MeshEntry entry, Mesh resultMesh)> entries)
+        {
+            string sidecarPath = Uv2DataAsset.GetSidecarPath(fbxPath);
+            var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+            if (data == null)
+            {
+                data = ScriptableObject.CreateInstance<Uv2DataAsset>();
+                AssetDatabase.CreateAsset(data, sidecarPath);
+            }
+
+            int saved = 0;
+            foreach (var (e, resultMesh) in entries)
+            {
+                if (resultMesh == null) continue;
+                var uv2List = new List<Vector2>();
+                resultMesh.GetUVs(1, uv2List);
+                if (uv2List.Count == 0) continue;
+
+                var positions = resultMesh.vertices;
+                var uv0List = new List<Vector2>();
+                (e.originalMesh ?? resultMesh).GetUVs(0, uv0List);
+
+                string meshName = e.fbxMesh != null ? e.fbxMesh.name : e.originalMesh.name;
+                MeshFingerprint fp = e.fbxMesh != null ? MeshFingerprint.Compute(e.fbxMesh) : null;
+
+                data.Set(new MeshUv2Entry
+                {
+                    meshName = meshName,
+                    uv2 = uv2List.ToArray(),
+                    welded = e.wasWelded,
+                    edgeWelded = e.wasEdgeWelded,
+                    vertPositions = positions,
+                    vertUv0 = uv0List.ToArray(),
+                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
+                    toolVersion = Uv2DataAsset.ToolVersionStr,
+                    sourceFingerprint = fp,
+                    targetUvChannel = 1,
+                    stepMeshopt = e.wasWelded,
+                    stepEdgeWeld = e.wasEdgeWelded,
+                    stepSymmetrySplit = e.wasSymmetrySplit,
+                    stepRepack = (e.lodIndex == ctx.SourceLodIndex),
+                    stepTransfer = (e.lodIndex != ctx.SourceLodIndex),
+                });
+                saved++;
+            }
+
+            if (saved > 0)
+            {
+                EditorUtility.SetDirty(data);
+                AssetDatabase.SaveAssets();
+                UvtLog.Info($"[FBX Export] Saved {saved} UV2 entries to sidecar '{sidecarPath}' for post-import re-application");
+            }
         }
 
         static void ClearUv2EntriesForFbxPaths(IEnumerable<string> fbxPaths)
@@ -1270,7 +1345,10 @@ namespace LightmapUvTool
                 }
             }
             if (cleared > 0)
+            {
+                AssetDatabase.SaveAssets();
                 UvtLog.Info($"[FBX Export] Cleared UV2 entries from {cleared} sidecar(s) after overwrite (collision entries preserved).");
+            }
         }
 
         static Renderer FindLastLodRenderer(List<(MeshEntry entry, Mesh resultMesh)> entries)
