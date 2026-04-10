@@ -1221,7 +1221,9 @@ namespace LightmapUvTool
                 // Save sidecar entries so our postprocessor (order=10000) can
                 // re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
                 // Also disables generateSecondaryUV, weldVertices, etc. via PrepareImportSettings.
-                if (overwriteSource)
+                // Only when Sidecar UV2 Mode is enabled — otherwise the postprocessor
+                // is compiled out and the sidecar would be created for nothing.
+                if (overwriteSource && PostprocessorDefineManager.IsEnabled())
                 {
                     SaveSidecarForExport(sourceFbxPath, entries);
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
