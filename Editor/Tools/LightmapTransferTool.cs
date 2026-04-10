@@ -1504,6 +1504,54 @@ namespace LightmapUvTool
                     break;
                 }
             }
+
+            // Collision nodes: bake transform offset into vertices, then reset to identity.
+            // This keeps the mesh in place but puts the pivot at 0,0,0.
+            foreach (var colMf in root.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (colMf == null || colMf.sharedMesh == null) continue;
+                if (!IsCollisionNodeName(colMf.gameObject.name) &&
+                    !colMf.gameObject.name.EndsWith("_Collider", System.StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var t = colMf.transform;
+                if (t.localPosition == Vector3.zero &&
+                    t.localRotation == Quaternion.identity &&
+                    t.localScale == Vector3.one)
+                    continue; // already at identity
+
+                // Bake local transform into mesh vertices
+                var mesh = colMf.sharedMesh;
+                if (!mesh.isReadable) continue;
+                var localMatrix = Matrix4x4.TRS(t.localPosition, t.localRotation, t.localScale);
+                var verts = mesh.vertices;
+                var normals = mesh.normals;
+                for (int i = 0; i < verts.Length; i++)
+                {
+                    verts[i] = localMatrix.MultiplyPoint3x4(verts[i]);
+                    if (i < normals.Length)
+                        normals[i] = localMatrix.MultiplyVector(normals[i]).normalized;
+                }
+                mesh.SetVertices(verts);
+                if (normals.Length > 0)
+                    mesh.SetNormals(normals);
+                var tangents = mesh.tangents;
+                if (tangents.Length > 0)
+                {
+                    for (int i = 0; i < tangents.Length; i++)
+                    {
+                        Vector3 tVec = localMatrix.MultiplyVector(new Vector3(tangents[i].x, tangents[i].y, tangents[i].z)).normalized;
+                        tangents[i] = new Vector4(tVec.x, tVec.y, tVec.z, tangents[i].w);
+                    }
+                    mesh.tangents = tangents;
+                }
+                mesh.RecalculateBounds();
+
+                // Reset transform to identity
+                t.localPosition = Vector3.zero;
+                t.localRotation = Quaternion.identity;
+                t.localScale = Vector3.one;
+            }
         }
 
         static bool IsCollisionNodeName(string nodeName)
