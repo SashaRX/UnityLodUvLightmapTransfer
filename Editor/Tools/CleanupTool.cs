@@ -1234,37 +1234,42 @@ namespace LightmapUvTool
                 needsRefresh = true;
             }
 
-            // Second pass: rebuild LODGroup
-            foreach (var issue in sceneIssues)
-            {
-                if (issue.kind != SceneIssue.Kind.LodGroupMismatch) continue;
-                if (ctx.LodGroup == null) continue;
-
-                RebuildLodGroupFromHierarchy();
-                needsRefresh = true;
-                break; // only one rebuild needed
-            }
-
-            // Third pass: move root mesh to child LOD0
+            // Second pass: move root mesh to child LOD0 (restructures hierarchy)
+            var movedRoots = new HashSet<GameObject>();
             foreach (var issue in sceneIssues)
             {
                 if (issue.kind != SceneIssue.Kind.RootHasMesh) continue;
                 if (issue.gameObject == null || ctx.LodGroup == null) continue;
 
                 MoveRootMeshToChild(issue.gameObject);
+                movedRoots.Add(issue.gameObject);
                 needsRefresh = true;
             }
 
-            // Fourth pass: add _LOD0 suffix to LOD0 renderers
+            // Third pass: add _LOD0 suffix to LOD0 renderers
+            // Skip roots that had their mesh moved — the new child is already named _LOD0.
             foreach (var issue in sceneIssues)
             {
                 if (issue.kind != SceneIssue.Kind.MissingLod0Suffix) continue;
                 if (issue.gameObject == null) continue;
+                if (movedRoots.Contains(issue.gameObject)) continue;
+                // Skip if the gameObject no longer has a mesh renderer (mesh was moved)
+                if (issue.gameObject.GetComponent<MeshRenderer>() == null &&
+                    issue.gameObject.GetComponent<SkinnedMeshRenderer>() == null) continue;
 
                 string newName = issue.gameObject.name + "_LOD0";
                 Undo.RecordObject(issue.gameObject, "Add _LOD0 Suffix");
                 issue.gameObject.name = newName;
                 UvtLog.Info($"Renamed: {issue.description.Split(':')[0]} → {newName}");
+                needsRefresh = true;
+            }
+
+            // Fourth pass: rebuild LODGroup (after hierarchy is finalized)
+            bool needsRebuild = sceneIssues.Any(i => i.kind == SceneIssue.Kind.LodGroupMismatch) ||
+                                movedRoots.Count > 0;
+            if (needsRebuild && ctx.LodGroup != null)
+            {
+                RebuildLodGroupFromHierarchy();
                 needsRefresh = true;
             }
 
