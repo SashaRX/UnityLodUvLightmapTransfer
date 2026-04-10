@@ -1108,6 +1108,23 @@ namespace LightmapUvTool
                         }
                     }
 
+                    // ── Remove stale children from cloned FBX ──
+                    // Keep only direct children whose names match our mesh entries.
+                    // Old _COL, _Collider, "Lit", duplicate LODs etc. are removed.
+                    // Must run BEFORE NormalizeExportHierarchy (which renames LOD0).
+                    var validNames = new HashSet<string>();
+                    foreach (var (entry, resultMesh) in entries)
+                    {
+                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        validNames.Add(meshName);
+                    }
+                    for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
+                    {
+                        var ch = tempRoot.transform.GetChild(ci);
+                        if (!validNames.Contains(ch.name))
+                            UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                    }
+
                     // ── Normalize FBX hierarchy ──
                     // Ensure root is a clean pivot (identity transform, no mesh)
                     // and LOD0 child named same as root gets _LOD0 suffix.
@@ -1116,16 +1133,6 @@ namespace LightmapUvTool
                     // Add collision meshes from sidecar (if any)
                     var collisionData = CollisionMeshTool.GetCollisionMeshesFromSidecar(sourceFbxPath);
                     int collisionMeshCount = 0;
-                    if (collisionData.Count > 0)
-                    {
-                        // Remove existing _COL nodes from the cloned hierarchy to prevent duplicates
-                        for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
-                        {
-                            var ch = tempRoot.transform.GetChild(ci);
-                            if (IsCollisionNodeName(ch.name))
-                                UnityEngine.Object.DestroyImmediate(ch.gameObject);
-                        }
-                    }
                     foreach (var (colMeshName, colMeshes, isConvex) in collisionData)
                     {
                         if (colMeshes.Count == 1 && !isConvex)
