@@ -65,7 +65,7 @@ namespace LightmapUvTool
 
         struct SceneIssue
         {
-            public enum Kind { OrphanedLod, LodGroupMismatch, MissingLod0Suffix }
+            public enum Kind { OrphanedLod, LodGroupMismatch, MissingLod0Suffix, RootHasMesh, MissingCollider }
             public Kind kind;
             public GameObject gameObject;
             public string description;
@@ -1190,6 +1190,29 @@ namespace LightmapUvTool
                 }
             }
 
+            // Check if root has MeshFilter (should be empty pivot)
+            var rootMf = root.GetComponent<MeshFilter>();
+            if (rootMf != null && rootMf.sharedMesh != null)
+            {
+                sceneIssues.Add(new SceneIssue
+                {
+                    kind = SceneIssue.Kind.RootHasMesh,
+                    gameObject = root.gameObject,
+                    description = $"{root.name}: root has mesh — should be empty pivot with LODGroup only"
+                });
+            }
+
+            // Check if collision mesh exists but root has no MeshCollider
+            if (colObjects.Count > 0 && root.GetComponent<MeshCollider>() == null)
+            {
+                sceneIssues.Add(new SceneIssue
+                {
+                    kind = SceneIssue.Kind.MissingCollider,
+                    gameObject = root.gameObject,
+                    description = $"{root.name}: has collision mesh but no MeshCollider on root"
+                });
+            }
+
             UvtLog.Info($"Scene scan: {sceneIssues.Count} issue(s) found.");
         }
 
@@ -1222,7 +1245,17 @@ namespace LightmapUvTool
                 break; // only one rebuild needed
             }
 
-            // Third pass: add _LOD0 suffix to LOD0 renderers
+            // Third pass: move root mesh to child LOD0
+            foreach (var issue in sceneIssues)
+            {
+                if (issue.kind != SceneIssue.Kind.RootHasMesh) continue;
+                if (issue.gameObject == null || ctx.LodGroup == null) continue;
+
+                MoveRootMeshToChild(issue.gameObject);
+                needsRefresh = true;
+            }
+
+            // Fourth pass: add _LOD0 suffix to LOD0 renderers
             foreach (var issue in sceneIssues)
             {
                 if (issue.kind != SceneIssue.Kind.MissingLod0Suffix) continue;
@@ -1232,6 +1265,16 @@ namespace LightmapUvTool
                 Undo.RecordObject(issue.gameObject, "Add _LOD0 Suffix");
                 issue.gameObject.name = newName;
                 UvtLog.Info($"Renamed: {issue.description.Split(':')[0]} → {newName}");
+                needsRefresh = true;
+            }
+
+            // Fifth pass: add MeshCollider from collision mesh
+            foreach (var issue in sceneIssues)
+            {
+                if (issue.kind != SceneIssue.Kind.MissingCollider) continue;
+                if (issue.gameObject == null) continue;
+
+                AddColliderFromCollisionMesh(issue.gameObject);
                 needsRefresh = true;
             }
 
@@ -2482,6 +2525,101 @@ namespace LightmapUvTool
             requestRepaint?.Invoke();
         }
 
+        /// <summary>
+        /// Move mesh from root to a new child, sort all mesh children by polycount,
+        /// and rename them _LOD0, _LOD1, etc. Root becomes empty pivot.
+        /// </summary>
+        void MoveRootMeshToChild(GameObject root)
+        {
+            string baseName = UvToolContext.ExtractGroupKey(root.name);
+            if (string.IsNullOrEmpty(baseName)) baseName = root.name;
+
+            var rootMf = root.GetComponent<MeshFilter>();
+            var rootMr = root.GetComponent<MeshRenderer>();
+            if (rootMf == null || rootMf.sharedMesh == null) return;
+
+            // Create child for root's mesh
+            var lod0Child = new GameObject(baseName + "_temp");
+            Undo.RegisterCreatedObjectUndo(lod0Child, "Move Root Mesh");
+            lod0Child.transform.SetParent(root.transform, false);
+            var newMf = lod0Child.AddComponent<MeshFilter>();
+            newMf.sharedMesh = rootMf.sharedMesh;
+            if (rootMr != null)
+            {
+                var newMr = lod0Child.AddComponent<MeshRenderer>();
+                newMr.sharedMaterials = rootMr.sharedMaterials;
+                newMr.shadowCastingMode = rootMr.shadowCastingMode;
+                newMr.receiveShadows = rootMr.receiveShadows;
+                newMr.lightProbeUsage = rootMr.lightProbeUsage;
+                newMr.reflectionProbeUsage = rootMr.reflectionProbeUsage;
+                if (rootMr is MeshRenderer srcMr && newMr is MeshRenderer dstMr)
+                {
+                    dstMr.receiveGI = srcMr.receiveGI;
+                    dstMr.scaleInLightmap = srcMr.scaleInLightmap;
+                }
+                GameObjectUtility.SetStaticEditorFlags(lod0Child,
+                    GameObjectUtility.GetStaticEditorFlags(root));
+                Undo.DestroyObjectImmediate(rootMr);
+            }
+            Undo.DestroyObjectImmediate(rootMf);
+
+            // Collect all mesh children (excluding collision)
+            var colSet = new HashSet<GameObject>(FindCollisionObjects(root.transform));
+            var lodCandidates = new List<(Transform t, int polyCount)>();
+            foreach (Transform child in root.transform)
+            {
+                if (colSet.Contains(child.gameObject)) continue;
+                var mf = child.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+                lodCandidates.Add((child, GetTriangleCount(mf.sharedMesh)));
+            }
+
+            // Sort by polycount descending (LOD0 = highest)
+            lodCandidates.Sort((a, b) => b.polyCount.CompareTo(a.polyCount));
+
+            // Rename to _LOD0, _LOD1, etc.
+            for (int i = 0; i < lodCandidates.Count; i++)
+            {
+                string newName = baseName + "_LOD" + i;
+                if (lodCandidates[i].t.name != newName)
+                {
+                    Undo.RecordObject(lodCandidates[i].t.gameObject, "Rename LOD");
+                    lodCandidates[i].t.name = newName;
+                }
+            }
+
+            UvtLog.Info($"Moved root mesh to child, sorted {lodCandidates.Count} LOD(s) by polycount.");
+        }
+
+        /// <summary>
+        /// Find the first collision mesh (_COL/_Collider) and add MeshCollider to root.
+        /// Disable renderer on collision nodes.
+        /// </summary>
+        void AddColliderFromCollisionMesh(GameObject root)
+        {
+            if (root.GetComponent<MeshCollider>() != null) return;
+
+            var colObjects = FindCollisionObjects(root.transform);
+            foreach (var colObj in colObjects)
+            {
+                var mf = colObj.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+
+                var collider = Undo.AddComponent<MeshCollider>(root);
+                collider.sharedMesh = mf.sharedMesh;
+                UvtLog.Info($"Added MeshCollider to {root.name} from {colObj.name}");
+
+                // Disable renderer on collision node
+                var mr = colObj.GetComponent<MeshRenderer>();
+                if (mr != null)
+                {
+                    Undo.RecordObject(mr, "Disable COL Renderer");
+                    mr.enabled = false;
+                }
+                break; // one collider is enough
+            }
+        }
+
         // ═══════════════════════════════════════════════════════════════
         // Helpers
         // ═══════════════════════════════════════════════════════════════
@@ -2514,13 +2652,14 @@ namespace LightmapUvTool
             for (int i = 0; i < root.childCount; i++)
             {
                 var child = root.GetChild(i);
-                if (child.name.Contains("_COL"))
+                if (child.name.Contains("_COL") || child.name.EndsWith("_Collider", System.StringComparison.OrdinalIgnoreCase))
                 {
                     result.Add(child.gameObject);
                     for (int j = 0; j < child.childCount; j++)
                     {
-                        if (child.GetChild(j).name.Contains("_COL"))
-                            result.Add(child.GetChild(j).gameObject);
+                        var gc = child.GetChild(j);
+                        if (gc.name.Contains("_COL") || gc.name.EndsWith("_Collider", System.StringComparison.OrdinalIgnoreCase))
+                            result.Add(gc.gameObject);
                     }
                 }
             }
