@@ -5,7 +5,8 @@ on:
     paths:
       - 'Editor/**'
       - 'Plugins/**'
-      - 'Native/**'
+      - 'Shaders/**'
+      - '*.md'
       - 'package.json'
 
 jobs:
@@ -18,8 +19,30 @@ jobs:
       - name: Check for missing .meta files
         run: |
           EXIT=0
-          # Check all tracked files in Editor/ and Plugins/ that need .meta
-          for f in $(find Editor Plugins -type f \
+          # Unity package root files that are imported by Unity when consumed as
+          # a UPM package. Root-level user-facing files need .meta because Unity
+          # treats the package root as an immutable folder and warns about
+          # orphan assets.
+          #
+          # Files that should NOT be imported by Unity live in tilde-suffixed
+          # folders (Native~/, Documentation~/, Samples~/) which Unity ignores.
+          ROOT_FILES=(
+            package.json
+            AGENTS.md
+            CHANGELOG.md
+            CLAUDE.md
+            README.md
+          )
+          for f in "${ROOT_FILES[@]}"; do
+            if [ -f "$f" ] && [ ! -f "${f}.meta" ]; then
+              echo "::error::Missing .meta file for: ${f}"
+              EXIT=1
+            fi
+          done
+          # Check all tracked files in Editor/, Plugins/, Shaders/ that need .meta.
+          # Native~/ and Documentation~/ are hidden from Unity by the ~ suffix
+          # and do NOT need .meta files.
+          for f in $(find Editor Plugins Shaders -type f \
             ! -name '*.meta' \
             ! -name '.gitkeep' \
             ! -name '.DS_Store' \
@@ -30,18 +53,24 @@ jobs:
             fi
           done
           # Check for orphaned .meta files (no matching file/dir)
-          for m in $(find Editor Plugins -name '*.meta' 2>/dev/null); do
+          for m in $(find Editor Plugins Shaders -name '*.meta' 2>/dev/null); do
             target="${m%.meta}"
             if [ ! -e "$target" ]; then
               echo "::warning::Orphaned .meta file (no matching file/dir): ${m}"
             fi
           done
           # Check directories have .meta
-          for d in $(find Editor Plugins -type d ! -path '.' 2>/dev/null); do
+          for d in $(find Editor Plugins Shaders -type d ! -path '.' 2>/dev/null); do
             if [ ! -f "${d}.meta" ]; then
               echo "::error::Missing .meta file for directory: ${d}"
               EXIT=1
             fi
+          done
+          # Guard against .meta files inside tilde-hidden folders (these would
+          # be orphaned because Unity ignores the folder).
+          for m in $(find . \( -name '*~' -type d -prune \) -o -name '*.meta' -print 2>/dev/null | grep -E '~/' || true); do
+            echo "::error::Stray .meta inside tilde-hidden folder: ${m}"
+            EXIT=1
           done
           if [ $EXIT -eq 0 ]; then
             echo "All .meta files present"

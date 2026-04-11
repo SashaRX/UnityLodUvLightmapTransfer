@@ -21,8 +21,11 @@ namespace LightmapUvTool
         public int    ToolOrder => 45;
         public Action RequestRepaint { set => requestRepaint = value; }
 
-        // ── Foldout state ──
-        bool foldMaterials = true, foldColliders, foldScene, foldMesh, foldAttributes, foldSplitMerge;
+        // ── Foldout state (grouped into 4 logical sections) ──
+        bool foldHierarchy;
+        bool foldMaterials = true;
+        bool foldMeshData;
+        bool foldImportSettings;
 
         // ── Ensure-attribute toggles ──
         bool ensureNormals, ensureTangents, ensureColors;
@@ -37,6 +40,7 @@ namespace LightmapUvTool
         List<ColliderIssue> colliderIssues;
         List<SceneIssue> sceneIssues;
         MeshReport meshReport;
+        List<MeshHygieneUtility.ImportSettingsIssue> importIssues;
 
         // ── Inner types ──
 
@@ -65,7 +69,7 @@ namespace LightmapUvTool
 
         struct SceneIssue
         {
-            public enum Kind { OrphanedLod, LodGroupMismatch, MissingLod0Suffix }
+            public enum Kind { OrphanedLod, LodGroupMismatch, MissingLod0Suffix, RootHasMesh, MissingCollider, InvalidRootName, InvalidChars }
             public Kind kind;
             public GameObject gameObject;
             public string description;
@@ -91,6 +95,21 @@ namespace LightmapUvTool
             public List<MeshEntry> weldCandidates = new List<MeshEntry>();
             public List<EmptyUvEntry> emptyUvEntries = new List<EmptyUvEntry>();
             public List<MeshAttributeInfo> attributes = new List<MeshAttributeInfo>();
+            public List<DegenerateEntry> degenerateEntries = new List<DegenerateEntry>();
+            public List<UnusedVertEntry> unusedVertEntries = new List<UnusedVertEntry>();
+        }
+
+        struct DegenerateEntry
+        {
+            public MeshEntry entry;
+            public int count;
+        }
+
+        struct UnusedVertEntry
+        {
+            public MeshEntry entry;
+            public int count;
+            public bool hasBlendShapes;
         }
 
         struct EmptyUvEntry
@@ -183,12 +202,124 @@ namespace LightmapUvTool
                 return;
             }
 
-            DrawMaterialsSection();
-            DrawCollidersSection();
+            DrawHierarchyGroup();
+            DrawMaterialsGroup();
+            DrawMeshDataGroup();
+            DrawImportSettingsGroup();
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Group layout (4 top-level foldouts)
+        // ═══════════════════════════════════════════════════════════════
+
+        void DrawHierarchyGroup()
+        {
+            EditorGUILayout.Space(8);
+            int sceneCount = sceneIssues?.Count ?? 0;
+            int colCount   = colliderIssues?.Count ?? 0;
+            bool scanned = sceneIssues != null || colliderIssues != null;
+            int total = sceneCount + colCount;
+            string header = scanned
+                ? $"Hierarchy ({total} issue{(total == 1 ? "" : "s")})"
+                : "Hierarchy";
+            foldHierarchy = EditorGUILayout.Foldout(foldHierarchy, header, true);
+            if (!foldHierarchy) return;
+
+            EditorGUI.indentLevel++;
+            DrawGroupScanFix(
+                () => { ScanScene(); ScanColliders(); },
+                () => { FixScene(); FixColliders(); },
+                total > 0);
             DrawSceneSection();
+            DrawCollidersSection();
+            EditorGUI.indentLevel--;
+        }
+
+        void DrawMaterialsGroup()
+        {
+            EditorGUILayout.Space(8);
+            int matCount = materialIssues?.Count ?? 0;
+            string header = materialIssues != null
+                ? $"Materials ({matCount} issue{(matCount == 1 ? "" : "s")})"
+                : "Materials";
+            foldMaterials = EditorGUILayout.Foldout(foldMaterials, header, true);
+            if (!foldMaterials) return;
+
+            EditorGUI.indentLevel++;
+            DrawMaterialsSection();
+            EditorGUI.indentLevel--;
+        }
+
+        void DrawMeshDataGroup()
+        {
+            EditorGUILayout.Space(8);
+            bool anyScanned = meshReport != null || splitCandidates != null || mergeCandidates != null;
+            int meshIssues = 0;
+            if (meshReport != null)
+            {
+                meshIssues += meshReport.weldCandidates.Count;
+                meshIssues += meshReport.emptyUvEntries.Count;
+                meshIssues += meshReport.degenerateEntries.Count;
+                meshIssues += meshReport.unusedVertEntries.Count;
+            }
+            int splitIssues = splitCandidates?.Count(s => s.include) ?? 0;
+            int mergeIssues = mergeCandidates?.Count(g => g.include) ?? 0;
+            int total = meshIssues + splitIssues + mergeIssues;
+            string header = anyScanned
+                ? $"Mesh Data ({total} issue{(total == 1 ? "" : "s")})"
+                : "Mesh Data";
+            foldMeshData = EditorGUILayout.Foldout(foldMeshData, header, true);
+            if (!foldMeshData) return;
+
+            EditorGUI.indentLevel++;
+            DrawGroupScanFix(
+                () => { ScanMesh(); ScanSplitMerge(); },
+                null,
+                false); // no group-level Fix — mesh fixes are per-issue
             DrawMeshSection();
             DrawSplitMergeSection();
             DrawAttributesSection();
+            DrawMeshRecalcSection();
+            EditorGUI.indentLevel--;
+        }
+
+        void DrawImportSettingsGroup()
+        {
+            EditorGUILayout.Space(8);
+            int issueCount = importIssues?.Count ?? 0;
+            string header = importIssues != null
+                ? $"Import Settings ({issueCount} issue{(issueCount == 1 ? "" : "s")})"
+                : "Import Settings";
+            foldImportSettings = EditorGUILayout.Foldout(foldImportSettings, header, true);
+            if (!foldImportSettings) return;
+
+            EditorGUI.indentLevel++;
+            DrawImportSettingsSection();
+            EditorGUI.indentLevel--;
+        }
+
+        void DrawGroupScanFix(Action scan, Action fix, bool fixEnabled)
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.BeginHorizontal();
+            var bgc = GUI.backgroundColor;
+            if (scan != null)
+            {
+                GUI.backgroundColor = new Color(.6f, .75f, .9f);
+                if (GUILayout.Button("Scan All", GUILayout.Height(22)))
+                    scan();
+            }
+            if (fix != null)
+            {
+                GUI.backgroundColor = new Color(.4f, .8f, .4f);
+                GUI.enabled = fixEnabled;
+                if (GUILayout.Button("Fix All", GUILayout.Height(22)))
+                    fix();
+                GUI.enabled = true;
+            }
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.Space(4);
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -197,15 +328,7 @@ namespace LightmapUvTool
 
         void DrawMaterialsSection()
         {
-            EditorGUILayout.Space(8);
-            int totalCount = materialIssues != null ? materialIssues.Count : 0;
-            string label = materialIssues != null
-                ? $"Fix Materials ({totalCount} issue{(totalCount == 1 ? "" : "s")})"
-                : "Fix Materials";
-            foldMaterials = EditorGUILayout.Foldout(foldMaterials, label, true);
-            if (!foldMaterials) return;
-
-            EditorGUI.indentLevel++;
+            EditorGUILayout.Space(4);
 
             // Scan button
             var bgc2 = GUI.backgroundColor;
@@ -214,16 +337,11 @@ namespace LightmapUvTool
                 ScanMaterials();
             GUI.backgroundColor = bgc2;
 
-            if (materialIssues == null)
-            {
-                EditorGUI.indentLevel--;
-                return;
-            }
+            if (materialIssues == null) return;
 
             if (materialIssues.Count == 0)
             {
                 EditorGUILayout.HelpBox("No material issues found.", MessageType.Info);
-                EditorGUI.indentLevel--;
                 return;
             }
 
@@ -247,7 +365,6 @@ namespace LightmapUvTool
                 if (GUILayout.Button("Fix Scene Materials", GUILayout.Height(24)))
                 {
                     FixMaterials();
-                    EditorGUI.indentLevel--;
                     return;
                 }
                 GUI.backgroundColor = bgc2;
@@ -268,8 +385,6 @@ namespace LightmapUvTool
                     "Click \"Overwrite Source FBX\" below to re-export and fix them.",
                     MessageType.Info);
             }
-
-            EditorGUI.indentLevel--;
         }
 
         void ScanMaterials()
@@ -492,7 +607,7 @@ namespace LightmapUvTool
         {
             if (materialIssues == null || materialIssues.Count == 0) return;
 
-            int undoGroup = Undo.GetCurrentGroup();
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Fix Materials");
             var processed = new HashSet<Renderer>();
 
             // Build LOD0 material map
@@ -577,7 +692,6 @@ namespace LightmapUvTool
                 if (matGroups.Count == mesh.subMeshCount) continue; // no duplicates
 
                 // Need readable mesh to merge
-                bool cloned = false;
                 if (!mesh.isReadable)
                 {
                     string assetPath = AssetDatabase.GetAssetPath(mesh);
@@ -598,7 +712,6 @@ namespace LightmapUvTool
                 // Clone mesh
                 var newMesh = UnityEngine.Object.Instantiate(mesh);
                 newMesh.name = mesh.name;
-                cloned = true;
 
                 // Build merged submeshes
                 var newMats = new List<Material>();
@@ -643,7 +756,6 @@ namespace LightmapUvTool
 
             // ImporterRemap issues are not fixable — they require "Overwrite Source FBX"
 
-            Undo.CollapseUndoOperations(undoGroup);
             materialIssues = null;
             requestRepaint?.Invoke();
         }
@@ -654,33 +766,21 @@ namespace LightmapUvTool
 
         void DrawCollidersSection()
         {
-            EditorGUILayout.Space(8);
-            int totalCount = colliderIssues != null ? colliderIssues.Count : 0;
-            string label = colliderIssues != null
-                ? $"Clean Colliders ({totalCount} issue{(totalCount == 1 ? "" : "s")})"
-                : "Clean Colliders";
-            foldColliders = EditorGUILayout.Foldout(foldColliders, label, true);
-            if (!foldColliders) return;
-
-            EditorGUI.indentLevel++;
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField("Colliders", EditorStyles.boldLabel);
 
             // Scan button
             var bgc2 = GUI.backgroundColor;
             GUI.backgroundColor = new Color(.6f, .75f, .9f);
-            if (GUILayout.Button("Scan", GUILayout.Height(24)))
+            if (GUILayout.Button("Scan Colliders", GUILayout.Height(22)))
                 ScanColliders();
             GUI.backgroundColor = bgc2;
 
-            if (colliderIssues == null)
-            {
-                EditorGUI.indentLevel--;
-                return;
-            }
+            if (colliderIssues == null) return;
 
             if (colliderIssues.Count == 0)
             {
                 EditorGUILayout.HelpBox("No collider issues found.", MessageType.Info);
-                EditorGUI.indentLevel--;
                 return;
             }
 
@@ -703,7 +803,6 @@ namespace LightmapUvTool
                 if (GUILayout.Button("Fix Scene Colliders", GUILayout.Height(24)))
                 {
                     FixColliders();
-                    EditorGUI.indentLevel--;
                     return;
                 }
                 GUI.backgroundColor = bgc2;
@@ -724,8 +823,6 @@ namespace LightmapUvTool
                     "Click \"Overwrite Source FBX\" below to re-export with stripped colliders.",
                     MessageType.Info);
             }
-
-            EditorGUI.indentLevel--;
         }
 
         void ScanColliders()
@@ -737,7 +834,7 @@ namespace LightmapUvTool
             var checkedMeshes = new HashSet<int>();
 
             // 1. Scan scene children with _COL in name
-            var colObjects = FindCollisionObjects(ctx.LodGroup.transform);
+            var colObjects = MeshHygieneUtility.FindCollisionObjects(ctx.LodGroup.transform);
             foreach (var go in colObjects)
             {
                 var mf = go.GetComponent<MeshFilter>();
@@ -815,7 +912,7 @@ namespace LightmapUvTool
                     var mfB = colObjects[j].GetComponent<MeshFilter>();
                     var meshB = mfB != null ? mfB.sharedMesh : null;
                     if (meshB == null) continue;
-                    if (AreMeshesDuplicate(meshA, meshB))
+                    if (MeshHygieneUtility.AreMeshesDuplicate(meshA, meshB))
                     {
                         colliderIssues.Add(new ColliderIssue
                         {
@@ -860,7 +957,7 @@ namespace LightmapUvTool
         {
             if (colliderIssues == null || colliderIssues.Count == 0) return;
 
-            int undoGroup = Undo.GetCurrentGroup();
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Fix Colliders");
 
             foreach (var issue in colliderIssues)
             {
@@ -1006,7 +1103,6 @@ namespace LightmapUvTool
                 }
             }
 
-            Undo.CollapseUndoOperations(undoGroup);
             colliderIssues = null;
             requestRepaint?.Invoke();
         }
@@ -1017,14 +1113,8 @@ namespace LightmapUvTool
 
         void DrawSceneSection()
         {
-            EditorGUILayout.Space(8);
-            string label = sceneIssues != null
-                ? $"Scene Cleanup ({sceneIssues.Count} issue{(sceneIssues.Count == 1 ? "" : "s")})"
-                : "Scene Cleanup";
-            foldScene = EditorGUILayout.Foldout(foldScene, label, true);
-            if (!foldScene) return;
-
-            EditorGUI.indentLevel++;
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField("Scene", EditorStyles.boldLabel);
 
             DrawScanFixButtons(ScanScene, FixScene, sceneIssues);
 
@@ -1040,8 +1130,6 @@ namespace LightmapUvTool
                         EditorGUILayout.HelpBox(issue.description, msgType);
                     }
             }
-
-            EditorGUI.indentLevel--;
         }
 
         void ScanScene()
@@ -1062,7 +1150,7 @@ namespace LightmapUvTool
             }
 
             // Gather collision object names to exclude from orphan check
-            var colObjects = FindCollisionObjects(root);
+            var colObjects = MeshHygieneUtility.FindCollisionObjects(root);
             var colSet = new HashSet<GameObject>(colObjects);
 
             // Try to get FBX prefab children for comparison
@@ -1190,6 +1278,64 @@ namespace LightmapUvTool
                 }
             }
 
+            // Check if root has MeshFilter (should be empty pivot)
+            var rootMf = root.GetComponent<MeshFilter>();
+            if (rootMf != null && rootMf.sharedMesh != null)
+            {
+                sceneIssues.Add(new SceneIssue
+                {
+                    kind = SceneIssue.Kind.RootHasMesh,
+                    gameObject = root.gameObject,
+                    description = $"{root.name}: root has mesh — should be empty pivot with LODGroup only"
+                });
+            }
+
+            // Check if collision mesh exists but root has no MeshCollider
+            if (colObjects.Count > 0 && root.GetComponent<MeshCollider>() == null)
+            {
+                sceneIssues.Add(new SceneIssue
+                {
+                    kind = SceneIssue.Kind.MissingCollider,
+                    gameObject = root.gameObject,
+                    description = $"{root.name}: has collision mesh but no MeshCollider on root"
+                });
+            }
+
+            // Check if root name has _LOD/_COL/_Collider suffix (should be clean base name)
+            if (MeshHygieneUtility.HasLodOrColSuffix(root.name))
+            {
+                sceneIssues.Add(new SceneIssue
+                {
+                    kind = SceneIssue.Kind.InvalidRootName,
+                    gameObject = root.gameObject,
+                    description = $"{root.name}: root name has LOD/COL suffix — should be base name"
+                });
+            }
+
+            // Check root + direct children for invalid characters (dots, cyrillic, etc.)
+            if (MeshHygieneUtility.HasInvalidChars(root.name))
+            {
+                sceneIssues.Add(new SceneIssue
+                {
+                    kind = SceneIssue.Kind.InvalidChars,
+                    gameObject = root.gameObject,
+                    description = $"{root.name}: name contains invalid characters (dots, cyrillic, etc.)"
+                });
+            }
+            for (int i = 0; i < root.childCount; i++)
+            {
+                var child = root.GetChild(i);
+                if (MeshHygieneUtility.HasInvalidChars(child.name))
+                {
+                    sceneIssues.Add(new SceneIssue
+                    {
+                        kind = SceneIssue.Kind.InvalidChars,
+                        gameObject = child.gameObject,
+                        description = $"{child.name}: name contains invalid characters"
+                    });
+                }
+            }
+
             UvtLog.Info($"Scene scan: {sceneIssues.Count} issue(s) found.");
         }
 
@@ -1197,10 +1343,58 @@ namespace LightmapUvTool
         {
             if (sceneIssues == null || sceneIssues.Count == 0) return;
 
-            int undoGroup = Undo.GetCurrentGroup();
+            bool needsRefresh;
+            using (MeshHygieneUtility.BeginUndoGroup("Cleanup: Fix Scene"))
+            {
+                needsRefresh = FixSceneCore();
+            }
+
+            sceneIssues = null;
+
+            if (needsRefresh)
+            {
+                ctx.Refresh(ctx.LodGroup);
+                requestRepaint?.Invoke();
+            }
+        }
+
+        bool FixSceneCore()
+        {
             bool needsRefresh = false;
 
-            // First pass: remove orphans
+            // First pass: sanitize invalid characters in names
+            foreach (var issue in sceneIssues)
+            {
+                if (issue.kind != SceneIssue.Kind.InvalidChars) continue;
+                if (issue.gameObject == null) continue;
+
+                string sanitized = MeshHygieneUtility.SanitizeName(issue.gameObject.name);
+                if (sanitized != issue.gameObject.name)
+                {
+                    Undo.RecordObject(issue.gameObject, "Sanitize Name");
+                    UvtLog.Info($"Sanitized: {issue.gameObject.name} → {sanitized}");
+                    issue.gameObject.name = sanitized;
+                    needsRefresh = true;
+                }
+            }
+
+            // Second pass: strip LOD/COL suffix from root name
+            foreach (var issue in sceneIssues)
+            {
+                if (issue.kind != SceneIssue.Kind.InvalidRootName) continue;
+                if (issue.gameObject == null) continue;
+
+                string cleaned = UvToolContext.ExtractGroupKey(issue.gameObject.name);
+                if (!string.IsNullOrEmpty(cleaned) && cleaned != issue.gameObject.name)
+                {
+                    Undo.RecordObject(issue.gameObject, "Strip Root Suffix");
+                    UvtLog.Info($"Cleaned root name: {issue.gameObject.name} → {cleaned}");
+                    issue.gameObject.name = cleaned;
+                    needsRefresh = true;
+                }
+            }
+
+            // Third pass: remove orphans
             foreach (var issue in sceneIssues)
             {
                 if (issue.kind != SceneIssue.Kind.OrphanedLod) continue;
@@ -1211,22 +1405,28 @@ namespace LightmapUvTool
                 needsRefresh = true;
             }
 
-            // Second pass: rebuild LODGroup
+            // Fourth pass: move root mesh to child LOD0 (restructures hierarchy)
+            var movedRoots = new HashSet<GameObject>();
             foreach (var issue in sceneIssues)
             {
-                if (issue.kind != SceneIssue.Kind.LodGroupMismatch) continue;
-                if (ctx.LodGroup == null) continue;
+                if (issue.kind != SceneIssue.Kind.RootHasMesh) continue;
+                if (issue.gameObject == null || ctx.LodGroup == null) continue;
 
-                RebuildLodGroupFromHierarchy();
+                MoveRootMeshToChild(issue.gameObject);
+                movedRoots.Add(issue.gameObject);
                 needsRefresh = true;
-                break; // only one rebuild needed
             }
 
-            // Third pass: add _LOD0 suffix to LOD0 renderers
+            // Fifth pass: add _LOD0 suffix to LOD0 renderers
+            // Skip roots that had their mesh moved — the new child is already named _LOD0.
             foreach (var issue in sceneIssues)
             {
                 if (issue.kind != SceneIssue.Kind.MissingLod0Suffix) continue;
                 if (issue.gameObject == null) continue;
+                if (movedRoots.Contains(issue.gameObject)) continue;
+                // Skip if the gameObject no longer has a mesh renderer (mesh was moved)
+                if (issue.gameObject.GetComponent<MeshRenderer>() == null &&
+                    issue.gameObject.GetComponent<SkinnedMeshRenderer>() == null) continue;
 
                 string newName = issue.gameObject.name + "_LOD0";
                 Undo.RecordObject(issue.gameObject, "Add _LOD0 Suffix");
@@ -1235,20 +1435,32 @@ namespace LightmapUvTool
                 needsRefresh = true;
             }
 
-            Undo.CollapseUndoOperations(undoGroup);
-            sceneIssues = null;
-
-            if (needsRefresh)
+            // Sixth pass: rebuild LODGroup (after hierarchy is finalized)
+            bool needsRebuild = sceneIssues.Any(i => i.kind == SceneIssue.Kind.LodGroupMismatch) ||
+                                movedRoots.Count > 0;
+            if (needsRebuild && ctx.LodGroup != null)
             {
-                ctx.Refresh(ctx.LodGroup);
-                requestRepaint?.Invoke();
+                RebuildLodGroupFromHierarchy();
+                needsRefresh = true;
             }
+
+            // Seventh pass: add MeshCollider from collision mesh
+            foreach (var issue in sceneIssues)
+            {
+                if (issue.kind != SceneIssue.Kind.MissingCollider) continue;
+                if (issue.gameObject == null) continue;
+
+                AddColliderFromCollisionMesh(issue.gameObject);
+                needsRefresh = true;
+            }
+
+            return needsRefresh;
         }
 
         void RebuildLodGroupFromHierarchy()
         {
             var root = ctx.LodGroup.transform;
-            var colSet = new HashSet<GameObject>(FindCollisionObjects(root));
+            var colSet = new HashSet<GameObject>(MeshHygieneUtility.FindCollisionObjects(root));
             var lodChildren = new SortedDictionary<int, List<Renderer>>();
 
             for (int i = 0; i < root.childCount; i++)
@@ -1298,93 +1510,196 @@ namespace LightmapUvTool
 
         void DrawMeshSection()
         {
-            EditorGUILayout.Space(8);
-            foldMesh = EditorGUILayout.Foldout(foldMesh, "Mesh", true);
-            if (!foldMesh) return;
-
-            EditorGUI.indentLevel++;
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField("Mesh", EditorStyles.boldLabel);
 
             // Scan button
             var bgc = GUI.backgroundColor;
             GUI.backgroundColor = new Color(.6f, .75f, .9f);
-            if (GUILayout.Button("Scan", GUILayout.Height(28)))
+            if (GUILayout.Button("Scan Mesh", GUILayout.Height(22)))
                 ScanMesh();
             GUI.backgroundColor = bgc;
 
-            if (meshReport != null)
+            if (meshReport == null) return;
+
+            // Per-LOD summary
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Vertex / Triangle Summary", EditorStyles.boldLabel);
+            foreach (var lod in meshReport.lods)
             {
-                // Per-LOD summary
-                EditorGUILayout.Space(4);
-                EditorGUILayout.LabelField("Vertex / Triangle Summary", EditorStyles.boldLabel);
-                foreach (var lod in meshReport.lods)
-                {
-                    string delta = lod.lodIndex > 0 && meshReport.lods.Count > 1
-                        ? $" (Δ {lod.deltaVerts:+#,##0;-#,##0;0} v, {lod.deltaTris:+#,##0;-#,##0;0} t)"
-                        : "";
-                    EditorGUILayout.LabelField(
-                        $"LOD{lod.lodIndex}: {lod.totalVerts:N0} verts, {lod.totalTris:N0} tris{delta}");
-                    EditorGUI.indentLevel++;
-                    foreach (var m in lod.meshes)
-                        EditorGUILayout.LabelField($"{m.name}: {m.verts:N0} v, {m.tris:N0} t");
-                    EditorGUI.indentLevel--;
-                }
-
-                // Weld candidates
-                if (meshReport.weldCandidates.Count > 0)
-                {
-                    EditorGUILayout.Space(4);
-                    EditorGUILayout.HelpBox(
-                        $"{meshReport.weldCandidates.Count} mesh(es) with false seams (weld candidates).",
-                        MessageType.Info);
-
-                    GUI.backgroundColor = new Color(.4f, .8f, .4f);
-                    if (GUILayout.Button("Batch Weld", GUILayout.Height(28)))
-                    {
-                        FixMeshWeld();
-                        EditorGUI.indentLevel--;
-                        return; // meshReport nulled, stop drawing
-                    }
-                    GUI.backgroundColor = bgc;
-                }
-
-                if (meshReport == null) { EditorGUI.indentLevel--; return; }
-
-                // Empty UV channels
-                if (meshReport.emptyUvEntries.Count > 0)
-                {
-                    int totalEmptyUvs = meshReport.emptyUvEntries.Sum(e => e.channels.Count);
-                    int totalZeroColors = meshReport.emptyUvEntries.Count(e => e.hasZeroColors);
-                    EditorGUILayout.Space(4);
-
-                    var parts = new List<string>();
-                    if (totalEmptyUvs > 0)
-                        parts.Add($"{totalEmptyUvs} empty UV channel(s)");
-                    if (totalZeroColors > 0)
-                        parts.Add($"{totalZeroColors} mesh(es) with zero vertex colors");
-                    EditorGUILayout.HelpBox(
-                        string.Join(", ", parts) + $" across {meshReport.emptyUvEntries.Count} mesh(es).",
-                        MessageType.Info);
-
-                    GUI.backgroundColor = new Color(.4f, .8f, .4f);
-                    if (GUILayout.Button("Strip Empty Channels", GUILayout.Height(28)))
-                    {
-                        FixMeshStripUvs();
-                        EditorGUI.indentLevel--;
-                        return;
-                    }
-                    GUI.backgroundColor = bgc;
-                }
-
-                if (meshReport == null) { EditorGUI.indentLevel--; return; }
-
-                if (meshReport.weldCandidates.Count == 0 && meshReport.emptyUvEntries.Count == 0)
-                {
-                    EditorGUILayout.Space(4);
-                    EditorGUILayout.HelpBox("No mesh issues found.", MessageType.Info);
-                }
+                string delta = lod.lodIndex > 0 && meshReport.lods.Count > 1
+                    ? $" (Δ {lod.deltaVerts:+#,##0;-#,##0;0} v, {lod.deltaTris:+#,##0;-#,##0;0} t)"
+                    : "";
+                EditorGUILayout.LabelField(
+                    $"LOD{lod.lodIndex}: {lod.totalVerts:N0} verts, {lod.totalTris:N0} tris{delta}");
+                EditorGUI.indentLevel++;
+                foreach (var m in lod.meshes)
+                    EditorGUILayout.LabelField($"{m.name}: {m.verts:N0} v, {m.tris:N0} t");
+                EditorGUI.indentLevel--;
             }
 
-            EditorGUI.indentLevel--;
+            // Weld candidates
+            if (meshReport.weldCandidates.Count > 0)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.HelpBox(
+                    $"{meshReport.weldCandidates.Count} mesh(es) with false seams (weld candidates).",
+                    MessageType.Info);
+
+                GUI.backgroundColor = new Color(.4f, .8f, .4f);
+                if (GUILayout.Button("Batch Weld", GUILayout.Height(28)))
+                {
+                    FixMeshWeld();
+                    return;
+                }
+                GUI.backgroundColor = bgc;
+            }
+
+            if (meshReport == null) return;
+
+            // Empty UV channels
+            if (meshReport.emptyUvEntries.Count > 0)
+            {
+                int totalEmptyUvs = meshReport.emptyUvEntries.Sum(e => e.channels.Count);
+                int totalZeroColors = meshReport.emptyUvEntries.Count(e => e.hasZeroColors);
+                EditorGUILayout.Space(4);
+
+                var parts = new List<string>();
+                if (totalEmptyUvs > 0)
+                    parts.Add($"{totalEmptyUvs} empty UV channel(s)");
+                if (totalZeroColors > 0)
+                    parts.Add($"{totalZeroColors} mesh(es) with zero vertex colors");
+                EditorGUILayout.HelpBox(
+                    string.Join(", ", parts) + $" across {meshReport.emptyUvEntries.Count} mesh(es).",
+                    MessageType.Info);
+
+                GUI.backgroundColor = new Color(.4f, .8f, .4f);
+                if (GUILayout.Button("Strip Empty Channels", GUILayout.Height(28)))
+                {
+                    FixMeshStripUvs();
+                    return;
+                }
+                GUI.backgroundColor = bgc;
+            }
+
+            if (meshReport == null) return;
+
+            // Degenerate triangles
+            if (meshReport.degenerateEntries.Count > 0)
+            {
+                int totalDegen = meshReport.degenerateEntries.Sum(d => d.count);
+                EditorGUILayout.Space(4);
+                EditorGUILayout.HelpBox(
+                    $"{totalDegen} degenerate triangle(s) across {meshReport.degenerateEntries.Count} mesh(es).",
+                    MessageType.Warning);
+
+                GUI.backgroundColor = new Color(.4f, .8f, .4f);
+                if (GUILayout.Button("Remove Degenerate Triangles", GUILayout.Height(26)))
+                {
+                    FixMeshRemoveDegenerate();
+                    return;
+                }
+                GUI.backgroundColor = bgc;
+            }
+
+            if (meshReport == null) return;
+
+            // Unused vertices
+            if (meshReport.unusedVertEntries.Count > 0)
+            {
+                int totalUnused = meshReport.unusedVertEntries.Sum(u => u.count);
+                int blocked = meshReport.unusedVertEntries.Count(u => u.hasBlendShapes);
+                EditorGUILayout.Space(4);
+                EditorGUILayout.HelpBox(
+                    $"{totalUnused} unused vertex(es) across {meshReport.unusedVertEntries.Count} mesh(es)." +
+                    (blocked > 0 ? $" {blocked} skipped (blend shapes)." : ""),
+                    MessageType.Warning);
+
+                GUI.backgroundColor = new Color(.4f, .8f, .4f);
+                if (GUILayout.Button("Remove Unused Vertices", GUILayout.Height(26)))
+                {
+                    FixMeshRemoveUnusedVertices();
+                    return;
+                }
+                GUI.backgroundColor = bgc;
+            }
+
+            if (meshReport == null) return;
+
+            if (meshReport.weldCandidates.Count == 0 &&
+                meshReport.emptyUvEntries.Count == 0 &&
+                meshReport.degenerateEntries.Count == 0 &&
+                meshReport.unusedVertEntries.Count == 0)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.HelpBox("No mesh issues found.", MessageType.Info);
+            }
+        }
+
+        void DrawMeshRecalcSection()
+        {
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField("Recalculate / Optimize", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                "Standalone operations on current LODGroup meshes.",
+                EditorStyles.miniLabel);
+
+            var bgc = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(.55f, .75f, .95f);
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Recalc Normals", GUILayout.Height(22)))
+                FixMeshRecalculate(RecalcKind.Normals);
+            if (GUILayout.Button("Recalc Tangents", GUILayout.Height(22)))
+                FixMeshRecalculate(RecalcKind.Tangents);
+            if (GUILayout.Button("Recalc Bounds", GUILayout.Height(22)))
+                FixMeshRecalculate(RecalcKind.Bounds);
+            EditorGUILayout.EndHorizontal();
+
+            GUI.backgroundColor = new Color(.7f, .55f, .95f);
+            if (GUILayout.Button("Optimize Mesh (meshopt)", GUILayout.Height(22)))
+                FixMeshOptimize();
+
+            GUI.backgroundColor = bgc;
+        }
+
+        void DrawImportSettingsSection()
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.HelpBox(
+                "Unity's built-in vertex weld and secondary UV generator corrupt the tool's " +
+                "lightmap UV2 output. They must stay disabled. This is already enforced per-reimport " +
+                "by Uv2AssetPostprocessor; this scan surfaces the source state across all tool-managed " +
+                "FBX files.",
+                MessageType.Info);
+
+            var bgc = GUI.backgroundColor;
+            EditorGUILayout.BeginHorizontal();
+            GUI.backgroundColor = new Color(.6f, .75f, .9f);
+            if (GUILayout.Button("Scan", GUILayout.Height(24)))
+                ScanImportSettings();
+            GUI.backgroundColor = new Color(.4f, .8f, .4f);
+            GUI.enabled = importIssues != null && importIssues.Any(i => i.isHardIssue);
+            if (GUILayout.Button("Fix", GUILayout.Height(24)))
+                FixImportSettings();
+            GUI.enabled = true;
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+
+            if (importIssues == null) return;
+
+            if (importIssues.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No import-setting issues found.", MessageType.Info);
+                return;
+            }
+
+            EditorGUILayout.Space(4);
+            foreach (var issue in importIssues)
+            {
+                var msgType = issue.isHardIssue ? MessageType.Warning : MessageType.Info;
+                EditorGUILayout.HelpBox(issue.description, msgType);
+            }
         }
 
         void ScanMesh()
@@ -1407,7 +1722,7 @@ namespace LightmapUvTool
                     if (mesh == null) continue;
 
                     int verts = mesh.vertexCount;
-                    int tris = GetTriangleCount(mesh);
+                    int tris = MeshHygieneUtility.GetTriangleCount(mesh);
                     lodInfo.totalVerts += verts;
                     lodInfo.totalTris += tris;
                     lodInfo.meshes.Add(new MeshStats
@@ -1481,6 +1796,29 @@ namespace LightmapUvTool
                             hasZeroColors = hasZeroColors
                         });
                     }
+
+                    // Degenerate triangles
+                    int degenerate = MeshHygieneUtility.CountDegenerateTriangles(mesh);
+                    if (degenerate > 0)
+                    {
+                        meshReport.degenerateEntries.Add(new DegenerateEntry
+                        {
+                            entry = e,
+                            count = degenerate
+                        });
+                    }
+
+                    // Unused vertices
+                    int unused = MeshHygieneUtility.CountUnusedVertices(mesh);
+                    if (unused > 0)
+                    {
+                        meshReport.unusedVertEntries.Add(new UnusedVertEntry
+                        {
+                            entry = e,
+                            count = unused,
+                            hasBlendShapes = mesh.blendShapeCount > 0
+                        });
+                    }
                 }
 
                 meshReport.lods.Add(lodInfo);
@@ -1500,9 +1838,14 @@ namespace LightmapUvTool
             }
 
             int colorCount = meshReport.emptyUvEntries.Count(e => e.hasZeroColors);
+            int totalDegen = meshReport.degenerateEntries.Sum(d => d.count);
+            int totalUnused = meshReport.unusedVertEntries.Sum(u => u.count);
             UvtLog.Info($"Mesh scan: {meshReport.weldCandidates.Count} weld candidate(s), " +
                         $"{meshReport.emptyUvEntries.Count} mesh(es) with empty channels" +
-                        (colorCount > 0 ? $" ({colorCount} with zero vertex colors)" : "") + ".");
+                        (colorCount > 0 ? $" ({colorCount} with zero vertex colors)" : "") +
+                        (totalDegen > 0 ? $", {totalDegen} degenerate tri(s) across {meshReport.degenerateEntries.Count} mesh(es)" : "") +
+                        (totalUnused > 0 ? $", {totalUnused} unused vert(s) across {meshReport.unusedVertEntries.Count} mesh(es)" : "") +
+                        ".");
 
             // Initialize desired-state toggles from current mesh attributes (union),
             // but only on first scan (all toggles false = never initialized)
@@ -1525,31 +1868,14 @@ namespace LightmapUvTool
         {
             if (meshReport == null || meshReport.weldCandidates.Count == 0) return;
 
-            int undoGroup = Undo.GetCurrentGroup();
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Batch Weld");
             int welded = 0;
 
             foreach (var e in meshReport.weldCandidates)
             {
-                var mesh = e.originalMesh ?? e.fbxMesh;
-                if (mesh == null) continue;
-                if (!mesh.isReadable)
-                {
-                    UvtLog.Warn($"Skipped {mesh.name}: mesh is not readable (enable Read/Write in import settings)");
+                if (!MeshHygieneUtility.PrepareWritable(e, "Batch Weld", out var mesh))
                     continue;
-                }
 
-                // Clone if asset-backed
-                if (AssetDatabase.Contains(mesh))
-                {
-                    var clone = UnityEngine.Object.Instantiate(mesh);
-                    clone.name = mesh.name;
-                    Undo.RecordObject(e.meshFilter, "Batch Weld");
-                    e.meshFilter.sharedMesh = clone;
-                    e.originalMesh = clone;
-                    mesh = clone;
-                }
-
-                Undo.RecordObject(mesh, "Batch Weld");
                 if (Uv0Analyzer.WeldInPlace(mesh))
                 {
                     MeshOptimizer.Optimize(mesh);
@@ -1558,9 +1884,124 @@ namespace LightmapUvTool
                 }
             }
 
-            Undo.CollapseUndoOperations(undoGroup);
             UvtLog.Info($"Batch weld complete: {welded} mesh(es) welded.");
             meshReport = null;
+            requestRepaint?.Invoke();
+        }
+
+        void FixMeshRemoveDegenerate()
+        {
+            if (meshReport == null || meshReport.degenerateEntries.Count == 0) return;
+
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Remove Degenerate Triangles");
+            int totalRemoved = 0;
+            int affected = 0;
+
+            foreach (var entry in meshReport.degenerateEntries)
+            {
+                if (!MeshHygieneUtility.PrepareWritable(entry.entry, "Remove Degenerate Triangles", out var mesh))
+                    continue;
+                int removed = MeshHygieneUtility.RemoveDegenerateTriangles(mesh);
+                if (removed > 0)
+                {
+                    totalRemoved += removed;
+                    affected++;
+                    UvtLog.Info($"[Cleanup] {mesh.name}: removed {removed} degenerate triangle(s)");
+                }
+            }
+
+            UvtLog.Info($"Removed {totalRemoved} degenerate triangle(s) across {affected} mesh(es).");
+            meshReport = null;
+            requestRepaint?.Invoke();
+        }
+
+        void FixMeshRemoveUnusedVertices()
+        {
+            if (meshReport == null || meshReport.unusedVertEntries.Count == 0) return;
+
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Remove Unused Vertices");
+            int totalRemoved = 0;
+            int affected = 0;
+
+            foreach (var entry in meshReport.unusedVertEntries)
+            {
+                if (entry.hasBlendShapes)
+                {
+                    UvtLog.Warn($"[Cleanup] Skipped '{entry.entry.originalMesh?.name}' — blend shapes present.");
+                    continue;
+                }
+                if (!MeshHygieneUtility.PrepareWritable(entry.entry, "Remove Unused Vertices", out var mesh))
+                    continue;
+                int removed = MeshHygieneUtility.CompactVertices(mesh);
+                if (removed > 0)
+                {
+                    totalRemoved += removed;
+                    affected++;
+                    UvtLog.Info($"[Cleanup] {mesh.name}: removed {removed} unused vertex(es)");
+                }
+            }
+
+            UvtLog.Info($"Removed {totalRemoved} unused vertex(es) across {affected} mesh(es).");
+            meshReport = null;
+            requestRepaint?.Invoke();
+        }
+
+        enum RecalcKind { Normals, Tangents, Bounds }
+
+        void FixMeshRecalculate(RecalcKind kind)
+        {
+            if (ctx.LodGroup == null || ctx.MeshEntries == null) return;
+
+            string label = kind switch
+            {
+                RecalcKind.Normals  => "Cleanup: Recalculate Normals",
+                RecalcKind.Tangents => "Cleanup: Recalculate Tangents",
+                RecalcKind.Bounds   => "Cleanup: Recalculate Bounds",
+                _ => "Cleanup: Recalculate"
+            };
+
+            using var _undo = MeshHygieneUtility.BeginUndoGroup(label);
+            int touched = 0;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (!e.include) continue;
+                if (!MeshHygieneUtility.PrepareWritable(e, label, out var mesh))
+                    continue;
+                switch (kind)
+                {
+                    case RecalcKind.Normals:  mesh.RecalculateNormals();  break;
+                    case RecalcKind.Tangents: mesh.RecalculateTangents(); break;
+                    case RecalcKind.Bounds:   mesh.RecalculateBounds();   break;
+                }
+                touched++;
+            }
+            UvtLog.Info($"{label}: {touched} mesh(es).");
+            requestRepaint?.Invoke();
+        }
+
+        void FixMeshOptimize()
+        {
+            if (ctx.LodGroup == null || ctx.MeshEntries == null) return;
+
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Optimize Mesh");
+            int touched = 0;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (!e.include) continue;
+                if (!MeshHygieneUtility.PrepareWritable(e, "Optimize Mesh", out var mesh))
+                    continue;
+                var result = MeshOptimizer.Optimize(mesh);
+                if (result.ok)
+                {
+                    touched++;
+                    UvtLog.Info($"[Cleanup] Optimized {mesh.name}: {result.originalVertexCount} → {result.optimizedVertexCount} verts");
+                }
+                else if (!string.IsNullOrEmpty(result.error))
+                {
+                    UvtLog.Warn($"[Cleanup] Optimize failed on {mesh.name}: {result.error}");
+                }
+            }
+            UvtLog.Info($"Optimize Mesh: {touched} mesh(es).");
             requestRepaint?.Invoke();
         }
 
@@ -1568,28 +2009,16 @@ namespace LightmapUvTool
         {
             if (meshReport == null || meshReport.emptyUvEntries.Count == 0) return;
 
-            int undoGroup = Undo.GetCurrentGroup();
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Strip Empty Channels");
             int stripped = 0;
 
             foreach (var uvEntry in meshReport.emptyUvEntries)
             {
                 var entry = uvEntry.entry;
                 var channels = uvEntry.channels;
-                var mesh = entry.originalMesh ?? entry.fbxMesh;
-                if (mesh == null || !mesh.isReadable) continue;
+                if (!MeshHygieneUtility.PrepareWritable(entry, "Strip Empty Channels", out var mesh))
+                    continue;
 
-                // Clone if asset-backed
-                if (AssetDatabase.Contains(mesh))
-                {
-                    var clone = UnityEngine.Object.Instantiate(mesh);
-                    clone.name = mesh.name;
-                    Undo.RecordObject(entry.meshFilter, "Strip Empty Channels");
-                    entry.meshFilter.sharedMesh = clone;
-                    entry.originalMesh = clone;
-                    mesh = clone;
-                }
-
-                Undo.RecordObject(mesh, "Strip Empty Channels");
                 foreach (int ch in channels)
                     mesh.SetUVs(ch, (List<Vector2>)null);
                 // Note: vertex colors are NOT auto-stripped — they may contain
@@ -1599,7 +2028,6 @@ namespace LightmapUvTool
                 UvtLog.Info($"Stripped {channels.Count} empty UV channel(s) from {mesh.name}");
             }
 
-            Undo.CollapseUndoOperations(undoGroup);
             UvtLog.Info($"Stripped {stripped} empty channel(s) total.");
             meshReport = null;
             requestRepaint?.Invoke();
@@ -1609,7 +2037,7 @@ namespace LightmapUvTool
         {
             if (splitCandidates == null || splitCandidates.Count == 0) return;
 
-            int undoGroup = Undo.GetCurrentGroup();
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Split by Material");
             int split = 0;
 
             foreach (var sc in splitCandidates)
@@ -1767,7 +2195,6 @@ namespace LightmapUvTool
                 split++;
             }
 
-            Undo.CollapseUndoOperations(undoGroup);
             UvtLog.Info($"Split {split} multi-material mesh(es).");
 
             if (split > 0 && ctx.LodGroup != null)
@@ -1783,7 +2210,7 @@ namespace LightmapUvTool
         {
             if (mergeCandidates == null || mergeCandidates.Count == 0) return;
 
-            int undoGroup = Undo.GetCurrentGroup();
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Merge Same-Material");
             int merged = 0;
 
             foreach (var group in mergeCandidates)
@@ -2005,7 +2432,6 @@ namespace LightmapUvTool
                 UvtLog.Info($"Created merged object: {mergedMesh.name} ({allPos.Count} verts)");
             }
 
-            Undo.CollapseUndoOperations(undoGroup);
             UvtLog.Info($"Merged {merged} group(s).");
 
             if (merged > 0 && ctx.LodGroup != null)
@@ -2034,23 +2460,19 @@ namespace LightmapUvTool
 
         void DrawSplitMergeSection()
         {
-            EditorGUILayout.Space(8);
-            foldSplitMerge = EditorGUILayout.Foldout(foldSplitMerge, "Split / Merge", true);
-            if (!foldSplitMerge) return;
-
-            EditorGUI.indentLevel++;
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField("Split / Merge", EditorStyles.boldLabel);
 
             if (ctx.LodGroup == null)
             {
                 EditorGUILayout.HelpBox("Select a LODGroup first.", MessageType.Info);
-                EditorGUI.indentLevel--;
                 return;
             }
 
             // Scan button
             var bgc = GUI.backgroundColor;
             GUI.backgroundColor = new Color(.6f, .75f, .9f);
-            if (GUILayout.Button("Scan", GUILayout.Height(24)))
+            if (GUILayout.Button("Scan Split/Merge", GUILayout.Height(22)))
                 ScanSplitMerge();
             GUI.backgroundColor = bgc;
 
@@ -2116,7 +2538,6 @@ namespace LightmapUvTool
                     if (GUILayout.Button($"Split Selected ({selected})", GUILayout.Height(28)))
                     {
                         FixMeshSplitByMaterial();
-                        EditorGUI.indentLevel--;
                         return;
                     }
                     GUI.enabled = true;
@@ -2186,15 +2607,12 @@ namespace LightmapUvTool
                     if (GUILayout.Button($"Merge Selected ({selected})", GUILayout.Height(28)))
                     {
                         FixMeshMerge();
-                        EditorGUI.indentLevel--;
                         return;
                     }
                     GUI.enabled = true;
                     GUI.backgroundColor = bgc;
                 }
             }
-
-            EditorGUI.indentLevel--;
         }
 
         void ScanSplitMerge()
@@ -2256,18 +2674,14 @@ namespace LightmapUvTool
 
         void DrawAttributesSection()
         {
-            EditorGUILayout.Space(8);
-            foldAttributes = EditorGUILayout.Foldout(foldAttributes, "Mesh Attributes", true);
-            if (!foldAttributes) return;
-
-            EditorGUI.indentLevel++;
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField("Mesh Attributes", EditorStyles.boldLabel);
 
             if (meshReport == null || meshReport.attributes.Count == 0)
             {
                 EditorGUILayout.HelpBox(
                     "Click Scan in the Mesh section above to inspect attributes.",
                     MessageType.Info);
-                EditorGUI.indentLevel--;
                 return;
             }
 
@@ -2369,23 +2783,74 @@ namespace LightmapUvTool
                 FixApplyAttributes();
             GUI.enabled = true;
             GUI.backgroundColor = bgc;
-
-            EditorGUI.indentLevel--;
         }
 
+
+        // ═══════════════════════════════════════════════════════════════
+        // Section: Import Settings
+        // ═══════════════════════════════════════════════════════════════
+
+        void ScanImportSettings()
+        {
+            importIssues = new List<MeshHygieneUtility.ImportSettingsIssue>();
+            if (ctx.LodGroup == null || ctx.MeshEntries == null) return;
+
+            var fbxPaths = new HashSet<string>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                Mesh m = e.fbxMesh ?? e.originalMesh;
+                if (m == null) continue;
+                string p = AssetDatabase.GetAssetPath(m);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
+                    fbxPaths.Add(p);
+            }
+
+            foreach (var path in fbxPaths)
+                MeshHygieneUtility.ScanImportSettings(path, importIssues);
+
+            UvtLog.Info($"Import Settings scan: {importIssues.Count} issue(s) across {fbxPaths.Count} FBX file(s).");
+        }
+
+        void FixImportSettings()
+        {
+            if (importIssues == null || importIssues.Count == 0) return;
+
+            // Unique asset paths with hard issues.
+            var paths = new HashSet<string>();
+            foreach (var i in importIssues)
+                if (i.isHardIssue) paths.Add(i.assetPath);
+
+            if (paths.Count == 0)
+            {
+                UvtLog.Info("Import Settings: nothing to fix (only informational issues).");
+                importIssues = null;
+                requestRepaint?.Invoke();
+                return;
+            }
+
+            foreach (var path in paths)
+            {
+                Uv2AssetPostprocessor.PrepareImportSettings(path, force: true);
+                UvtLog.Info($"Import Settings: normalized '{System.IO.Path.GetFileName(path)}'.");
+            }
+
+            UvtLog.Info($"Import Settings: fixed {paths.Count} FBX file(s).");
+            importIssues = null;
+            if (ctx.LodGroup != null) ctx.Refresh(ctx.LodGroup);
+            requestRepaint?.Invoke();
+        }
 
         void FixApplyAttributes()
         {
             if (meshReport == null) return;
 
-            int undoGroup = Undo.GetCurrentGroup();
+            using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Apply Attributes");
             int changed = 0;
 
             foreach (var attr in meshReport.attributes)
             {
                 var entry = attr.entry;
-                var mesh = entry.originalMesh ?? entry.fbxMesh;
-                if (mesh == null || entry.meshFilter == null || !mesh.isReadable) continue;
+                if (entry.meshFilter == null) continue;
 
                 // Check if any change needed
                 bool needsChange = false;
@@ -2397,18 +2862,9 @@ namespace LightmapUvTool
 
                 if (!needsChange) continue;
 
-                // Clone if asset-backed
-                if (AssetDatabase.Contains(mesh))
-                {
-                    var clone = UnityEngine.Object.Instantiate(mesh);
-                    clone.name = mesh.name;
-                    Undo.RecordObject(entry.meshFilter, "Apply Attributes");
-                    entry.meshFilter.sharedMesh = clone;
-                    entry.originalMesh = clone;
-                    mesh = clone;
-                }
+                if (!MeshHygieneUtility.PrepareWritable(entry, "Apply Attributes", out var mesh))
+                    continue;
 
-                Undo.RecordObject(mesh, "Apply Attributes");
                 int vertCount = mesh.vertexCount;
 
                 // Normals
@@ -2476,10 +2932,104 @@ namespace LightmapUvTool
                 changed++;
             }
 
-            Undo.CollapseUndoOperations(undoGroup);
             UvtLog.Info($"Applied attribute changes to {changed} mesh(es).");
             meshReport = null;
             requestRepaint?.Invoke();
+        }
+
+        /// <summary>
+        /// Move mesh from root to a new child, sort all mesh children by polycount,
+        /// and rename them _LOD0, _LOD1, etc. Root becomes empty pivot.
+        /// </summary>
+        void MoveRootMeshToChild(GameObject root)
+        {
+            string baseName = UvToolContext.ExtractGroupKey(root.name);
+            if (string.IsNullOrEmpty(baseName)) baseName = root.name;
+
+            var rootMf = root.GetComponent<MeshFilter>();
+            var rootMr = root.GetComponent<MeshRenderer>();
+            if (rootMf == null || rootMf.sharedMesh == null) return;
+
+            // Create child for root's mesh
+            var lod0Child = new GameObject(baseName + "_temp");
+            Undo.RegisterCreatedObjectUndo(lod0Child, "Move Root Mesh");
+            lod0Child.transform.SetParent(root.transform, false);
+            var newMf = lod0Child.AddComponent<MeshFilter>();
+            newMf.sharedMesh = rootMf.sharedMesh;
+            if (rootMr != null)
+            {
+                var newMr = lod0Child.AddComponent<MeshRenderer>();
+                newMr.sharedMaterials = rootMr.sharedMaterials;
+                newMr.shadowCastingMode = rootMr.shadowCastingMode;
+                newMr.receiveShadows = rootMr.receiveShadows;
+                newMr.lightProbeUsage = rootMr.lightProbeUsage;
+                newMr.reflectionProbeUsage = rootMr.reflectionProbeUsage;
+                if (rootMr is MeshRenderer srcMr && newMr is MeshRenderer dstMr)
+                {
+                    dstMr.receiveGI = srcMr.receiveGI;
+                    dstMr.scaleInLightmap = srcMr.scaleInLightmap;
+                }
+                GameObjectUtility.SetStaticEditorFlags(lod0Child,
+                    GameObjectUtility.GetStaticEditorFlags(root));
+                Undo.DestroyObjectImmediate(rootMr);
+            }
+            Undo.DestroyObjectImmediate(rootMf);
+
+            // Collect all mesh children (excluding collision)
+            var colSet = new HashSet<GameObject>(MeshHygieneUtility.FindCollisionObjects(root.transform));
+            var lodCandidates = new List<(Transform t, int polyCount)>();
+            foreach (Transform child in root.transform)
+            {
+                if (colSet.Contains(child.gameObject)) continue;
+                var mf = child.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+                lodCandidates.Add((child, MeshHygieneUtility.GetTriangleCount(mf.sharedMesh)));
+            }
+
+            // Sort by polycount descending (LOD0 = highest)
+            lodCandidates.Sort((a, b) => b.polyCount.CompareTo(a.polyCount));
+
+            // Rename to _LOD0, _LOD1, etc.
+            for (int i = 0; i < lodCandidates.Count; i++)
+            {
+                string newName = baseName + "_LOD" + i;
+                if (lodCandidates[i].t.name != newName)
+                {
+                    Undo.RecordObject(lodCandidates[i].t.gameObject, "Rename LOD");
+                    lodCandidates[i].t.name = newName;
+                }
+            }
+
+            UvtLog.Info($"Moved root mesh to child, sorted {lodCandidates.Count} LOD(s) by polycount.");
+        }
+
+        /// <summary>
+        /// Find the first collision mesh (_COL/_Collider) and add MeshCollider to root.
+        /// Disable renderer on collision nodes.
+        /// </summary>
+        void AddColliderFromCollisionMesh(GameObject root)
+        {
+            if (root.GetComponent<MeshCollider>() != null) return;
+
+            var colObjects = MeshHygieneUtility.FindCollisionObjects(root.transform);
+            foreach (var colObj in colObjects)
+            {
+                var mf = colObj.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+
+                var collider = Undo.AddComponent<MeshCollider>(root);
+                collider.sharedMesh = mf.sharedMesh;
+                UvtLog.Info($"Added MeshCollider to {root.name} from {colObj.name}");
+
+                // Disable renderer on collision node
+                var mr = colObj.GetComponent<MeshRenderer>();
+                if (mr != null)
+                {
+                    Undo.RecordObject(mr, "Disable COL Renderer");
+                    mr.enabled = false;
+                }
+                break; // one collider is enough
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -2506,65 +3056,6 @@ namespace LightmapUvTool
             GUI.backgroundColor = bgc;
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.Space(4);
-        }
-
-        static List<GameObject> FindCollisionObjects(Transform root)
-        {
-            var result = new List<GameObject>();
-            for (int i = 0; i < root.childCount; i++)
-            {
-                var child = root.GetChild(i);
-                if (child.name.Contains("_COL"))
-                {
-                    result.Add(child.gameObject);
-                    for (int j = 0; j < child.childCount; j++)
-                    {
-                        if (child.GetChild(j).name.Contains("_COL"))
-                            result.Add(child.GetChild(j).gameObject);
-                    }
-                }
-            }
-            return result;
-        }
-
-        static int GetTriangleCount(Mesh mesh)
-        {
-            if (mesh == null) return 0;
-            long count = 0;
-            for (int i = 0; i < mesh.subMeshCount; i++)
-                count += mesh.GetIndexCount(i);
-            return (int)(count / 3L);
-        }
-
-        static bool AreMeshesDuplicate(Mesh a, Mesh b)
-        {
-            if (a == b) return true;
-            if (a.vertexCount != b.vertexCount) return false;
-
-            // Compare index counts per submesh
-            if (a.subMeshCount != b.subMeshCount) return false;
-            for (int s = 0; s < a.subMeshCount; s++)
-            {
-                if (a.GetIndexCount(s) != b.GetIndexCount(s)) return false;
-            }
-
-            // Compare bounds (works without isReadable)
-            float eps = 0.01f;
-            if ((a.bounds.center - b.bounds.center).sqrMagnitude > eps) return false;
-            if ((a.bounds.size - b.bounds.size).sqrMagnitude > eps) return false;
-
-            // If both readable, do vertex comparison
-            if (a.isReadable && b.isReadable)
-            {
-                var va = a.vertices;
-                var vb = b.vertices;
-                if (va.Length == 0) return true;
-                float vEps = 1e-5f;
-                if ((va[0] - vb[0]).sqrMagnitude > vEps) return false;
-                if ((va[va.Length - 1] - vb[vb.Length - 1]).sqrMagnitude > vEps) return false;
-            }
-
-            return true;
         }
 
         // ── Unused interface methods ──

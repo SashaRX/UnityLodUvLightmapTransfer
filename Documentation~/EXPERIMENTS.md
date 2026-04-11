@@ -109,7 +109,7 @@
 - Без rebasing: hull 1+ получает отрицательные индексы → сломанный mesh.
 
 ### Import settings (weldVertices и т.д.) безопасно оставлять
-- `PrepareImportSettings()` отключает `weldVertices`, `optimizeMeshPolygons`, `optimizeMeshVertices` для корректной работы UV2 remap.
+- `PrepareImportSettings()` отключает `weldVertices`, `meshCompression`, `meshOptimizationFlags` для корректной работы UV2 remap.
 - Эти настройки сохраняются в `.meta` и **не ломают mesh-и** — просто отключают minor оптимизации.
 - НЕ нужно восстанавливать после экспорта. Нюк-кнопка НЕ трогает `.meta`.
 

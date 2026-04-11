@@ -3,7 +3,7 @@
   "version": "0.15.43",
   "displayName": "Mesh Lab",
   "description": "Unity Editor tool suite: UV2 lightmap transfer, LOD generation, UV analysis, and FBX export with binary format support.",
-  "unity": "2020.3",
+  "unity": "6000.0",
   "author": {
     "name": "SashaRX",
     "url": "https://github.com/SashaRX"
@@ -22,6 +22,6 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "com.unity.formats.fbx": "5.0.0"
+    "com.unity.formats.fbx": "5.1.5"
   }
 }

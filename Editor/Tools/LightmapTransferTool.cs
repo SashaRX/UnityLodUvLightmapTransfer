@@ -1108,19 +1108,31 @@ namespace LightmapUvTool
                         }
                     }
 
+                    // ── Remove stale children from cloned FBX ──
+                    // Keep only direct children whose names match our mesh entries.
+                    // Old _COL, _Collider, "Lit", duplicate LODs etc. are removed.
+                    // Must run BEFORE NormalizeExportHierarchy (which renames LOD0).
+                    var validNames = new HashSet<string>();
+                    foreach (var (entry, resultMesh) in entries)
+                    {
+                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        validNames.Add(meshName);
+                    }
+                    for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
+                    {
+                        var ch = tempRoot.transform.GetChild(ci);
+                        if (!validNames.Contains(ch.name))
+                            UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                    }
+
+                    // ── Normalize FBX hierarchy ──
+                    // Ensure root is a clean pivot (identity transform, no mesh)
+                    // and LOD0 child named same as root gets _LOD0 suffix.
+                    NormalizeExportHierarchy(tempRoot);
+
                     // Add collision meshes from sidecar (if any)
                     var collisionData = CollisionMeshTool.GetCollisionMeshesFromSidecar(sourceFbxPath);
                     int collisionMeshCount = 0;
-                    if (collisionData.Count > 0)
-                    {
-                        // Remove existing _COL nodes from the cloned hierarchy to prevent duplicates
-                        for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
-                        {
-                            var ch = tempRoot.transform.GetChild(ci);
-                            if (IsCollisionNodeName(ch.name))
-                                UnityEngine.Object.DestroyImmediate(ch.gameObject);
-                        }
-                    }
                     foreach (var (colMeshName, colMeshes, isConvex) in collisionData)
                     {
                         if (colMeshes.Count == 1 && !isConvex)
@@ -1153,7 +1165,7 @@ namespace LightmapUvTool
                     foreach (var colMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
                     {
                         if (colMf == null || colMf.sharedMesh == null) continue;
-                        if (!IsCollisionNodeName(colMf.gameObject.name)) continue;
+                        if (!MeshHygieneUtility.IsCollisionNodeName(colMf.gameObject.name)) continue;
                         var srcCol = colMf.sharedMesh;
                         if (srcCol.isReadable)
                         {
@@ -1185,6 +1197,21 @@ namespace LightmapUvTool
                             // the collision data should normally come from the sidecar.
                             UvtLog.Warn($"[FBX Export] Collision mesh '{srcCol.name}' is not readable — " +
                                         "skipping strip. Re-save collision to sidecar to fix.");
+                        }
+                    }
+
+                    // Trim material arrays to match submesh count — prevents
+                    // FBX Exporter from creating spurious default "Lit" material entries.
+                    foreach (var mr in tempRoot.GetComponentsInChildren<MeshRenderer>(true))
+                    {
+                        var mesh = mr.GetComponent<MeshFilter>()?.sharedMesh;
+                        if (mesh == null) continue;
+                        var mats = mr.sharedMaterials;
+                        if (mats.Length > mesh.subMeshCount)
+                        {
+                            var trimmed = new Material[mesh.subMeshCount];
+                            System.Array.Copy(mats, trimmed, trimmed.Length);
+                            mr.sharedMaterials = trimmed;
                         }
                     }
 
@@ -1436,13 +1463,78 @@ namespace LightmapUvTool
             return (int)(indexCount / 3L);
         }
 
-        static bool IsCollisionNodeName(string nodeName)
+        /// <summary>
+        /// Normalizes the export hierarchy:
+        /// - Root transform reset to identity (clean pivot at 0,0,0).
+        /// - Direct child with same name as root (LOD0 without suffix) renamed to _LOD0.
+        /// - Collision node transforms baked into vertices (pivot at origin).
+        /// Does NOT move meshes off the root — preserves original FBX structure.
+        /// </summary>
+        static void NormalizeExportHierarchy(GameObject root)
         {
-            if (string.IsNullOrEmpty(nodeName)) return false;
-            return System.Text.RegularExpressions.Regex.IsMatch(
-                nodeName,
-                @"_COL(?:_Hull\d+)?$",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            string baseName = root.name;
+
+            // Reset root transform to identity (clean pivot at origin)
+            root.transform.localPosition = Vector3.zero;
+            root.transform.localRotation = Quaternion.identity;
+            root.transform.localScale = Vector3.one;
+
+            // Rename direct child that matches root name (LOD0 without suffix) to baseName_LOD0
+            foreach (Transform child in root.transform)
+            {
+                if (child.name == baseName)
+                {
+                    child.name = baseName + "_LOD0";
+                    break;
+                }
+            }
+
+            // Collision nodes: bake transform offset into vertices, then reset to identity.
+            // This keeps the mesh in place but puts the pivot at 0,0,0.
+            foreach (var colMf in root.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (colMf == null || colMf.sharedMesh == null) continue;
+                if (!MeshHygieneUtility.IsCollisionNodeName(colMf.gameObject.name))
+                    continue;
+
+                var t = colMf.transform;
+                if (t.localPosition == Vector3.zero &&
+                    t.localRotation == Quaternion.identity &&
+                    t.localScale == Vector3.one)
+                    continue; // already at identity
+
+                // Bake local transform into mesh vertices
+                var mesh = colMf.sharedMesh;
+                if (!mesh.isReadable) continue;
+                var localMatrix = Matrix4x4.TRS(t.localPosition, t.localRotation, t.localScale);
+                var verts = mesh.vertices;
+                var normals = mesh.normals;
+                for (int i = 0; i < verts.Length; i++)
+                {
+                    verts[i] = localMatrix.MultiplyPoint3x4(verts[i]);
+                    if (i < normals.Length)
+                        normals[i] = localMatrix.MultiplyVector(normals[i]).normalized;
+                }
+                mesh.SetVertices(verts);
+                if (normals.Length > 0)
+                    mesh.SetNormals(normals);
+                var tangents = mesh.tangents;
+                if (tangents.Length > 0)
+                {
+                    for (int i = 0; i < tangents.Length; i++)
+                    {
+                        Vector3 tVec = localMatrix.MultiplyVector(new Vector3(tangents[i].x, tangents[i].y, tangents[i].z)).normalized;
+                        tangents[i] = new Vector4(tVec.x, tVec.y, tVec.z, tangents[i].w);
+                    }
+                    mesh.tangents = tangents;
+                }
+                mesh.RecalculateBounds();
+
+                // Reset transform to identity
+                t.localPosition = Vector3.zero;
+                t.localRotation = Quaternion.identity;
+                t.localScale = Vector3.one;
+            }
         }
 
         void GenerateLods()
