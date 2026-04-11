@@ -1030,6 +1030,7 @@ namespace LightmapUvTool
                 if (fbxPrefab == null) { UvtLog.Error("[FBX Export] Cannot load FBX prefab: " + sourceFbxPath); allGroupsSucceeded = false; continue; }
                 var tempRoot = UnityEngine.Object.Instantiate(fbxPrefab);
                 tempRoot.name = fbxPrefab.name;
+                PromoteRootMeshToLod0Child(tempRoot);
 
                 try
                 {
@@ -1461,6 +1462,56 @@ namespace LightmapUvTool
             for (int i = 0; i < subMeshCount; i++)
                 indexCount += mesh.GetIndexCount(i);
             return (int)(indexCount / 3L);
+        }
+
+        /// <summary>
+        /// If the cloned source FBX carries its visible mesh on the root object,
+        /// split it into a new child named after the mesh so the rest of the
+        /// export pipeline treats it as a LOD entry. NormalizeExportHierarchy
+        /// will then rename the new child to baseName_LOD0.
+        /// </summary>
+        static void PromoteRootMeshToLod0Child(GameObject tempRoot)
+        {
+            if (tempRoot == null) return;
+            var rootMf = tempRoot.GetComponent<MeshFilter>();
+            if (rootMf == null || rootMf.sharedMesh == null) return;
+            var rootMr = tempRoot.GetComponent<MeshRenderer>();
+
+            var rootMesh = rootMf.sharedMesh;
+
+            // Skip if a direct child already holds this mesh — source FBX has
+            // both a root-level mesh and a duplicate LOD child; we'd collide.
+            for (int ci = 0; ci < tempRoot.transform.childCount; ci++)
+            {
+                var existing = tempRoot.transform.GetChild(ci).GetComponent<MeshFilter>();
+                if (existing != null && existing.sharedMesh == rootMesh) return;
+            }
+
+            // Name the child after the mesh — the stale-child pruning keeps
+            // children whose name matches a mesh-entry key, and
+            // NormalizeExportHierarchy renames "direct child equal to root name"
+            // to baseName_LOD0.
+            string childName = rootMesh.name;
+            if (string.IsNullOrEmpty(childName)) childName = tempRoot.name;
+
+            var lod0 = new GameObject(childName);
+            lod0.transform.SetParent(tempRoot.transform, false);
+            lod0.transform.localPosition = Vector3.zero;
+            lod0.transform.localRotation = Quaternion.identity;
+            lod0.transform.localScale = Vector3.one;
+
+            var newMf = lod0.AddComponent<MeshFilter>();
+            newMf.sharedMesh = rootMesh;
+
+            if (rootMr != null)
+            {
+                var newMr = lod0.AddComponent<MeshRenderer>();
+                CopyRendererSettings(rootMr, newMr);
+                GameObjectUtility.SetStaticEditorFlags(lod0,
+                    GameObjectUtility.GetStaticEditorFlags(tempRoot));
+                UnityEngine.Object.DestroyImmediate(rootMr);
+            }
+            UnityEngine.Object.DestroyImmediate(rootMf);
         }
 
         /// <summary>

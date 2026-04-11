@@ -2950,12 +2950,16 @@ namespace LightmapUvTool
             var rootMr = root.GetComponent<MeshRenderer>();
             if (rootMf == null || rootMf.sharedMesh == null) return;
 
+            var rootMesh = rootMf.sharedMesh;
+            var rootMc = root.GetComponent<MeshCollider>();
+            bool relocateCollider = rootMc != null && rootMc.sharedMesh == rootMesh;
+
             // Create child for root's mesh
             var lod0Child = new GameObject(baseName + "_temp");
             Undo.RegisterCreatedObjectUndo(lod0Child, "Move Root Mesh");
             lod0Child.transform.SetParent(root.transform, false);
             var newMf = lod0Child.AddComponent<MeshFilter>();
-            newMf.sharedMesh = rootMf.sharedMesh;
+            newMf.sharedMesh = rootMesh;
             if (rootMr != null)
             {
                 var newMr = lod0Child.AddComponent<MeshRenderer>();
@@ -2972,6 +2976,23 @@ namespace LightmapUvTool
                 GameObjectUtility.SetStaticEditorFlags(lod0Child,
                     GameObjectUtility.GetStaticEditorFlags(root));
                 Undo.DestroyObjectImmediate(rootMr);
+            }
+            // Relocate MeshCollider to the new LOD0 child when it references the
+            // visible mesh (visual = collider). A collider pointing at a separate
+            // collision mesh stays on the root — that's the convention enforced by
+            // AddColliderFromCollisionMesh.
+            if (relocateCollider)
+            {
+                var newMc = Undo.AddComponent<MeshCollider>(lod0Child);
+                newMc.sharedMesh = rootMesh;
+                newMc.convex = rootMc.convex;
+                newMc.isTrigger = rootMc.isTrigger;
+                newMc.sharedMaterial = rootMc.sharedMaterial;
+                newMc.cookingOptions = rootMc.cookingOptions;
+                newMc.includeLayers = rootMc.includeLayers;
+                newMc.excludeLayers = rootMc.excludeLayers;
+                Undo.DestroyObjectImmediate(rootMc);
+                UvtLog.Info($"Relocated root MeshCollider to LOD0 child on {root.name}.");
             }
             Undo.DestroyObjectImmediate(rootMf);
 
