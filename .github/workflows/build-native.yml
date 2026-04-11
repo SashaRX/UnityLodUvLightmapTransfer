@@ -3,11 +3,11 @@ name: Build Native Libraries
 on:
   push:
     paths:
-      - 'Native/**'
+      - 'Native~/**'
       - '.github/workflows/build-native.yml'
   pull_request:
     paths:
-      - 'Native/**'
+      - 'Native~/**'
   workflow_dispatch:
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure CMake
-        run: cmake -S Native -B build ${{ matrix.cmake_args }} -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S 'Native~' -B build ${{ matrix.cmake_args }} -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release
