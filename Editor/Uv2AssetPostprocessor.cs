@@ -90,15 +90,11 @@ namespace LightmapUvTool
                 UvtLog.Info($"[UV2 Preprocess] Disabled meshCompression ({modelImporter.meshCompression}) on '{assetPath}'");
                 modelImporter.meshCompression = ModelImporterMeshCompression.Off;
             }
-            if (modelImporter.optimizeMeshPolygons)
+            // Unity 2022.1+ unified optimizeMeshPolygons/Vertices into meshOptimizationFlags.
+            if (modelImporter.meshOptimizationFlags != 0)
             {
-                modelImporter.optimizeMeshPolygons = false;
-                UvtLog.Info($"[UV2 Preprocess] Disabled optimizeMeshPolygons on '{assetPath}'");
-            }
-            if (modelImporter.optimizeMeshVertices)
-            {
-                modelImporter.optimizeMeshVertices = false;
-                UvtLog.Info($"[UV2 Preprocess] Disabled optimizeMeshVertices on '{assetPath}'");
+                UvtLog.Info($"[UV2 Preprocess] Cleared meshOptimizationFlags ({modelImporter.meshOptimizationFlags}) on '{assetPath}'");
+                modelImporter.meshOptimizationFlags = 0;
             }
             modelImporter.SaveAndReimport();
         }

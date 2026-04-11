@@ -447,8 +447,7 @@ namespace LightmapUvTool
                 GenerateSecondaryUV,
                 WeldVertices,
                 MeshCompression,
-                OptimizeMeshPolygons,
-                OptimizeMeshVertices,
+                MeshOptimization,
                 NotReadable,
             }
             public string assetPath;
@@ -500,24 +499,16 @@ namespace LightmapUvTool
                     description = $"{fbxName}: meshCompression is {importer.meshCompression} — quantization breaks UV2 precision.",
                 });
             }
-            if (importer.optimizeMeshPolygons)
+            // Unity 2022.1+ unified the two booleans into this bitmask.
+            var optFlags = importer.meshOptimizationFlags;
+            if (optFlags != 0)
             {
                 sink.Add(new ImportSettingsIssue
                 {
                     assetPath = assetPath,
-                    kind = ImportSettingsIssue.Kind.OptimizeMeshPolygons,
+                    kind = ImportSettingsIssue.Kind.MeshOptimization,
                     isHardIssue = true,
-                    description = $"{fbxName}: optimizeMeshPolygons is ON — Unity reorders triangles and invalidates sidecar fingerprints.",
-                });
-            }
-            if (importer.optimizeMeshVertices)
-            {
-                sink.Add(new ImportSettingsIssue
-                {
-                    assetPath = assetPath,
-                    kind = ImportSettingsIssue.Kind.OptimizeMeshVertices,
-                    isHardIssue = true,
-                    description = $"{fbxName}: optimizeMeshVertices is ON — Unity reorders vertices and invalidates sidecar fingerprints.",
+                    description = $"{fbxName}: meshOptimizationFlags is {optFlags} — Unity reorders mesh data and invalidates sidecar fingerprints.",
                 });
             }
             if (!importer.isReadable)
