@@ -2973,6 +2973,8 @@ namespace LightmapUvTool
                     GameObjectUtility.GetStaticEditorFlags(root));
                 Undo.DestroyObjectImmediate(rootMr);
             }
+            // MeshCollider stays on the node (root) — the convention is
+            // Node(Collider) → LOD children, applied recursively to nested nodes.
             Undo.DestroyObjectImmediate(rootMf);
 
             // Collect all mesh children (excluding collision)
