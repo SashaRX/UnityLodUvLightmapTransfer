@@ -223,6 +223,48 @@ namespace LightmapUvTool
                     continue;
                 }
 
+                // Skip if UV0 bounding boxes don't overlap — no symmetry overlap to fix.
+                // SymSplit exists to separate overlapping UV0 regions so xatlas packs them
+                // at different UV2 positions. Without UV0 overlap, the split is unnecessary.
+                {
+                    Vector2 mnA = new Vector2(float.MaxValue, float.MaxValue);
+                    Vector2 mxA = new Vector2(float.MinValue, float.MinValue);
+                    foreach (int f in groupA)
+                        for (int j = 0; j < 3; j++)
+                        {
+                            int vi = tris[f * 3 + j];
+                            if (vi < uv0.Length) { mnA = Vector2.Min(mnA, uv0[vi]); mxA = Vector2.Max(mxA, uv0[vi]); }
+                        }
+                    Vector2 mnB = new Vector2(float.MaxValue, float.MaxValue);
+                    Vector2 mxB = new Vector2(float.MinValue, float.MinValue);
+                    foreach (int f in groupB)
+                        for (int j = 0; j < 3; j++)
+                        {
+                            int vi = tris[f * 3 + j];
+                            if (vi < uv0.Length) { mnB = Vector2.Min(mnB, uv0[vi]); mxB = Vector2.Max(mxB, uv0[vi]); }
+                        }
+                    // Check bbox overlap
+                    float oMinX = Mathf.Max(mnA.x, mnB.x);
+                    float oMaxX = Mathf.Min(mxA.x, mxB.x);
+                    float oMinY = Mathf.Max(mnA.y, mnB.y);
+                    float oMaxY = Mathf.Min(mxA.y, mxB.y);
+                    if (oMaxX <= oMinX || oMaxY <= oMinY)
+                    {
+                        UvtLog.Verbose($"[SymSplit] Shell {sp.shellIndex}: skip (UV0 bboxes don't overlap)");
+                        continue;
+                    }
+                    // Also check overlap is significant (>10% of smaller bbox area)
+                    float overlapArea = (oMaxX - oMinX) * (oMaxY - oMinY);
+                    float areaA = (mxA.x - mnA.x) * (mxA.y - mnA.y);
+                    float areaB = (mxB.x - mnB.x) * (mxB.y - mnB.y);
+                    float smaller = Mathf.Min(areaA, areaB);
+                    if (smaller > 1e-8f && overlapArea / smaller < 0.10f)
+                    {
+                        UvtLog.Verbose($"[SymSplit] Shell {sp.shellIndex}: skip (UV0 overlap too small: {overlapArea / smaller:P0})");
+                        continue;
+                    }
+                }
+
                 // Find vertices used by each group
                 var vertsA = new HashSet<int>();
                 var vertsB = new HashSet<int>();
