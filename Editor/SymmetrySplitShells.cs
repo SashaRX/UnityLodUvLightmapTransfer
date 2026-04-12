@@ -188,44 +188,34 @@ namespace LightmapUvTool
                 // ── Tertiary detection: UV0 winding split ──
                 // Catches mirror-UV where half the faces have inverted winding
                 // (negative signed area). Common in symmetric models where one
-                // side has flipped UV0. Doesn't require 3D distance — works
-                // purely on UV0 winding direction within the shell.
+                // side has flipped UV0. Requires significant 3D separation between
+                // positive/negative groups to avoid splitting inner/outer walls.
                 if (!found && faces.Count >= 4)
                 {
                     int posFaces = 0, negFaces = 0;
+                    Vector3 posSum = Vector3.zero, negSum = Vector3.zero;
                     foreach (int f in faces)
                     {
                         int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
                         if (i0 >= uv0.Length || i1 >= uv0.Length || i2 >= uv0.Length) continue;
                         float cross = (uv0[i1].x - uv0[i0].x) * (uv0[i2].y - uv0[i0].y)
                                     - (uv0[i2].x - uv0[i0].x) * (uv0[i1].y - uv0[i0].y);
-                        if (cross > 1e-10f) posFaces++;
-                        else if (cross < -1e-10f) negFaces++;
+                        if (cross > 1e-10f) { posFaces++; posSum += posC[f]; }
+                        else if (cross < -1e-10f) { negFaces++; negSum += posC[f]; }
                     }
 
-                    // Need both positive and negative winding for a valid split,
-                    // and each group should be at least 20% of total (avoid noise)
+                    // Need both positive and negative winding, each ≥20% of total,
+                    // AND significant 3D separation (same POS_FAR as primary detection)
                     int totalValid = posFaces + negFaces;
                     if (totalValid >= 4 && posFaces > 0 && negFaces > 0
                         && Mathf.Min(posFaces, negFaces) >= totalValid / 5)
                     {
-                        // Use winding as the split criterion instead of 3D axis.
-                        // Compute 3D centroids of positive/negative groups to find axis.
-                        Vector3 posSum = Vector3.zero, negSum = Vector3.zero;
-                        int posN = 0, negN = 0;
-                        foreach (int f in faces)
+                        Vector3 posCenter = posSum / posFaces;
+                        Vector3 negCenter = negSum / negFaces;
+                        float separation = Vector3.Distance(posCenter, negCenter);
+
+                        if (separation > POS_FAR)
                         {
-                            int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
-                            if (i0 >= uv0.Length || i1 >= uv0.Length || i2 >= uv0.Length) continue;
-                            float cross = (uv0[i1].x - uv0[i0].x) * (uv0[i2].y - uv0[i0].y)
-                                        - (uv0[i2].x - uv0[i0].x) * (uv0[i1].y - uv0[i0].y);
-                            if (cross > 1e-10f) { posSum += posC[f]; posN++; }
-                            else if (cross < -1e-10f) { negSum += posC[f]; negN++; }
-                        }
-                        if (posN > 0 && negN > 0)
-                        {
-                            Vector3 posCenter = posSum / posN;
-                            Vector3 negCenter = negSum / negN;
                             Vector3 diff = posCenter - negCenter;
                             float dx = Mathf.Abs(diff.x), dy = Mathf.Abs(diff.y), dz = Mathf.Abs(diff.z);
 
@@ -240,7 +230,8 @@ namespace LightmapUvTool
                             found = true;
 
                             UvtLog.Verbose($"[SymSplit] Shell {si}: winding split detected " +
-                                $"(pos={posFaces}, neg={negFaces}, axis={AxisName(windAxis)})");
+                                $"(pos={posFaces}, neg={negFaces}, axis={AxisName(windAxis)}, " +
+                                $"sep={separation:F1})");
                         }
                     }
                 }
