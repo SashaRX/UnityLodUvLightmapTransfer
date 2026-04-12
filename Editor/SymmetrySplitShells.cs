@@ -22,11 +22,29 @@ namespace LightmapUvTool
         }
 
         /// <summary>
-        /// Detect and split shells with symmetry overlap.
+        /// Recursively detect and split shells with symmetry overlap.
+        /// Runs SplitOnce() in a loop — each pass may produce new shells
+        /// that need further splitting (e.g., 4-way overlap → 2 passes).
+        /// </summary>
+        public static int Split(Mesh mesh, List<UvShell> shells)
+        {
+            int totalSplit = 0;
+            const int maxIterations = 3;
+            for (int iter = 0; iter < maxIterations; iter++)
+            {
+                int split = SplitOnce(mesh, shells);
+                if (split == 0) break;
+                totalSplit += split;
+            }
+            return totalSplit;
+        }
+
+        /// <summary>
+        /// Single pass: detect and split shells with symmetry overlap.
         /// Modifies mesh in-place, adds new shells to the list.
         /// Returns number of shells split.
         /// </summary>
-        public static int Split(Mesh mesh, List<UvShell> shells)
+        static int SplitOnce(Mesh mesh, List<UvShell> shells)
         {
             var verts = mesh.vertices;
             var uv0 = mesh.uv;
@@ -164,6 +182,66 @@ namespace LightmapUvTool
                         if (found)
                             UvtLog.Verbose($"[SymSplit] Shell {si}: V-shape overlap detected " +
                                 $"({overlapPairs.Count} pairs)");
+                    }
+                }
+
+                // ── Tertiary detection: UV0 winding split ──
+                // Catches mirror-UV where half the faces have inverted winding
+                // (negative signed area). Common in symmetric models where one
+                // side has flipped UV0. Doesn't require 3D distance — works
+                // purely on UV0 winding direction within the shell.
+                if (!found && faces.Count >= 4)
+                {
+                    int posFaces = 0, negFaces = 0;
+                    foreach (int f in faces)
+                    {
+                        int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
+                        if (i0 >= uv0.Length || i1 >= uv0.Length || i2 >= uv0.Length) continue;
+                        float cross = (uv0[i1].x - uv0[i0].x) * (uv0[i2].y - uv0[i0].y)
+                                    - (uv0[i2].x - uv0[i0].x) * (uv0[i1].y - uv0[i0].y);
+                        if (cross > 1e-10f) posFaces++;
+                        else if (cross < -1e-10f) negFaces++;
+                    }
+
+                    // Need both positive and negative winding for a valid split,
+                    // and each group should be at least 20% of total (avoid noise)
+                    int totalValid = posFaces + negFaces;
+                    if (totalValid >= 4 && posFaces > 0 && negFaces > 0
+                        && Mathf.Min(posFaces, negFaces) >= totalValid / 5)
+                    {
+                        // Use winding as the split criterion instead of 3D axis.
+                        // Compute 3D centroids of positive/negative groups to find axis.
+                        Vector3 posSum = Vector3.zero, negSum = Vector3.zero;
+                        int posN = 0, negN = 0;
+                        foreach (int f in faces)
+                        {
+                            int i0 = tris[f * 3], i1 = tris[f * 3 + 1], i2 = tris[f * 3 + 2];
+                            if (i0 >= uv0.Length || i1 >= uv0.Length || i2 >= uv0.Length) continue;
+                            float cross = (uv0[i1].x - uv0[i0].x) * (uv0[i2].y - uv0[i0].y)
+                                        - (uv0[i2].x - uv0[i0].x) * (uv0[i1].y - uv0[i0].y);
+                            if (cross > 1e-10f) { posSum += posC[f]; posN++; }
+                            else if (cross < -1e-10f) { negSum += posC[f]; negN++; }
+                        }
+                        if (posN > 0 && negN > 0)
+                        {
+                            Vector3 posCenter = posSum / posN;
+                            Vector3 negCenter = negSum / negN;
+                            Vector3 diff = posCenter - negCenter;
+                            float dx = Mathf.Abs(diff.x), dy = Mathf.Abs(diff.y), dz = Mathf.Abs(diff.z);
+
+                            int windAxis;
+                            if (dx >= dy && dx >= dz) windAxis = 0;
+                            else if (dy >= dz) windAxis = 1;
+                            else windAxis = 2;
+
+                            float windThreshold = (posCenter[windAxis] + negCenter[windAxis]) * 0.5f;
+                            axisVotes[windAxis] += totalValid;
+                            axisMidpointSum[windAxis] += windThreshold * totalValid;
+                            found = true;
+
+                            UvtLog.Verbose($"[SymSplit] Shell {si}: winding split detected " +
+                                $"(pos={posFaces}, neg={negFaces}, axis={AxisName(windAxis)})");
+                        }
                     }
                 }
 
