@@ -56,6 +56,12 @@ namespace LightmapUvTool
         List<MergeGroup> mergeCandidates;
         bool splitMergeFoldout;
 
+        // ── LOD management state ──
+        bool lodFoldout = true;
+
+        // ── Collision management state ──
+        bool collisionFoldout;
+
         // ── Edge report cache ──
         struct MeshEdgeReport
         {
@@ -119,6 +125,8 @@ namespace LightmapUvTool
 
             DrawPreviewModeToolbar();
             DrawHierarchySection();
+            DrawLodManagementSection();
+            DrawCollisionSection();
             DrawSplitMergeSection();
             DrawMeshInfo();
 
@@ -510,6 +518,359 @@ namespace LightmapUvTool
             }
             ctx.LodGroup.SetLODs(newLods);
             ctx.LodGroup.RecalculateBounds();
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // LOD management section
+        // ═══════════════════════════════════════════════════════════
+
+        void DrawLodManagementSection()
+        {
+            EditorGUILayout.Space(8);
+            lodFoldout = EditorGUILayout.Foldout(lodFoldout, "LOD Levels", true);
+            if (!lodFoldout) return;
+
+            if (ctx.LodGroup == null)
+            {
+                EditorGUILayout.HelpBox("No LODGroup selected.", MessageType.Info);
+                return;
+            }
+
+            var lods = ctx.LodGroup.GetLODs();
+            bool changed = false;
+
+            for (int li = 0; li < lods.Length; li++)
+            {
+                var renderers = lods[li].renderers;
+                int rendCount = 0;
+                int totalVerts = 0;
+                if (renderers != null)
+                {
+                    foreach (var r in renderers)
+                    {
+                        if (r == null) continue;
+                        rendCount++;
+                        var mf = r.GetComponent<MeshFilter>();
+                        if (mf != null && mf.sharedMesh != null)
+                            totalVerts += mf.sharedMesh.vertexCount;
+                    }
+                }
+
+                EditorGUILayout.BeginHorizontal();
+
+                // LOD label
+                EditorGUILayout.LabelField($"LOD{li}", EditorStyles.boldLabel, GUILayout.Width(42));
+
+                // Transition slider
+                float oldTrans = lods[li].screenRelativeTransitionHeight;
+                float newTrans = EditorGUILayout.Slider(oldTrans, 0.001f, 1f);
+                if (Mathf.Abs(newTrans - oldTrans) > 0.0001f)
+                {
+                    lods[li].screenRelativeTransitionHeight = newTrans;
+                    changed = true;
+                }
+
+                // Stats
+                EditorGUILayout.LabelField($"{rendCount}r {totalVerts:N0}v",
+                    EditorStyles.miniLabel, GUILayout.Width(80));
+
+                // Remove LOD button
+                if (lods.Length > 1)
+                {
+                    GUI.backgroundColor = new Color(0.9f, 0.3f, 0.3f);
+                    if (GUILayout.Button("X", GUILayout.Width(22), GUILayout.Height(18)))
+                    {
+                        RemoveLodLevel(li);
+                        return; // UI is invalidated, exit early
+                    }
+                    GUI.backgroundColor = Color.white;
+                }
+
+                EditorGUILayout.EndHorizontal();
+
+                // Per-renderer list with move buttons
+                if (renderers != null)
+                {
+                    for (int ri = 0; ri < renderers.Length; ri++)
+                    {
+                        var r = renderers[ri];
+                        if (r == null) continue;
+
+                        EditorGUILayout.BeginHorizontal();
+                        GUILayout.Space(48);
+
+                        EditorGUILayout.LabelField(r.name, EditorStyles.miniLabel);
+
+                        // Move up (to previous LOD)
+                        GUI.enabled = li > 0;
+                        if (GUILayout.Button("\u25B2", GUILayout.Width(22), GUILayout.Height(16)))
+                        {
+                            MoveRendererBetweenLods(r, li, li - 1);
+                            return;
+                        }
+                        GUI.enabled = true;
+
+                        // Move down (to next LOD)
+                        GUI.enabled = li < lods.Length - 1;
+                        if (GUILayout.Button("\u25BC", GUILayout.Width(22), GUILayout.Height(16)))
+                        {
+                            MoveRendererBetweenLods(r, li, li + 1);
+                            return;
+                        }
+                        GUI.enabled = true;
+
+                        EditorGUILayout.EndHorizontal();
+                    }
+                }
+            }
+
+            if (changed)
+            {
+                Undo.RecordObject(ctx.LodGroup, "Edit LOD Transitions");
+                ctx.LodGroup.SetLODs(lods);
+            }
+
+            // Add LOD button
+            EditorGUILayout.Space(4);
+            var bgc = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.6f, 0.75f, 0.9f);
+            if (GUILayout.Button("+ Add LOD Level", GUILayout.Height(22)))
+                AddLodLevel();
+            GUI.backgroundColor = bgc;
+        }
+
+        void AddLodLevel()
+        {
+            if (ctx.LodGroup == null) return;
+
+            Undo.RecordObject(ctx.LodGroup, "Add LOD Level");
+            var lods = ctx.LodGroup.GetLODs();
+            var newLods = new LOD[lods.Length + 1];
+            System.Array.Copy(lods, newLods, lods.Length);
+
+            // New LOD with lower transition than the last one
+            float lastTrans = lods.Length > 0 ? lods[lods.Length - 1].screenRelativeTransitionHeight : 0.5f;
+            newLods[lods.Length] = new LOD(lastTrans * 0.5f, new Renderer[0]);
+
+            ctx.LodGroup.SetLODs(newLods);
+            ctx.Refresh(ctx.LodGroup);
+            requestRepaint?.Invoke();
+            UvtLog.Info($"Added LOD{lods.Length} (transition: {lastTrans * 0.5f:F3})");
+        }
+
+        void RemoveLodLevel(int lodIndex)
+        {
+            if (ctx.LodGroup == null) return;
+
+            Undo.RecordObject(ctx.LodGroup, "Remove LOD Level");
+            var lods = ctx.LodGroup.GetLODs();
+            if (lodIndex < 0 || lodIndex >= lods.Length) return;
+
+            var newLods = new LOD[lods.Length - 1];
+            for (int i = 0, j = 0; i < lods.Length; i++)
+            {
+                if (i == lodIndex) continue;
+                newLods[j++] = lods[i];
+            }
+
+            ctx.LodGroup.SetLODs(newLods);
+            ctx.LodGroup.RecalculateBounds();
+            ctx.Refresh(ctx.LodGroup);
+            requestRepaint?.Invoke();
+            UvtLog.Info($"Removed LOD{lodIndex}");
+        }
+
+        void MoveRendererBetweenLods(Renderer renderer, int fromLod, int toLod)
+        {
+            if (ctx.LodGroup == null) return;
+
+            Undo.RecordObject(ctx.LodGroup, "Move Renderer LOD");
+            var lods = ctx.LodGroup.GetLODs();
+            if (fromLod < 0 || fromLod >= lods.Length || toLod < 0 || toLod >= lods.Length) return;
+
+            // Remove from source LOD
+            var srcList = new List<Renderer>(lods[fromLod].renderers ?? new Renderer[0]);
+            srcList.Remove(renderer);
+            lods[fromLod].renderers = srcList.ToArray();
+
+            // Add to target LOD
+            var dstList = new List<Renderer>(lods[toLod].renderers ?? new Renderer[0]);
+            dstList.Add(renderer);
+            lods[toLod].renderers = dstList.ToArray();
+
+            ctx.LodGroup.SetLODs(lods);
+            ctx.Refresh(ctx.LodGroup);
+            requestRepaint?.Invoke();
+            UvtLog.Info($"Moved {renderer.name}: LOD{fromLod} -> LOD{toLod}");
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // Collision management section
+        // ═══════════════════════════════════════════════════════════
+
+        void DrawCollisionSection()
+        {
+            EditorGUILayout.Space(8);
+            collisionFoldout = EditorGUILayout.Foldout(collisionFoldout, "Collision", true);
+            if (!collisionFoldout) return;
+
+            if (ctx.LodGroup == null) return;
+
+            var root = ctx.LodGroup.transform;
+            var colObjects = MeshHygieneUtility.FindCollisionObjects(root);
+            var rootCollider = root.GetComponent<MeshCollider>();
+
+            // Current state
+            if (rootCollider != null)
+            {
+                Mesh colMesh = rootCollider.sharedMesh;
+                string meshInfo = colMesh != null
+                    ? $"{colMesh.name} ({colMesh.vertexCount:N0}v, {MeshHygieneUtility.GetTriangleCount(colMesh):N0}t)"
+                    : "(none)";
+                EditorGUILayout.LabelField($"Root MeshCollider: {meshInfo}", EditorStyles.miniLabel);
+
+                EditorGUILayout.BeginHorizontal();
+                bool convex = rootCollider.convex;
+                bool newConvex = EditorGUILayout.Toggle("Convex", convex);
+                if (newConvex != convex)
+                {
+                    Undo.RecordObject(rootCollider, "Toggle Convex");
+                    rootCollider.convex = newConvex;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            else
+            {
+                EditorGUILayout.LabelField("Root: no MeshCollider", EditorStyles.miniLabel);
+            }
+
+            // Collision child objects
+            if (colObjects.Count > 0)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField("Collision Objects", EditorStyles.boldLabel);
+
+                foreach (var colGo in colObjects)
+                {
+                    if (colGo == null) continue;
+                    var mf = colGo.GetComponent<MeshFilter>();
+                    var mr = colGo.GetComponent<MeshRenderer>();
+                    Mesh mesh = mf != null ? mf.sharedMesh : null;
+
+                    EditorGUILayout.BeginHorizontal();
+                    EditorGUILayout.LabelField($"  {colGo.name}", EditorStyles.miniLabel, GUILayout.MinWidth(100));
+
+                    if (mesh != null)
+                        EditorGUILayout.LabelField($"{mesh.vertexCount:N0}v",
+                            EditorStyles.miniLabel, GUILayout.Width(60));
+
+                    // Toggle renderer visibility
+                    if (mr != null)
+                    {
+                        bool vis = mr.enabled;
+                        bool newVis = EditorGUILayout.Toggle(vis, GUILayout.Width(16));
+                        if (newVis != vis)
+                        {
+                            Undo.RecordObject(mr, "Toggle COL Visibility");
+                            mr.enabled = newVis;
+                        }
+                    }
+
+                    // Assign to root button
+                    if (mesh != null && (rootCollider == null || rootCollider.sharedMesh != mesh))
+                    {
+                        if (GUILayout.Button("Assign", GUILayout.Width(50), GUILayout.Height(16)))
+                            AssignCollisionToRoot(mesh);
+                    }
+
+                    EditorGUILayout.EndHorizontal();
+                }
+            }
+
+            // Action buttons
+            EditorGUILayout.Space(4);
+            var bgc = GUI.backgroundColor;
+            EditorGUILayout.BeginHorizontal();
+
+            // Add MeshCollider from first _COL child
+            if (rootCollider == null && colObjects.Count > 0)
+            {
+                GUI.backgroundColor = new Color(0.4f, 0.8f, 0.4f);
+                if (GUILayout.Button("Add MeshCollider to Root", GUILayout.Height(22)))
+                {
+                    var firstCol = colObjects[0];
+                    var colMf = firstCol.GetComponent<MeshFilter>();
+                    if (colMf != null && colMf.sharedMesh != null)
+                        AssignCollisionToRoot(colMf.sharedMesh);
+                }
+            }
+
+            // Use LOD0 mesh as collision (if no _COL exists)
+            if (rootCollider == null && colObjects.Count == 0)
+            {
+                GUI.backgroundColor = new Color(0.6f, 0.75f, 0.9f);
+                if (GUILayout.Button("Use LOD0 as Collider", GUILayout.Height(22)))
+                {
+                    var lod0Entries = ctx.ForLod(0);
+                    if (lod0Entries.Count > 0)
+                    {
+                        Mesh lod0Mesh = lod0Entries[0].originalMesh ?? lod0Entries[0].fbxMesh;
+                        if (lod0Mesh != null)
+                            AssignCollisionToRoot(lod0Mesh);
+                    }
+                }
+            }
+
+            // Disable all COL renderers
+            if (colObjects.Count > 0)
+            {
+                GUI.backgroundColor = new Color(0.7f, 0.4f, 0.95f);
+                bool anyEnabled = false;
+                foreach (var go in colObjects)
+                {
+                    var mr = go != null ? go.GetComponent<MeshRenderer>() : null;
+                    if (mr != null && mr.enabled) { anyEnabled = true; break; }
+                }
+                if (anyEnabled)
+                {
+                    if (GUILayout.Button("Hide COL Renderers", GUILayout.Height(22)))
+                    {
+                        foreach (var go in colObjects)
+                        {
+                            var mr = go != null ? go.GetComponent<MeshRenderer>() : null;
+                            if (mr != null && mr.enabled)
+                            {
+                                Undo.RecordObject(mr, "Hide COL");
+                                mr.enabled = false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+        }
+
+        void AssignCollisionToRoot(Mesh mesh)
+        {
+            if (ctx.LodGroup == null || mesh == null) return;
+
+            var root = ctx.LodGroup.gameObject;
+            var mc = root.GetComponent<MeshCollider>();
+            if (mc == null)
+            {
+                mc = Undo.AddComponent<MeshCollider>(root);
+                UvtLog.Info($"Added MeshCollider to {root.name}");
+            }
+            else
+            {
+                Undo.RecordObject(mc, "Assign Collision Mesh");
+            }
+
+            mc.sharedMesh = mesh;
+            UvtLog.Info($"Assigned collision mesh: {mesh.name}");
+            requestRepaint?.Invoke();
         }
 
         // ═══════════════════════════════════════════════════════════
