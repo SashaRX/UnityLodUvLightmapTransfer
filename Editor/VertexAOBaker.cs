@@ -164,7 +164,7 @@ namespace LightmapUvTool
 
         // ── Face-area AO correction ──
 
-        static float[] FaceAreaCorrection(
+        public static float[] FaceAreaCorrection(
             float[] ao, Mesh mesh, Matrix4x4 xform,
             TriangleBvh bvh, Vector3[] directions, float maxDist,
             float normalOffset, VertexAOSettings settings, float groundY)
