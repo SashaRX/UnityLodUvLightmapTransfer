@@ -568,23 +568,6 @@ namespace LightmapUvTool
                 {
                     int oldSrc = targetShellToSourceShell[tsi];
 
-                    // Guard: when target LOD has far fewer shells than source
-                    // (e.g. 5 from 161), many distant sources have full coverage.
-                    // Block rescue if new source is too far — merged per-face
-                    // voting handles multi-source coverage correctly.
-                    float shellRatio = (float)srcShells.Count / Mathf.Max(tgtShells.Count, 1);
-                    if (shellRatio > 10f)
-                    {
-                        float maxRescueDist = meshDiagonal * 0.03f;
-                        if (Mathf.Sqrt(bestDistSq) > maxRescueDist)
-                        {
-                            UvtLog.Verbose($"[GroupedTransfer] Rescore: t{tsi} rescue blocked " +
-                                $"(src{oldSrc}→src{bestSrc}, dist {Mathf.Sqrt(bestDistSq):F3} > " +
-                                $"max {maxRescueDist:F3}, shellRatio={shellRatio:F1})");
-                            continue;
-                        }
-                    }
-
                     tgtIsMerged[tsi] = false;
                     targetShellToSourceShell[tsi] = bestSrc;
                     targetShellMatchDistSqr[tsi] = bestDistSq;
