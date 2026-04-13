@@ -11,9 +11,8 @@ namespace LightmapUvTool
     public static class SymmetrySplitShells
     {
         const float UV_NEAR = 0.01f;   // UV0 centroid distance threshold
-        const float POS_FAR = 0.5f;    // 3D centroid distance threshold
         const float GRID_CELL = 0.01f; // spatial hash cell for UV0 centroids
-        const int   MIN_FACES = 20;    // skip shells with fewer faces — splitting tiny shells
+        const int   MIN_FACES = 8;     // skip shells with fewer faces — splitting tiny shells
                                         // creates fragments too small for quality transfer
 
         struct SplitInfo
@@ -36,6 +35,11 @@ namespace LightmapUvTool
 
             if (uv0 == null || uv0.Length == 0 || tris.Length == 0)
                 return 0;
+
+            // Adaptive 3D separation threshold based on mesh size.
+            // Fixed 0.5 was too large for small models (WateringCan diag=0.34).
+            float meshDiag = mesh.bounds.size.magnitude;
+            float POS_FAR = Mathf.Max(meshDiag * 0.1f, 0.05f);
 
             int faceCount = tris.Length / 3;
 

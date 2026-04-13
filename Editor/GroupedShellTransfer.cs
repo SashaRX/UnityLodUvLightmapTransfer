@@ -3376,6 +3376,12 @@ namespace LightmapUvTool
                         $"({uv2[vi].x:F4},{uv2[vi].y:F4}) → ({predicted.x:F4},{predicted.y:F4}) " +
                         $"disp/scale={displacement / avgNeighborEdge:F2}");
 
+                    // Cap correction to prevent extreme displacements that cause overlaps
+                    float maxCorrection = avgNeighborEdge * 3f;
+                    Vector2 delta = predicted - uv2[vi];
+                    if (delta.magnitude > maxCorrection)
+                        predicted = uv2[vi] + delta.normalized * maxCorrection;
+
                     uv2[vi] = predicted;
                     fixedThisPass++;
                 }
