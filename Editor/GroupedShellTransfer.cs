@@ -2650,6 +2650,109 @@ namespace LightmapUvTool
                             result.consistencyCorrected += bestMergedConsistencyFixes;
                             UvtLog.Warn($"[GroupedTransfer]   t{tsi} force3D-accepted({faceCount}f): " +
                                 $"{bestMergedIssues} issues (>{faceCount / 2} threshold) — UV2 written as poor");
+
+                            // ── Edge-based expansion for degenerate UV2 ──
+                            // When 3D projection collapses all vertices to a line/point,
+                            // expand the degenerate axis using the shell's 3D edge proportions.
+                            if (chosenUv2.Count >= 3 && chosenSrc >= 0)
+                            {
+                                Vector2 dgMin = new Vector2(float.MaxValue, float.MaxValue);
+                                Vector2 dgMax = new Vector2(float.MinValue, float.MinValue);
+                                foreach (var kv in chosenUv2)
+                                {
+                                    dgMin = Vector2.Min(dgMin, kv.Value);
+                                    dgMax = Vector2.Max(dgMax, kv.Value);
+                                }
+                                float dgW = dgMax.x - dgMin.x, dgH = dgMax.y - dgMin.y;
+                                float dgLong = Mathf.Max(dgW, dgH);
+                                float dgShort = Mathf.Min(dgW, dgH);
+
+                                if (dgShort < dgLong * 0.01f && dgLong > 1e-6f)
+                                {
+                                    bool xIsLong = dgW >= dgH;
+
+                                    // Find vertex pair spanning the non-degenerate axis
+                                    int dgA = -1, dgB = -1;
+                                    float dgSpan = 0;
+                                    var dgKeys = new List<int>(chosenUv2.Keys);
+                                    for (int i = 0; i < dgKeys.Count; i++)
+                                    for (int j = i + 1; j < dgKeys.Count; j++)
+                                    {
+                                        float s = xIsLong
+                                            ? Mathf.Abs(chosenUv2[dgKeys[i]].x - chosenUv2[dgKeys[j]].x)
+                                            : Mathf.Abs(chosenUv2[dgKeys[i]].y - chosenUv2[dgKeys[j]].y);
+                                        if (s > dgSpan) { dgSpan = s; dgA = dgKeys[i]; dgB = dgKeys[j]; }
+                                    }
+
+                                    if (dgA >= 0 && dgB >= 0 && dgA < tVerts.Length && dgB < tVerts.Length)
+                                    {
+                                        float width3D = (tVerts[dgB] - tVerts[dgA]).magnitude;
+                                        if (width3D > 1e-8f)
+                                        {
+                                            Vector3 widthDir = (tVerts[dgB] - tVerts[dgA]) / width3D;
+                                            Vector3 shellNrm = tgtAvgNormal[tsi];
+                                            Vector3 heightDir = Vector3.Cross(shellNrm, widthDir).normalized;
+                                            if (heightDir.sqrMagnitude < 0.5f)
+                                                heightDir = Vector3.Cross(Vector3.up, widthDir).normalized;
+
+                                            // Project vertices onto height direction
+                                            Vector3 c3D = Vector3.zero; int cn3 = 0;
+                                            foreach (int vi in tShell.vertexIndices)
+                                                if (vi < tVerts.Length) { c3D += tVerts[vi]; cn3++; }
+                                            if (cn3 > 0) c3D /= cn3;
+
+                                            float hMin = float.MaxValue, hMax = float.MinValue;
+                                            var hProj = new Dictionary<int, float>();
+                                            foreach (int vi in tShell.vertexIndices)
+                                            {
+                                                if (vi >= tVerts.Length || !chosenUv2.ContainsKey(vi)) continue;
+                                                float h = Vector3.Dot(tVerts[vi] - c3D, heightDir);
+                                                hProj[vi] = h;
+                                                hMin = Mathf.Min(hMin, h); hMax = Mathf.Max(hMax, h);
+                                            }
+
+                                            float height3D = hMax - hMin;
+                                            if (height3D > 1e-8f)
+                                            {
+                                                // UV2 scale from non-degenerate axis
+                                                float uvScale = dgLong / width3D;
+                                                float targetShort = height3D * uvScale;
+
+                                                // Clamp to source UV2 shortest edge
+                                                Vector2 sMin2 = srcUv2Min[chosenSrc];
+                                                Vector2 sMax2 = srcUv2Max[chosenSrc];
+                                                float srcShort = Mathf.Min(
+                                                    sMax2.x - sMin2.x, sMax2.y - sMin2.y);
+                                                targetShort = Mathf.Min(targetShort, srcShort);
+
+                                                float uvCenter = xIsLong
+                                                    ? (dgMin.y + dgMax.y) * 0.5f
+                                                    : (dgMin.x + dgMax.x) * 0.5f;
+                                                float hCenter = (hMin + hMax) * 0.5f;
+                                                float hScale = targetShort / height3D;
+
+                                                foreach (int vi in tShell.vertexIndices)
+                                                {
+                                                    if (!chosenUv2.ContainsKey(vi) ||
+                                                        !hProj.ContainsKey(vi)) continue;
+                                                    Vector2 uv = chosenUv2[vi];
+                                                    float off = (hProj[vi] - hCenter) * hScale;
+                                                    if (xIsLong) uv.y = uvCenter + off;
+                                                    else         uv.x = uvCenter + off;
+                                                    uv.x = Mathf.Clamp(uv.x, sMin2.x, sMax2.x);
+                                                    uv.y = Mathf.Clamp(uv.y, sMin2.y, sMax2.y);
+                                                    chosenUv2[vi] = uv;
+                                                }
+
+                                                UvtLog.Info($"[GroupedTransfer]   t{tsi}: " +
+                                                    $"edge-based UV2 expansion " +
+                                                    $"(height3D={height3D:F4}, " +
+                                                    $"uvExpand={targetShort:F6})");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         else
                         {
