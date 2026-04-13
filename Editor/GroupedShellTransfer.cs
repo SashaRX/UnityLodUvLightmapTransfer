@@ -568,18 +568,21 @@ namespace LightmapUvTool
                 {
                     int oldSrc = targetShellToSourceShell[tsi];
 
-                    // Guard: don't rescue if new source is much farther than original.
-                    // On low LODs with few shells, many distant sources have full
-                    // coverage — merged per-face voting produces better UV2.
-                    float origDistSq = (oldSrc >= 0 && oldSrc < srcCentroid3D.Length)
-                        ? (tCentroid - srcCentroid3D[oldSrc]).sqrMagnitude : 0f;
-                    float maxRescueDistSq = Mathf.Max(origDistSq * 4f, diagSq * 0.01f);
-                    if (bestDistSq > maxRescueDistSq)
+                    // Guard: when target LOD has far fewer shells than source
+                    // (e.g. 5 from 161), many distant sources have full coverage.
+                    // Block rescue if new source is too far — merged per-face
+                    // voting handles multi-source coverage correctly.
+                    float shellRatio = (float)srcShells.Count / Mathf.Max(tgtShells.Count, 1);
+                    if (shellRatio > 3f)
                     {
-                        UvtLog.Verbose($"[GroupedTransfer] Rescore: t{tsi} rescue blocked " +
-                            $"(src{oldSrc}→src{bestSrc}, dist {Mathf.Sqrt(bestDistSq):F3} > " +
-                            $"max {Mathf.Sqrt(maxRescueDistSq):F3})");
-                        continue;
+                        float maxRescueDist = meshDiagonal * 0.03f;
+                        if (Mathf.Sqrt(bestDistSq) > maxRescueDist)
+                        {
+                            UvtLog.Verbose($"[GroupedTransfer] Rescore: t{tsi} rescue blocked " +
+                                $"(src{oldSrc}→src{bestSrc}, dist {Mathf.Sqrt(bestDistSq):F3} > " +
+                                $"max {maxRescueDist:F3}, shellRatio={shellRatio:F1})");
+                            continue;
+                        }
                     }
 
                     tgtIsMerged[tsi] = false;
