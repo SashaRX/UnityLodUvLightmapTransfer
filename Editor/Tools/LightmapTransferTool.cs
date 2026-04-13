@@ -1301,6 +1301,32 @@ namespace LightmapUvTool
             // third-party postprocessors like Bakery). Don't clear sidecar entries.
 
             AssetDatabase.Refresh();
+
+            // Remove stale "Lit" material remap created by Unity's FBX importer
+            // for _COL nodes that have no material. Without this, an unwanted "Lit"
+            // entry appears in the material remap list after every export.
+            if (overwriteSource && allGroupsSucceeded)
+            {
+                foreach (string fbxPath in overwrittenFbxPaths)
+                {
+                    var imp = AssetImporter.GetAtPath(fbxPath) as ModelImporter;
+                    if (imp == null) continue;
+                    var map = imp.GetExternalObjectMap();
+                    var toRemove = new List<AssetImporter.SourceAssetIdentifier>();
+                    foreach (var kvp in map)
+                    {
+                        if (kvp.Key.type != typeof(Material)) continue;
+                        if (kvp.Key.name == "Lit" || kvp.Key.name == "No Name")
+                            toRemove.Add(kvp.Key);
+                    }
+                    if (toRemove.Count > 0)
+                    {
+                        foreach (var key in toRemove)
+                            imp.RemoveRemap(key);
+                        imp.SaveAndReimport();
+                    }
+                }
+            }
 #endif
         }
 
