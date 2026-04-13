@@ -377,11 +377,6 @@ namespace LightmapUvTool
             uint[] faceShellIds = UvShellExtractor.BuildPerFaceShellIds(
                 uv0, tris, out shells, out overlapGroups);
 
-            // Detect symmetric shells and assign different faceShellIds to each half
-            // so xatlas treats them as separate charts — no mesh topology changes.
-            SymmetrySplitShells.AugmentFaceIds(
-                mesh.vertices, uv0, tris, shells, faceShellIds, overlapGroups);
-
             result.shellCount = shells.Count;
             result.overlapGroupCount = overlapGroups.Count;
 
@@ -556,10 +551,6 @@ namespace LightmapUvTool
                 List<List<int>> overlapGroups;
                 allFaceShells[m] = UvShellExtractor.BuildPerFaceShellIds(
                     allUv0[m], allTris[m], out shells, out overlapGroups);
-
-                SymmetrySplitShells.AugmentFaceIds(
-                    mesh.vertices, allUv0[m], allTris[m], shells, allFaceShells[m], overlapGroups);
-
                 allShells[m]  = shells;
                 allOverlap[m] = overlapGroups;
 
