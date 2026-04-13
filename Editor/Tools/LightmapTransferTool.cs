@@ -1175,10 +1175,17 @@ namespace LightmapUvTool
 
                     // Strip _COL meshes to bare minimum: vertices + triangles +
                     // averaged normals + tangents. No UVs, colors, or other channels.
+                    // Also clear materials to prevent stale "Lit" entries in FBX importer.
                     foreach (var colMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
                     {
                         if (colMf == null || colMf.sharedMesh == null) continue;
                         if (!MeshHygieneUtility.IsCollisionNodeName(colMf.gameObject.name)) continue;
+
+                        // Clear material on collision renderer — _COL doesn't need materials
+                        var colMr = colMf.GetComponent<MeshRenderer>();
+                        if (colMr != null)
+                            colMr.sharedMaterials = new Material[0];
+
                         var srcCol = colMf.sharedMesh;
                         if (srcCol.isReadable)
                         {
