@@ -2083,6 +2083,10 @@ namespace LightmapUvTool
                                 var fMap3D = shellBvh3DFaceMap[bestOverlapSrc];
                                 var fNorm3D = shellBvh3DFaceNormals[bestOverlapSrc];
 
+                                // Adaptive ray distance from source shell extent
+                                float srcShellDiag = (srcAABBMax[bestOverlapSrc] - srcAABBMin[bestOverlapSrc]).magnitude;
+                                float outlierRayDist = Mathf.Clamp(srcShellDiag * 2f, kRayMaxDist * 0.05f, kRayMaxDist);
+
                                 foreach (int vi in outlierVerts)
                                 {
                                     if (vi >= tVerts.Length) continue;
@@ -2097,7 +2101,7 @@ namespace LightmapUvTool
                                     if (bvh3D != null && tNrm.sqrMagnitude > 0.5f)
                                     {
                                         var rayHit = bvh3D.RaycastBidirectional(
-                                            tPos, tNrm.normalized, kRayMaxDist);
+                                            tPos, tNrm.normalized, outlierRayDist);
                                         if (rayHit.triangleIndex >= 0)
                                         {
                                             // Back-face culling: reject hits on opposite-facing triangles
@@ -3654,6 +3658,20 @@ namespace LightmapUvTool
             {
                 var uv2Map = new Dictionary<int, Vector2>();
 
+                // Compute target shell's 3D extent for adaptive ray distance.
+                // Use 2× AABB diagonal so the ray reaches nearby source triangles
+                // but doesn't overshoot to distant parts on thin geometry.
+                Vector3 tBMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                Vector3 tBMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+                foreach (int vi in tShell.vertexIndices)
+                {
+                    if (vi >= tVerts.Length) continue;
+                    tBMin = Vector3.Min(tBMin, tVerts[vi]);
+                    tBMax = Vector3.Max(tBMax, tVerts[vi]);
+                }
+                float shellDiag = (tBMax - tBMin).magnitude;
+                float shellRayDist = Mathf.Clamp(shellDiag * 2f, kRayMaxDist * 0.05f, kRayMaxDist);
+
                 foreach (int vi in tShell.vertexIndices)
                 {
                     if (vi >= tVerts.Length) continue;
@@ -3672,7 +3690,7 @@ namespace LightmapUvTool
                     if (tNrm.sqrMagnitude > 0.5f)
                     {
                         var rayHit = srcBvh3D.RaycastBidirectional(
-                            tPos, tNrm.normalized, kRayMaxDist);
+                            tPos, tNrm.normalized, shellRayDist);
                         if (rayHit.triangleIndex >= 0)
                         {
                             int gf = (rayHit.triangleIndex < faceMap3D.Length)
