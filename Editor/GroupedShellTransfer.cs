@@ -2082,8 +2082,16 @@ namespace LightmapUvTool
                                             tPos, tNrm.normalized, kRayMaxDist);
                                         if (rayHit.triangleIndex >= 0)
                                         {
-                                            hitFace = rayHit.triangleIndex;
-                                            hitBary = rayHit.barycentric;
+                                            // Back-face culling: reject hits on opposite-facing triangles
+                                            int gfRay = (rayHit.triangleIndex < fMap3D.Length)
+                                                ? fMap3D[rayHit.triangleIndex] : -1;
+                                            bool facing = gfRay >= 0 && gfRay < triNormal.Length
+                                                && Vector3.Dot(triNormal[gfRay], tNrm) > 0f;
+                                            if (facing)
+                                            {
+                                                hitFace = rayHit.triangleIndex;
+                                                hitBary = rayHit.barycentric;
+                                            }
                                         }
                                     }
                                     if (hitFace < 0 && bvh3D != null && fNorm3D != null)
@@ -3642,7 +3650,7 @@ namespace LightmapUvTool
                     int hitFace = -1;
                     Vector3 hitBary = Vector3.zero;
 
-                    // Primary: ray along normal (bidirectional)
+                    // Primary: ray along normal (bidirectional) with back-face culling
                     if (tNrm.sqrMagnitude > 0.5f)
                     {
                         var rayHit = srcBvh3D.RaycastBidirectional(
@@ -3652,6 +3660,10 @@ namespace LightmapUvTool
                             int gf = (rayHit.triangleIndex < faceMap3D.Length)
                                 ? faceMap3D[rayHit.triangleIndex] : -1;
                             bool partOk = true;
+                            // Back-face culling: reject hits on opposite-facing triangles
+                            if (gf >= 0 && gf < triNormal.Length
+                                && Vector3.Dot(triNormal[gf], tNrm) <= 0f)
+                                partOk = false;
                             if (vertexPid >= 0 && gf >= 0 &&
                                 srcPR.facePartitionId.TryGetValue(gf, out int fp) &&
                                 fp != vertexPid)
