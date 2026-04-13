@@ -1290,6 +1290,12 @@ namespace LightmapUvTool
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
                     Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath);
                 }
+                // Always disable generateSecondaryUV after overwriting FBX with
+                // transferred UV2 — Unity's auto-generated UV2 would overwrite ours.
+                else if (overwriteSource && groupSucceeded)
+                {
+                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
+                }
             }
 
             // Clean up scene-generated LOD objects from LodGenerationTool.
