@@ -2639,14 +2639,28 @@ namespace LightmapUvTool
                     // Reject gate: if >50% faces have issues, don't write garbage UV2.
                     if (bestMergedIssues > faceCount / 2)
                     {
-                        chosenUv2 = null; // prevent write
-                        result.targetShellStatus[tsi] = ShellStatus.Rejected;
-                        result.shellsRejected++;
-                        shellsMerged++;
-                        result.consistencyCorrected += bestMergedConsistencyFixes;
-                        UvtLog.Warn($"[GroupedTransfer]   t{tsi} REJECTED({faceCount}f): " +
-                            $"{bestMergedIssues} issues (>{faceCount / 2} threshold) — UV2 not written");
-                        // Don't continue — fall through to "Write chosen UV2" with null chosenUv2
+                        if (force3D && bestMergedUv2 != null && bestMergedUv2.Count > 0)
+                        {
+                            // Force3D shells: accept degraded UV2 rather than leaving holes.
+                            // These were forced to merged+3D by dedup — degenerate UV2 in the
+                            // correct region is better than (0,0) which creates lightmap seams.
+                            chosenUv2 = bestMergedUv2;
+                            result.targetShellStatus[tsi] = ShellStatus.Poor;
+                            shellsMerged++;
+                            result.consistencyCorrected += bestMergedConsistencyFixes;
+                            UvtLog.Warn($"[GroupedTransfer]   t{tsi} force3D-accepted({faceCount}f): " +
+                                $"{bestMergedIssues} issues (>{faceCount / 2} threshold) — UV2 written as poor");
+                        }
+                        else
+                        {
+                            chosenUv2 = null; // prevent write
+                            result.targetShellStatus[tsi] = ShellStatus.Rejected;
+                            result.shellsRejected++;
+                            shellsMerged++;
+                            result.consistencyCorrected += bestMergedConsistencyFixes;
+                            UvtLog.Warn($"[GroupedTransfer]   t{tsi} REJECTED({faceCount}f): " +
+                                $"{bestMergedIssues} issues (>{faceCount / 2} threshold) — UV2 not written");
+                        }
                     }
                     else
                     {
