@@ -37,8 +37,8 @@ namespace LightmapUvTool
         Dictionary<int, bool> reportLodFoldouts = new Dictionary<int, bool>();
         bool foldOutput = true;
         bool foldUv0Analysis, foldRepackSettings = true;
-        bool splitTargetsInSymmetryStep;
-        HashSet<int> lastSymmetrySplitLods = new HashSet<int>();
+        // splitTargetsInSymmetryStep removed — symmetry detection now lives inside
+        // XatlasRepack via SymmetrySplitShells.AugmentFaceIds (no mesh modification).
         Vector2 reportScroll;
 
         // ── LOD generation ──
@@ -337,7 +337,7 @@ namespace LightmapUvTool
             EditorGUILayout.Space(6);
             ctx.RepackPerMesh = EditorGUILayout.ToggleLeft("Per-mesh repack (each group -> [0,1])", ctx.RepackPerMesh);
             ColorBtn(new Color(.2f,.75f,.95f), "Run Full Pipeline", 30, ExecFullPipeline);
-            splitTargetsInSymmetryStep = EditorGUILayout.ToggleLeft("SymSplit target LODs (advanced)", splitTargetsInSymmetryStep);
+            // SymSplit toggle removed — symmetry detection is automatic inside repack.
 
             EditorGUILayout.Space(6);
             H("Pipeline Settings");
@@ -555,29 +555,6 @@ namespace LightmapUvTool
             requestRepaint?.Invoke();
         }
 
-        void ExecSymmetrySplit(bool includeTargets)
-        {
-            if (ctx.LodGroup == null) return;
-            lastSymmetrySplitLods.Clear();
-            foreach (var e in ctx.MeshEntries)
-            {
-                if (!e.include) continue;
-                if (!includeTargets && e.lodIndex != ctx.SourceLodIndex) continue;
-                if (e.originalMesh == e.fbxMesh)
-                {
-                    e.originalMesh = UvCanvasView.MakeReadableCopy(e.fbxMesh);
-                    e.originalMesh.name = e.fbxMesh.name + "_wc";
-                }
-                var uv0 = e.originalMesh.uv;
-                if (uv0 == null || uv0.Length == 0) continue;
-                var shells = UvShellExtractor.Extract(uv0, e.originalMesh.triangles);
-                int split = SymmetrySplitShells.Split(e.originalMesh, shells);
-                if (split > 0) { e.wasSymmetrySplit = true; lastSymmetrySplitLods.Add(e.lodIndex); UvtLog.Info($"[SymSplit] '{e.originalMesh.name}' LOD{e.lodIndex}: {split} shells split"); }
-            }
-            ctx.ClearAllCaches();
-            requestRepaint?.Invoke();
-        }
-
         void ExecFullPipeline()
         {
             if (ctx.LodGroup == null) return;
@@ -589,15 +566,12 @@ namespace LightmapUvTool
             // 2. Weld
             ExecWeldUv0();
 
-            // 3. SymSplit
-            ExecSymmetrySplit(splitTargetsInSymmetryStep);
-
-            // 4. Repack
+            // 3. Repack (symmetry detection happens inside via AugmentFaceIds)
             var src = ctx.ForLod(ctx.SourceLodIndex);
             if (ctx.RepackPerMesh) ExecRepackPerMesh(src);
             else ExecRepack(src);
 
-            // 5. Transfer
+            // 4. Transfer
             if (ctx.HasRepack) ExecTransferAll();
 
             UvtLog.Info("[Pipeline] Complete.");
@@ -799,7 +773,7 @@ namespace LightmapUvTool
                     targetUvChannel = 1,
                     stepMeshopt = e.wasWelded,
                     stepEdgeWeld = e.wasEdgeWelded,
-                    stepSymmetrySplit = e.wasSymmetrySplit,
+                    stepSymmetrySplit = false, // no longer modifies mesh
                     stepRepack = (e.lodIndex == ctx.SourceLodIndex),
                     stepTransfer = (e.lodIndex != ctx.SourceLodIndex),
                 });
@@ -841,7 +815,7 @@ namespace LightmapUvTool
             if (e.transferredMesh != null)
                 return e.transferredMesh;
             // Welded/modified meshes
-            if (e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit)
+            if (e.wasWelded || e.wasEdgeWelded)
                 return e.originalMesh;
             // Generated LODs or any mesh that differs from the original FBX
             if (e.originalMesh != null && e.originalMesh != e.fbxMesh)
@@ -1327,7 +1301,7 @@ namespace LightmapUvTool
                     targetUvChannel = 1,
                     stepMeshopt = e.wasWelded,
                     stepEdgeWeld = e.wasEdgeWelded,
-                    stepSymmetrySplit = e.wasSymmetrySplit,
+                    stepSymmetrySplit = false, // no longer modifies mesh
                     stepRepack = (e.lodIndex == ctx.SourceLodIndex),
                     stepTransfer = (e.lodIndex != ctx.SourceLodIndex),
                 });

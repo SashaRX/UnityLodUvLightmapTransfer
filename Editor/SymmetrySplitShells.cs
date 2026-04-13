@@ -551,6 +551,312 @@ namespace LightmapUvTool
             return splitData.Count;
         }
 
+        /// <summary>
+        /// Detect symmetric UV0 shells and augment faceShellIds so xatlas treats
+        /// symmetric halves as separate charts — without modifying mesh topology.
+        /// Modifies faceShellIds, shells, and overlapGroups in-place.
+        /// Returns number of shells augmented.
+        /// </summary>
+        public static int AugmentFaceIds(
+            Vector3[] vertices, Vector2[] uv0, int[] triangles,
+            List<UvShell> shells, uint[] faceShellIds,
+            List<List<int>> overlapGroups)
+        {
+            if (uv0 == null || uv0.Length == 0 || triangles.Length == 0)
+                return 0;
+
+            int faceCount = triangles.Length / 3;
+
+            // ── Precompute per-face centroids ──
+            var uv0C = new Vector2[faceCount];
+            var posC = new Vector3[faceCount];
+            for (int f = 0; f < faceCount; f++)
+            {
+                int v0 = triangles[f * 3], v1 = triangles[f * 3 + 1], v2 = triangles[f * 3 + 2];
+                uv0C[f] = (uv0[v0] + uv0[v1] + uv0[v2]) / 3f;
+                posC[f] = (vertices[v0] + vertices[v1] + vertices[v2]) / 3f;
+            }
+
+            // ── Detection (same criteria as Split) ──
+            var splits = new List<SplitInfo>();
+            int shellCountBefore = shells.Count; // only iterate original shells
+
+            for (int si = 0; si < shellCountBefore; si++)
+            {
+                var shell = shells[si];
+                var faces = shell.faceIndices;
+                if (faces.Count < MIN_FACES) continue;
+
+                var grid = new Dictionary<long, List<int>>();
+                foreach (int f in faces)
+                {
+                    long key = UvGridKey(uv0C[f]);
+                    if (!grid.TryGetValue(key, out var bucket))
+                    {
+                        bucket = new List<int>();
+                        grid[key] = bucket;
+                    }
+                    bucket.Add(f);
+                }
+
+                int[] axisVotes = new int[3];
+                float[] axisMidpointSum = new float[3];
+                bool found = false;
+
+                foreach (int f in faces)
+                {
+                    var c = uv0C[f];
+                    int cx = Mathf.FloorToInt(c.x / GRID_CELL);
+                    int cy = Mathf.FloorToInt(c.y / GRID_CELL);
+
+                    for (int dx = -1; dx <= 1; dx++)
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        long nk = GridKey(cx + dx, cy + dy);
+                        if (!grid.TryGetValue(nk, out var bucket)) continue;
+
+                        foreach (int g in bucket)
+                        {
+                            if (g <= f) continue;
+                            float uvDist = Vector2.Distance(uv0C[f], uv0C[g]);
+                            if (uvDist >= UV_NEAR) continue;
+                            float posDist = Vector3.Distance(posC[f], posC[g]);
+                            if (posDist <= POS_FAR) continue;
+
+                            Vector3 mid = (posC[f] + posC[g]) * 0.5f;
+                            float ax = Mathf.Abs(mid.x);
+                            float ay = Mathf.Abs(mid.y);
+                            float az = Mathf.Abs(mid.z);
+
+                            if (ax <= ay && ax <= az)
+                            {
+                                axisVotes[0]++;
+                                axisMidpointSum[0] += mid.x;
+                            }
+                            else if (ay <= az)
+                            {
+                                axisVotes[1]++;
+                                axisMidpointSum[1] += mid.y;
+                            }
+                            else
+                            {
+                                axisVotes[2]++;
+                                axisMidpointSum[2] += mid.z;
+                            }
+                            found = true;
+                        }
+                    }
+                }
+
+                // Secondary: V-shape overlap detection
+                if (!found && faces.Count >= 6)
+                {
+                    var overlapPairs = DetectUv0OverlapPairs(shell, uv0, triangles);
+                    if (overlapPairs.Count > 0)
+                    {
+                        foreach (var (fA, fB) in overlapPairs)
+                        {
+                            float posDist = Vector3.Distance(posC[fA], posC[fB]);
+                            if (posDist <= POS_FAR * 0.5f) continue;
+
+                            Vector3 mid = (posC[fA] + posC[fB]) * 0.5f;
+                            float ax = Mathf.Abs(mid.x);
+                            float ay = Mathf.Abs(mid.y);
+                            float az = Mathf.Abs(mid.z);
+
+                            if (ax <= ay && ax <= az)
+                            {
+                                axisVotes[0]++;
+                                axisMidpointSum[0] += mid.x;
+                            }
+                            else if (ay <= az)
+                            {
+                                axisVotes[1]++;
+                                axisMidpointSum[1] += mid.y;
+                            }
+                            else
+                            {
+                                axisVotes[2]++;
+                                axisMidpointSum[2] += mid.z;
+                            }
+                            found = true;
+                        }
+
+                        if (found)
+                            UvtLog.Verbose($"[SymSplit] Shell {si}: V-shape overlap detected " +
+                                $"({overlapPairs.Count} pairs)");
+                    }
+                }
+
+                if (!found) continue;
+
+                int bestAxis = 0;
+                if (axisVotes[1] > axisVotes[bestAxis]) bestAxis = 1;
+                if (axisVotes[2] > axisVotes[bestAxis]) bestAxis = 2;
+
+                float threshold = axisVotes[bestAxis] > 0
+                    ? axisMidpointSum[bestAxis] / axisVotes[bestAxis]
+                    : 0f;
+
+                splits.Add(new SplitInfo { shellIndex = si, axis = bestAxis, splitThreshold = threshold });
+                UvtLog.Verbose($"[SymSplit] Shell {si}: symmetry on {AxisName(bestAxis)} " +
+                    $"({axisVotes[0]}x/{axisVotes[1]}y/{axisVotes[2]}z votes, {faces.Count} faces, " +
+                    $"threshold={threshold:F4})");
+            }
+
+            if (splits.Count == 0) return 0;
+
+            // ── Classify and augment face IDs ──
+            int augmented = 0;
+
+            foreach (var sp in splits)
+            {
+                var shell = shells[sp.shellIndex];
+                var groupA = new List<int>();
+                var groupB = new List<int>();
+
+                foreach (int f in shell.faceIndices)
+                {
+                    if (posC[f][sp.axis] >= sp.splitThreshold)
+                        groupA.Add(f);
+                    else
+                        groupB.Add(f);
+                }
+
+                if (groupA.Count == 0 || groupB.Count == 0)
+                {
+                    UvtLog.Verbose($"[SymSplit] Shell {sp.shellIndex}: skip (all faces on one side)");
+                    continue;
+                }
+
+                // 3D separation validation
+                {
+                    Vector3 centA = Vector3.zero, centB = Vector3.zero;
+                    foreach (int f in groupA) centA += posC[f];
+                    foreach (int f in groupB) centB += posC[f];
+                    centA /= groupA.Count;
+                    centB /= groupB.Count;
+                    float groupSep = Vector3.Distance(centA, centB);
+
+                    Vector3 sMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                    Vector3 sMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+                    foreach (int f in shell.faceIndices)
+                    {
+                        sMin = Vector3.Min(sMin, posC[f]);
+                        sMax = Vector3.Max(sMax, posC[f]);
+                    }
+                    float shellExtent = (sMax - sMin).magnitude;
+
+                    if (shellExtent > 1e-6f && groupSep / shellExtent < 0.2f)
+                    {
+                        UvtLog.Verbose($"[SymSplit] Shell {sp.shellIndex}: skip (3D separation too small: " +
+                            $"{groupSep:F1}/{shellExtent:F1} = {groupSep / shellExtent:P0})");
+                        continue;
+                    }
+                }
+
+                // UV0 bbox overlap validation
+                {
+                    Vector2 mnA = new Vector2(float.MaxValue, float.MaxValue);
+                    Vector2 mxA = new Vector2(float.MinValue, float.MinValue);
+                    foreach (int f in groupA)
+                        for (int j = 0; j < 3; j++)
+                        {
+                            int vi = triangles[f * 3 + j];
+                            if (vi < uv0.Length) { mnA = Vector2.Min(mnA, uv0[vi]); mxA = Vector2.Max(mxA, uv0[vi]); }
+                        }
+                    Vector2 mnB = new Vector2(float.MaxValue, float.MaxValue);
+                    Vector2 mxB = new Vector2(float.MinValue, float.MinValue);
+                    foreach (int f in groupB)
+                        for (int j = 0; j < 3; j++)
+                        {
+                            int vi = triangles[f * 3 + j];
+                            if (vi < uv0.Length) { mnB = Vector2.Min(mnB, uv0[vi]); mxB = Vector2.Max(mxB, uv0[vi]); }
+                        }
+
+                    float oMinX = Mathf.Max(mnA.x, mnB.x);
+                    float oMaxX = Mathf.Min(mxA.x, mxB.x);
+                    float oMinY = Mathf.Max(mnA.y, mnB.y);
+                    float oMaxY = Mathf.Min(mxA.y, mxB.y);
+                    if (oMaxX <= oMinX || oMaxY <= oMinY)
+                    {
+                        UvtLog.Verbose($"[SymSplit] Shell {sp.shellIndex}: skip (UV0 bboxes don't overlap)");
+                        continue;
+                    }
+                    float overlapArea = (oMaxX - oMinX) * (oMaxY - oMinY);
+                    float areaA = (mxA.x - mnA.x) * (mxA.y - mnA.y);
+                    float areaB = (mxB.x - mnB.x) * (mxB.y - mnB.y);
+                    float smaller = Mathf.Min(areaA, areaB);
+                    if (smaller > 1e-8f && overlapArea / smaller < 0.10f)
+                    {
+                        UvtLog.Verbose($"[SymSplit] Shell {sp.shellIndex}: skip (UV0 overlap too small: {overlapArea / smaller:P0})");
+                        continue;
+                    }
+                }
+
+                // ── Augment face IDs instead of duplicating vertices ──
+                uint newShellId = (uint)shells.Count;
+
+                foreach (int f in groupB)
+                    faceShellIds[f] = newShellId;
+
+                // Rebuild original shell as groupA only
+                shell.faceIndices = groupA;
+                shell.vertexIndices.Clear();
+                Vector2 mnA2 = new Vector2(float.MaxValue, float.MaxValue);
+                Vector2 mxA2 = new Vector2(float.MinValue, float.MinValue);
+                foreach (int f in groupA)
+                    for (int j = 0; j < 3; j++)
+                    {
+                        int vi = triangles[f * 3 + j];
+                        shell.vertexIndices.Add(vi);
+                        if (vi < uv0.Length)
+                        {
+                            mnA2 = Vector2.Min(mnA2, uv0[vi]);
+                            mxA2 = Vector2.Max(mxA2, uv0[vi]);
+                        }
+                    }
+                shell.boundsMin = mnA2;
+                shell.boundsMax = mxA2;
+                shell.bboxArea = Mathf.Max(0f, (mxA2.x - mnA2.x) * (mxA2.y - mnA2.y));
+                shell.symSplitAxis = sp.axis;
+                shell.symSplitSide = +1;
+
+                // Create virtual shell for groupB
+                var newShell = new UvShell { shellId = (int)newShellId };
+                newShell.faceIndices = groupB;
+                Vector2 mnB2 = new Vector2(float.MaxValue, float.MaxValue);
+                Vector2 mxB2 = new Vector2(float.MinValue, float.MinValue);
+                foreach (int f in groupB)
+                    for (int j = 0; j < 3; j++)
+                    {
+                        int vi = triangles[f * 3 + j];
+                        newShell.vertexIndices.Add(vi);
+                        if (vi < uv0.Length)
+                        {
+                            mnB2 = Vector2.Min(mnB2, uv0[vi]);
+                            mxB2 = Vector2.Max(mxB2, uv0[vi]);
+                        }
+                    }
+                newShell.boundsMin = mnB2;
+                newShell.boundsMax = mxB2;
+                newShell.bboxArea = Mathf.Max(0f, (mxB2.x - mnB2.x) * (mxB2.y - mnB2.y));
+                newShell.symSplitAxis = sp.axis;
+                newShell.symSplitSide = -1;
+                shells.Add(newShell);
+
+                // Register overlap group so PerturbOverlapShellsUv0 and
+                // FixOverlappingUv2Shells handle the pair correctly
+                overlapGroups.Add(new List<int> { sp.shellIndex, (int)newShellId });
+
+                augmented++;
+                UvtLog.Info($"[SymSplit] Shell {sp.shellIndex}: augmented faceIds " +
+                    $"(A={groupA.Count} B={groupB.Count} faces, axis={AxisName(sp.axis)})");
+            }
+
+            return augmented;
+        }
+
         // ── UV0 overlap detection for V-shaped symmetry ──
 
         /// <summary>
