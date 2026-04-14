@@ -1446,9 +1446,17 @@ namespace LightmapUvTool
                 }
                 // Always disable generateSecondaryUV after overwriting FBX with
                 // transferred UV2 — Unity's auto-generated UV2 would overwrite ours.
-                else if (overwriteSource && groupSucceeded)
+                // Must run even with sidecar enabled (PrepareImportSettings above may
+                // skip if path isn't registered yet).
+                if (overwriteSource && groupSucceeded)
                 {
-                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
+                    var fbxImp = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
+                    if (fbxImp != null && fbxImp.generateSecondaryUV)
+                    {
+                        fbxImp.generateSecondaryUV = false;
+                        fbxImp.SaveAndReimport();
+                        UvtLog.Info($"[FBX Export] Disabled generateSecondaryUV on '{sourceFbxPath}'");
+                    }
                 }
             }
 
