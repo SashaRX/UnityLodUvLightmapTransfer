@@ -696,6 +696,74 @@ namespace LightmapUvTool
             return aMax <= bMin + eps || bMax <= aMin + eps;
         }
 
+        // ── N-fold rotational symmetry detection (diagnostic) ──
+
+        internal static int DetectRotationalSymmetry(
+            UvShell shell, Vector3[] verts, Vector2[] uv0, int[] tris)
+        {
+            var faces = shell.faceIndices;
+            if (faces.Count < 6) return 0;
+
+            Vector3 center = Vector3.zero;
+            foreach (int f in faces)
+            {
+                int v0 = tris[f * 3], v1 = tris[f * 3 + 1], v2 = tris[f * 3 + 2];
+                center += (verts[v0] + verts[v1] + verts[v2]) / 3f;
+            }
+            center /= faces.Count;
+
+            float cxx = 0, cyy = 0, czz = 0;
+            foreach (int f in faces)
+            {
+                int v0 = tris[f * 3], v1 = tris[f * 3 + 1], v2 = tris[f * 3 + 2];
+                Vector3 fc = (verts[v0] + verts[v1] + verts[v2]) / 3f - center;
+                cxx += fc.x * fc.x; cyy += fc.y * fc.y; czz += fc.z * fc.z;
+            }
+
+            int rotAxis;
+            if (cxx <= cyy && cxx <= czz) rotAxis = 0;
+            else if (cyy <= czz) rotAxis = 1;
+            else rotAxis = 2;
+
+            const int kSamples = 16;
+            float uvW = shell.boundsMax.x - shell.boundsMin.x;
+            float uvH = shell.boundsMax.y - shell.boundsMin.y;
+            if (uvW < 1e-6f || uvH < 1e-6f) return 0;
+
+            var uvCentroids = new Vector2[faces.Count];
+            for (int i = 0; i < faces.Count; i++)
+            {
+                int f = faces[i];
+                int v0 = tris[f * 3], v1 = tris[f * 3 + 1], v2 = tris[f * 3 + 2];
+                uvCentroids[i] = (uv0[v0] + uv0[v1] + uv0[v2]) / 3f;
+            }
+
+            float cellW = uvW / kSamples, cellH = uvH / kSamples;
+            int maxLayers = 0, layerSum = 0, layerCells = 0;
+            for (int sy = 0; sy < kSamples; sy++)
+            for (int sx = 0; sx < kSamples; sx++)
+            {
+                float cx = shell.boundsMin.x + (sx + 0.5f) * cellW;
+                float cy = shell.boundsMin.y + (sy + 0.5f) * cellH;
+                int count = 0;
+                for (int i = 0; i < uvCentroids.Length; i++)
+                    if (Mathf.Abs(uvCentroids[i].x - cx) < cellW &&
+                        Mathf.Abs(uvCentroids[i].y - cy) < cellH)
+                        count++;
+                if (count > 1) { if (count > maxLayers) maxLayers = count; layerSum += count; layerCells++; }
+            }
+
+            if (layerCells < kSamples) return 0;
+            int nFold = Mathf.RoundToInt((float)layerSum / layerCells);
+            if (nFold > 2)
+            {
+                UvtLog.Info($"[SymSplit] Shell: detected {nFold}-fold rotational symmetry " +
+                    $"(axis={AxisName(rotAxis)}, maxLayers={maxLayers}, {faces.Count} faces)");
+                return nFold;
+            }
+            return 0;
+        }
+
         // ── Spatial hash helpers ──
 
         static long UvGridKey(Vector2 uv)
