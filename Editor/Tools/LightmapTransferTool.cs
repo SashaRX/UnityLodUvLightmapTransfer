@@ -581,7 +581,7 @@ namespace LightmapUvTool
         void ExecFullPipeline()
         {
             if (ctx.LodGroup == null) return;
-            UvtLog.Info("[Pipeline] Starting full pipeline...");
+            UvtLog.Info($"[Pipeline] Starting full pipeline... (v{Uv2DataAsset.ToolVersion})");
 
             // 1. Analyze
             ExecAnalyzeUv0();

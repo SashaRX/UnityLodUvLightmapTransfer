@@ -305,10 +305,12 @@ namespace LightmapUvTool
                     Vector3 tPos = tgtVertices[vi];
                     float bestDSq = float.MaxValue;
                     Vector2 bestUv2 = Vector2.zero;
-                    foreach (var sv in srcParamVertices.Values)
+                    foreach (var kv in srcParamVertices)
                     {
-                        float dSq = (tPos - sv.pos).sqrMagnitude;
-                        if (dSq < bestDSq) { bestDSq = dSq; bestUv2 = sv.uv2; }
+                        int si = kv.Key;
+                        if (si >= srcVertices.Length) continue;
+                        float dSq = (tPos - srcVertices[si]).sqrMagnitude;
+                        if (dSq < bestDSq) { bestDSq = dSq; bestUv2 = kv.Value.uv2; }
                     }
                     if (bestDSq < float.MaxValue)
                         result[vi] = bestUv2;
