@@ -1228,6 +1228,33 @@ namespace LightmapUvTool
 
                             if (newSrc >= 0)
                             {
+                                // Guard against catastrophic 3D-distance degradation.
+                                // Tiny shells (e.g. 2-face symmetric copies) with a perfect
+                                // original match (avg3D ≈ 0) can get reassigned to a far
+                                // source in the overlap group when their original source is
+                                // claimed. The resulting merged+3D transfer produces
+                                // degenerate UV2 (bbox collapsed to a point) → REJECTED.
+                                // In that case, keep the original (claimed) source — sharing
+                                // it with another target yields valid UV2 via interpolation,
+                                // which is always better than degenerate UV2.
+                                const float kCatastrophicAbsDist = 0.05f;
+                                const float kCatastrophicFactor = 100f;
+                                bool catastrophicDegradation =
+                                    oldSrc >= 0
+                                    && newAvg3D > kCatastrophicAbsDist
+                                    && newAvg3D > oldAvg3D * kCatastrophicFactor;
+
+                                if (catastrophicDegradation)
+                                {
+                                    UvtLog.Info($"[GroupedTransfer] Dedup: t{tsi} keeping src{oldSrc} " +
+                                        $"(avg3D={oldAvg3D:F4} — new src{newSrc} avg3D={newAvg3D:F4} " +
+                                        $"catastrophically worse, sharing source preferred)");
+                                    // Target keeps oldSrc (already in claimed). Transfer will
+                                    // use interpolation from that good match; multiple targets
+                                    // sharing the same source produce valid overlapping UV2.
+                                    continue;
+                                }
+
                                 // Re-check merged status with new source (BVH + adaptive threshold)
                                 bool newIsMerged = DetectMergedShell(tShell, tUv0,
                                     srcShells[newSrc].faceIndices, triUv0A, triUv0B, triUv0C,
