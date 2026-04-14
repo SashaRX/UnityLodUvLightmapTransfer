@@ -2037,6 +2037,14 @@ namespace LightmapUvTool
         {
             if (splitCandidates == null || splitCandidates.Count == 0) return;
 
+            // Restore any active checker/shell preview BEFORE reading sharedMaterials.
+            // Otherwise mats[] below would be [checkerMat, ...] and the new split
+            // children would inherit the preview material permanently — the original
+            // renderer they were backed up against is destroyed below, so the normal
+            // preview-restore path can't rescue them.
+            if (CheckerTexturePreview.IsActive) CheckerTexturePreview.Restore();
+            if (ShellColorModelPreview.IsActive) ShellColorModelPreview.Restore();
+
             using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Split by Material");
             int split = 0;
 
