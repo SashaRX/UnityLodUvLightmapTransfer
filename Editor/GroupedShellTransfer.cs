@@ -98,6 +98,7 @@ namespace LightmapUvTool
             public ShellStatus[] targetShellStatus; // per-shell quality classification
             public int[] targetShellIssues;  // per-shell issue count (inverted/degenerate faces)
             public int shellsRejected;       // shells where UV2 was not written (too many issues)
+            public int shellsOverlapFixed;   // force3D shells relocated due to UV2 overlap
 
             // ─── Cross-LOD overlap hints ───
             // Populated for merged shells to propagate source selection to subsequent LODs.
@@ -3019,6 +3020,82 @@ namespace LightmapUvTool
                 }
                 if (totalOutlierVerts > 0)
                     UvtLog.Info($"[GroupedTransfer] Post-fix total: {totalOutlierVerts} outlier verts corrected");
+            }
+
+            // ── Post-transfer UV2 overlap detection & relocation ──
+            // Force3D shells may land in UV2 regions occupied by other shells.
+            // Detect overlapping force3D shells and collapse them to their source's
+            // UV2 centroid to eliminate overlaps.
+            {
+                // Build per-shell UV2 AABB
+                var shellUv2Min = new Vector2[tgtShells.Count];
+                var shellUv2Max = new Vector2[tgtShells.Count];
+                var shellHasUv2 = new bool[tgtShells.Count];
+                for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+                {
+                    Vector2 sMin = new Vector2(float.MaxValue, float.MaxValue);
+                    Vector2 sMax = new Vector2(float.MinValue, float.MinValue);
+                    bool hasAny = false;
+                    foreach (int vi in tgtShells[tsi].vertexIndices)
+                    {
+                        if (vi >= result.uv2.Length) continue;
+                        Vector2 uv = result.uv2[vi];
+                        if (uv.x == 0f && uv.y == 0f && result.targetShellStatus[tsi] == ShellStatus.Rejected)
+                            continue;
+                        sMin = Vector2.Min(sMin, uv);
+                        sMax = Vector2.Max(sMax, uv);
+                        hasAny = true;
+                    }
+                    shellUv2Min[tsi] = sMin;
+                    shellUv2Max[tsi] = sMax;
+                    shellHasUv2[tsi] = hasAny;
+                }
+
+                int overlapsFixed = 0;
+                for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+                {
+                    if (!tgtForce3DFallback[tsi]) continue;
+                    if (!shellHasUv2[tsi]) continue;
+
+                    bool overlaps = false;
+                    for (int tsj = 0; tsj < tgtShells.Count; tsj++)
+                    {
+                        if (tsj == tsi) continue;
+                        if (!shellHasUv2[tsj]) continue;
+                        if (tgtForce3DFallback[tsj]) continue; // don't compare force3D vs force3D
+
+                        if (shellUv2Min[tsi].x < shellUv2Max[tsj].x &&
+                            shellUv2Max[tsi].x > shellUv2Min[tsj].x &&
+                            shellUv2Min[tsi].y < shellUv2Max[tsj].y &&
+                            shellUv2Max[tsi].y > shellUv2Min[tsj].y)
+                        {
+                            overlaps = true;
+                            break;
+                        }
+                    }
+
+                    if (overlaps)
+                    {
+                        int src = result.targetShellToSourceShell[tsi];
+                        Vector2 centroid;
+                        if (src >= 0 && src < srcUv2Min.Length)
+                            centroid = (srcUv2Min[src] + srcUv2Max[src]) * 0.5f;
+                        else
+                            centroid = (shellUv2Min[tsi] + shellUv2Max[tsi]) * 0.5f;
+
+                        foreach (int vi in tgtShells[tsi].vertexIndices)
+                        {
+                            if (vi < result.uv2.Length)
+                                result.uv2[vi] = centroid;
+                        }
+                        overlapsFixed++;
+                        result.shellsOverlapFixed++;
+                        UvtLog.Info($"[GroupedTransfer] Overlap fix: t{tsi} collapsed to " +
+                            $"src{src} centroid ({centroid.x:F4},{centroid.y:F4})");
+                    }
+                }
+                if (overlapsFixed > 0)
+                    UvtLog.Info($"[GroupedTransfer] Overlap fix: {overlapsFixed} force3D shells relocated");
             }
 
             // ── Classify all shells ──

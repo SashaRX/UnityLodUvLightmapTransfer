@@ -639,29 +639,32 @@ namespace LightmapUvTool
 
                 // Evaluate quality
                 int totalRejected = 0;
+                int totalOverlaps = 0;
                 int totalVerts = 0;
                 int totalTransferred = 0;
                 foreach (var e in ctx.MeshEntries)
                 {
                     if (e.shellTransferResult == null) continue;
                     totalRejected += e.shellTransferResult.shellsRejected;
+                    totalOverlaps += e.shellTransferResult.shellsOverlapFixed;
                     totalVerts += e.shellTransferResult.verticesTotal;
                     totalTransferred += e.shellTransferResult.verticesTransferred;
                 }
                 float coverage = totalVerts > 0 ? (float)totalTransferred / totalVerts : 0f;
+                int totalIssues = totalRejected + totalOverlaps;
 
                 UvtLog.Info($"[Pipeline] Config #{ci} (sep={sepThresh:P0}): " +
-                    $"rejected={totalRejected}, coverage={coverage:P0}");
+                    $"rejected={totalRejected}, overlaps={totalOverlaps}, coverage={coverage:P0}");
 
                 bool better = false;
-                if (totalRejected < bestRejected)
+                if (totalIssues < bestRejected)
                     better = true;
-                else if (totalRejected == bestRejected && coverage > bestCoverage)
+                else if (totalIssues == bestRejected && coverage > bestCoverage)
                     better = true;
 
                 if (better)
                 {
-                    bestRejected = totalRejected;
+                    bestRejected = totalIssues;
                     bestCoverage = coverage;
                     bestConfigIdx = ci;
                     // Save best meshes
@@ -679,7 +682,7 @@ namespace LightmapUvTool
                 }
 
                 // Early exit if perfect
-                if (totalRejected == 0 && coverage >= 0.99f)
+                if (totalIssues == 0 && coverage >= 0.99f)
                 {
                     if (ci > 0) UvtLog.Info($"[Pipeline] Perfect result on config #{ci}, stopping.");
                     break;
