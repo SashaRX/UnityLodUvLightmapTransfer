@@ -785,8 +785,14 @@ namespace LightmapUvTool
         {
             var targets = ctx.ForLod(tLod);
             if (targets.Count == 0) return;
-            var sources = ctx.ForLod(ctx.SourceLodIndex);
-            if (sources.Count == 0) return;
+
+            // Cascading transfer: for LOD2+ try previous LOD as source (closer geometry).
+            // Falls back to source LOD (LOD0) if previous LOD has no transferred mesh.
+            int prevLod = tLod - 1;
+            bool useCascade = prevLod > ctx.SourceLodIndex;
+            var cascadeSources = useCascade ? ctx.ForLod(prevLod) : null;
+            var primarySources = ctx.ForLod(ctx.SourceLodIndex);
+            if (primarySources.Count == 0) return;
 
             foreach (var tgt in targets)
             {
@@ -796,14 +802,38 @@ namespace LightmapUvTool
                     tgt.originalMesh.name = tgt.fbxMesh.name + "_wc";
                 }
 
-                // Find matching source by mesh group key
+                // Find matching source by mesh group key.
+                // Try cascade (previous LOD) first, fall back to primary (LOD0).
                 MeshEntry srcEntry = null;
-                if (!string.IsNullOrEmpty(tgt.meshGroupKey))
-                    srcEntry = sources.FirstOrDefault(s => s.meshGroupKey == tgt.meshGroupKey);
-                if (srcEntry == null)
-                    srcEntry = sources[0];
+                Mesh srcMesh = null;
 
-                Mesh srcMesh = srcEntry.repackedMesh ?? srcEntry.originalMesh;
+                if (useCascade && cascadeSources != null)
+                {
+                    MeshEntry cascadeEntry = null;
+                    if (!string.IsNullOrEmpty(tgt.meshGroupKey))
+                        cascadeEntry = cascadeSources.FirstOrDefault(s => s.meshGroupKey == tgt.meshGroupKey);
+                    if (cascadeEntry == null && cascadeSources.Count > 0)
+                        cascadeEntry = cascadeSources[0];
+
+                    // Use cascade source only if it has a transferred mesh with UV2
+                    if (cascadeEntry?.transferredMesh != null)
+                    {
+                        srcEntry = cascadeEntry;
+                        srcMesh = cascadeEntry.transferredMesh;
+                        UvtLog.Verbose($"[Transfer] Cascade: LOD{tLod} '{tgt.renderer.name}' " +
+                            $"← LOD{prevLod} '{srcEntry.renderer.name}' (transferred)");
+                    }
+                }
+
+                // Fallback to primary source (LOD0 repacked)
+                if (srcMesh == null)
+                {
+                    if (!string.IsNullOrEmpty(tgt.meshGroupKey))
+                        srcEntry = primarySources.FirstOrDefault(s => s.meshGroupKey == tgt.meshGroupKey);
+                    if (srcEntry == null)
+                        srcEntry = primarySources[0];
+                    srcMesh = srcEntry.repackedMesh ?? srcEntry.originalMesh;
+                }
                 Mesh tgtMesh = tgt.originalMesh;
                 if (srcMesh == null || tgtMesh == null) continue;
 
