@@ -63,6 +63,8 @@ namespace LightmapUvTool
             new Dictionary<int, GroupedShellTransfer.SourceShellInfo[]>();
         List<GroupedShellTransfer.OverlapSourceHint> accumulatedOverlapHints =
             new List<GroupedShellTransfer.OverlapSourceHint>();
+        List<GroupedShellTransfer.CrossLodMatchHint> accumulatedMatchHints =
+            new List<GroupedShellTransfer.CrossLodMatchHint>();
 
         // ── Preview ──
         // Three mutually-exclusive preview modes. Only one should be active at a time.
@@ -709,6 +711,7 @@ namespace LightmapUvTool
         void ExecTransferAll()
         {
             accumulatedOverlapHints.Clear();
+            accumulatedMatchHints.Clear();
             for (int li = 0; li < ctx.LodCount; li++)
             {
                 if (li == ctx.SourceLodIndex) continue;
@@ -753,12 +756,19 @@ namespace LightmapUvTool
                 if (srcInfos == null) continue;
 
                 var tr = GroupedShellTransfer.Transfer(tgtMesh, srcMesh,
-                    accumulatedOverlapHints.Count > 0 ? accumulatedOverlapHints : null);
+                    accumulatedOverlapHints.Count > 0 ? accumulatedOverlapHints : null,
+                    accumulatedMatchHints.Count > 0 ? accumulatedMatchHints : null);
                 if (tr.uv2 == null) { UvtLog.Warn($"[Transfer] Failed for '{tgt.renderer.name}'"); continue; }
 
                 // Accumulate overlap hints for subsequent LODs
                 if (tr.overlapHints != null && tr.overlapHints.Count > 0)
                     accumulatedOverlapHints.AddRange(tr.overlapHints);
+                // Replace match hints with this LOD's matches (latest LOD drives
+                // next LOD's hint-guided matching; stale hints from older LODs
+                // could conflict with changing geometry)
+                accumulatedMatchHints.Clear();
+                if (tr.matchHints != null && tr.matchHints.Count > 0)
+                    accumulatedMatchHints.AddRange(tr.matchHints);
 
                 // Build output mesh with UV2 applied
                 var om = UnityEngine.Object.Instantiate(tgtMesh);

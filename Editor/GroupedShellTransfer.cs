@@ -102,6 +102,13 @@ namespace LightmapUvTool
             // ─── Cross-LOD overlap hints ───
             // Populated for merged shells to propagate source selection to subsequent LODs.
             public List<OverlapSourceHint> overlapHints;
+
+            // ─── Cross-LOD match hints (for ALL matched targets) ───
+            // Records (3D centroid, UV0 centroid) → source shell mapping for every
+            // successfully matched target. Passed to the next LOD so heavily-
+            // simplified target shells (whose 3D matching becomes ambiguous) can
+            // inherit the correct source from their LOD1 counterpart.
+            public List<CrossLodMatchHint> matchHints;
         }
 
         /// <summary>
@@ -112,6 +119,20 @@ namespace LightmapUvTool
         {
             public Vector3 centroid3D;
             public int sourceShellIndex;
+        }
+
+        /// <summary>
+        /// Records a target shell → source shell match for cross-LOD propagation.
+        /// Includes both 3D and UV0 centroids so later LODs can find the
+        /// corresponding match by combined geometric + UV similarity.
+        /// </summary>
+        public struct CrossLodMatchHint
+        {
+            public Vector3 centroid3D;
+            public Vector2 uv0Centroid;
+            public int sourceShellIndex;
+            public int faceCount;
+            public ShellStatus quality;
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -274,6 +295,61 @@ namespace LightmapUvTool
         // ═══════════════════════════════════════════════════════════
 
         const int kMaxSampleVerts = 32;
+
+        // ═══════════════════════════════════════════════════════════
+        //  Cross-LOD hint matching
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Find the best source shell using cross-LOD match hints from a
+        /// previous (more detailed) LOD. Matches on combined 3D + UV0 centroid
+        /// proximity. Returns -1 if no confident hint match exists.
+        /// </summary>
+        static int FindCrossLodHintSource(
+            Vector3 targetCentroid, Vector2 targetUv0Centroid,
+            List<CrossLodMatchHint> hints, int srcShellCount,
+            float meshDiagonal,
+            out float bestDistSq, out float bestAvg3D)
+        {
+            bestDistSq = float.MaxValue;
+            bestAvg3D = float.MaxValue;
+
+            // Tolerances: proximity must be very close in BOTH 3D and UV0
+            // to confidently reuse the previous LOD's source. UV0 tolerance
+            // is strict — distinct UV islands (e.g. nail vs panel) differ by
+            // more than 0.01 UV units, while a target's centroid vs the
+            // previous LOD's centroid for the same feature differ by much less.
+            float uv0Tol = 0.01f;
+            float dist3DTol = Mathf.Max(meshDiagonal * 0.02f, 0.01f);
+
+            int bestHint = -1;
+            float bestCombinedScore = float.MaxValue;
+
+            for (int i = 0; i < hints.Count; i++)
+            {
+                var h = hints[i];
+                if (h.sourceShellIndex < 0 || h.sourceShellIndex >= srcShellCount) continue;
+                if (h.quality == ShellStatus.Rejected || h.quality == ShellStatus.Unmatched) continue;
+
+                float uv0Dist = (h.uv0Centroid - targetUv0Centroid).magnitude;
+                if (uv0Dist > uv0Tol) continue;
+
+                float dist3D = (h.centroid3D - targetCentroid).magnitude;
+                if (dist3D > dist3DTol) continue;
+
+                // Combined score: weight UV0 more heavily (it's the primary identity)
+                float combinedScore = uv0Dist * 100f + dist3D;
+                if (combinedScore < bestCombinedScore)
+                {
+                    bestCombinedScore = combinedScore;
+                    bestHint = i;
+                    bestDistSq = dist3D * dist3D;
+                    bestAvg3D = dist3D;
+                }
+            }
+
+            return bestHint >= 0 ? hints[bestHint].sourceShellIndex : -1;
+        }
 
         static void FindBestSourceShell(
             UvShell tShell,
@@ -596,7 +672,8 @@ namespace LightmapUvTool
         // ═══════════════════════════════════════════════════════════
 
         public static TransferResult Transfer(Mesh targetMesh, Mesh sourceMesh,
-            List<OverlapSourceHint> previousLodHints = null)
+            List<OverlapSourceHint> previousLodHints = null,
+            List<CrossLodMatchHint> previousLodMatchHints = null)
         {
             var result = new TransferResult();
 
@@ -981,6 +1058,9 @@ namespace LightmapUvTool
                 tgtChosenAvg3D[i] = float.MaxValue;
             }
 
+            // Track which targets matched via cross-LOD hints (preserves them in dedup)
+            var tgtHintMatched = new bool[tgtShells.Count];
+
             for (int tsi = 0; tsi < tgtShells.Count; tsi++)
             {
                 var tShell = tgtShells[tsi];
@@ -993,6 +1073,21 @@ namespace LightmapUvTool
                 }
                 if (tN > 0) tCentroid /= tN;
                 result.targetShellCentroids[tsi] = tCentroid;
+
+                // Compute target shell UV0 centroid (for cross-LOD hint matching)
+                Vector2 tUv0Centroid = Vector2.zero;
+                int tUvN = 0;
+                foreach (int f in tShell.faceIndices)
+                {
+                    if (f * 3 + 2 >= tgtTris.Length) continue;
+                    int i0 = tgtTris[f * 3], i1 = tgtTris[f * 3 + 1], i2 = tgtTris[f * 3 + 2];
+                    if (i0 < tUv0.Length && i1 < tUv0.Length && i2 < tUv0.Length)
+                    {
+                        tUv0Centroid += (tUv0[i0] + tUv0[i1] + tUv0[i2]) / 3f;
+                        tUvN++;
+                    }
+                }
+                if (tUvN > 0) tUv0Centroid /= tUvN;
 
                 // Fragment-merged shells: force to their merge source instead of
                 // searching by 3D centroid. The merge was identified by UV0 bbox
@@ -1010,13 +1105,38 @@ namespace LightmapUvTool
                 }
                 else
                 {
-                    // Find best source shell (with BVH acceleration + subsampling)
-                    FindBestSourceShell(tShell, tVerts, srcShells, srcCentroid3D,
-                        triPosA, triPosB, triPosC,
-                        shellBvh3D, shellBvh3DFaceMap,
-                        tCentroid, kMaxRetries, kGoodDistSq, null,
-                        out chosenSrc, out chosenDistSq, out chosenAvg3D,
-                        tgtAvgNormal[tsi], srcAvgNormal, meshDiagonal);
+                    // ── Cross-LOD hint matching ──
+                    // Heavily-simplified target shells (e.g. 2-face nail remnants on
+                    // LOD2) may have 3D centroids collapsed onto an unrelated source
+                    // (e.g. the panel they're attached to) while their UV0 still
+                    // identifies the correct source (the nail). If the previous LOD
+                    // matched a similar target to source X, use X here.
+                    int hintedSrc = -1;
+                    float hintedDistSq = 0f, hintedAvg3D = 0f;
+                    if (previousLodMatchHints != null && previousLodMatchHints.Count > 0)
+                    {
+                        hintedSrc = FindCrossLodHintSource(
+                            tCentroid, tUv0Centroid, previousLodMatchHints,
+                            srcShells.Count, meshDiagonal, out hintedDistSq, out hintedAvg3D);
+                    }
+
+                    if (hintedSrc >= 0)
+                    {
+                        chosenSrc = hintedSrc;
+                        chosenDistSq = hintedDistSq;
+                        chosenAvg3D = hintedAvg3D;
+                        tgtHintMatched[tsi] = true;
+                    }
+                    else
+                    {
+                        // Find best source shell (with BVH acceleration + subsampling)
+                        FindBestSourceShell(tShell, tVerts, srcShells, srcCentroid3D,
+                            triPosA, triPosB, triPosC,
+                            shellBvh3D, shellBvh3DFaceMap,
+                            tCentroid, kMaxRetries, kGoodDistSq, null,
+                            out chosenSrc, out chosenDistSq, out chosenAvg3D,
+                            tgtAvgNormal[tsi], srcAvgNormal, meshDiagonal);
+                    }
                 }
 
                 if (chosenSrc < 0) continue;
@@ -1184,11 +1304,32 @@ namespace LightmapUvTool
                         continue;
                     }
 
+                    // Cross-LOD hint protection: if multiple claimants were all
+                    // matched via cross-LOD hints, the previous LOD told us they
+                    // should all use this source (likely symmetric copies of the
+                    // same feature). Allow shared source — interp per-shell from
+                    // the same source produces valid UV2 for each copy.
+                    int hintMatchedCount = 0;
+                    foreach (var c in claimants)
+                        if (tgtHintMatched[c.tsi]) hintMatchedCount++;
+
+                    if (hintMatchedCount >= 2 && hintMatchedCount == claimants.Count)
+                    {
+                        UvtLog.Info($"[GroupedTransfer] Dedup: src{srcKey} shared by " +
+                            $"{claimants.Count} cross-LOD hint-matched targets — allowed");
+                        continue;
+                    }
+
                     // Truly overlapping UV0 (tiling/symmetric) — evict as before.
                     // Non-merged shells get priority (they need the specific UV0→UV2
                     // mapping); merged shells use 3D voting and work with any source.
+                    // Hint-matched shells get even higher priority — the previous
+                    // LOD confirmed this source is correct for their UV0+3D region.
                     claimants.Sort((a, b) =>
                     {
+                        bool aH = tgtHintMatched[a.tsi];
+                        bool bH = tgtHintMatched[b.tsi];
+                        if (aH != bH) return aH ? -1 : 1; // hint-matched first
                         bool aM = tgtIsMerged[a.tsi];
                         bool bM = tgtIsMerged[b.tsi];
                         if (aM != bM) return aM ? 1 : -1; // non-merged first
@@ -3052,6 +3193,46 @@ namespace LightmapUvTool
                 }
             }
             result.overlapHints = hints;
+
+            // Populate cross-LOD match hints for ALL successfully matched targets.
+            // Records (3D centroid, UV0 centroid, source shell) so heavily-simplified
+            // target shells on the next LOD can inherit the correct source even when
+            // their own 3D matching becomes ambiguous (e.g. 2-face nail remnants
+            // whose 3D centroid collapses onto an unrelated panel).
+            var matchHints = new List<CrossLodMatchHint>();
+            for (int tsi = 0; tsi < tgtShells.Count; tsi++)
+            {
+                int src = result.targetShellToSourceShell[tsi];
+                if (src < 0) continue;
+                var status = result.targetShellStatus[tsi];
+                if (status == ShellStatus.Rejected || status == ShellStatus.Unmatched) continue;
+
+                // Compute UV0 centroid for the hint
+                var tShell = tgtShells[tsi];
+                Vector2 uv0C = Vector2.zero;
+                int uvN = 0;
+                foreach (int f in tShell.faceIndices)
+                {
+                    if (f * 3 + 2 >= tgtTris.Length) continue;
+                    int i0 = tgtTris[f * 3], i1 = tgtTris[f * 3 + 1], i2 = tgtTris[f * 3 + 2];
+                    if (i0 < tUv0.Length && i1 < tUv0.Length && i2 < tUv0.Length)
+                    {
+                        uv0C += (tUv0[i0] + tUv0[i1] + tUv0[i2]) / 3f;
+                        uvN++;
+                    }
+                }
+                if (uvN > 0) uv0C /= uvN;
+
+                matchHints.Add(new CrossLodMatchHint
+                {
+                    centroid3D = result.targetShellCentroids[tsi],
+                    uv0Centroid = uv0C,
+                    sourceShellIndex = src,
+                    faceCount = tShell.faceIndices.Count,
+                    quality = status
+                });
+            }
+            result.matchHints = matchHints;
 
             return result;
         }
