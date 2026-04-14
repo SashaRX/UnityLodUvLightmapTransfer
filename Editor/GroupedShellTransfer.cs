@@ -3077,9 +3077,32 @@ namespace LightmapUvTool
                 }
             }
 
+            // Compute global UV2 edge-length floor to stabilize disp/scale ratios
+            // on simplified LODs where avgNeighborEdge can shrink dramatically.
+            // Without a floor, even tiny absolute displacements produce large ratios
+            // (e.g. 27+ on LOD2), triggering false-positive "fixes" that damage UV2.
+            float globalEdgeSum = 0f;
+            int globalEdgeCount = 0;
+            for (int f = 0; f < faceCount; f++)
+            {
+                for (int j = 0; j < 3; j++)
+                {
+                    int va = triangles[f * 3 + j];
+                    int vb = triangles[f * 3 + (j + 1) % 3];
+                    if (va < uv2.Length && vb < uv2.Length)
+                    {
+                        globalEdgeSum += (uv2[va] - uv2[vb]).magnitude;
+                        globalEdgeCount++;
+                    }
+                }
+            }
+            float globalAvgEdge = globalEdgeCount > 0 ? globalEdgeSum / globalEdgeCount : 0f;
+            float edgeFloor = globalAvgEdge * 0.1f; // 10% of global mean edge
+
             // Iterative Laplacian displacement detection (max 3 passes)
             int totalFixed = 0;
             const float displacementThreshold = 2.0f;
+            const float minAbsoluteDisplacement = 0.002f; // skip sub-pixel nudges
 
             for (int iteration = 0; iteration < 3; iteration++)
             {
@@ -3125,8 +3148,11 @@ namespace LightmapUvTool
                         }
                     }
                     if (neighborEdgeCount == 0) continue;
-                    float avgNeighborEdge = neighborEdgeSum / neighborEdgeCount;
+                    float avgNeighborEdge = Mathf.Max(neighborEdgeSum / neighborEdgeCount, edgeFloor);
                     if (avgNeighborEdge < 1e-8f) continue;
+
+                    // Skip sub-pixel absolute displacements regardless of ratio
+                    if (displacement < minAbsoluteDisplacement) continue;
 
                     float ratio = displacement / avgNeighborEdge;
                     if (ratio > displacementThreshold)
@@ -3168,8 +3194,11 @@ namespace LightmapUvTool
                         }
                     }
                     if (neighborEdgeCount == 0) continue;
-                    float avgNeighborEdge = neighborEdgeSum / neighborEdgeCount;
+                    float avgNeighborEdge = Mathf.Max(neighborEdgeSum / neighborEdgeCount, edgeFloor);
                     if (avgNeighborEdge < 1e-8f) continue;
+
+                    // Skip sub-pixel absolute displacements regardless of ratio
+                    if (displacement < minAbsoluteDisplacement) continue;
 
                     if (displacement / avgNeighborEdge <= displacementThreshold) continue;
 
