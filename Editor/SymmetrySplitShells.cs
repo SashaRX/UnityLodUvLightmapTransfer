@@ -205,7 +205,10 @@ namespace LightmapUvTool
             // Only on source LOD — target LODs use bilateral only to maintain
             // UV2 continuity with source.
             var nFoldSplits = new List<(int shellIndex, int nFold, int rotAxis, Vector3 center)>();
-            if (!allowNFold) goto skipNFold;
+            // N-fold split disabled: creates too many shells on source LOD,
+            // breaking UV2 continuity with target LODs. Needs cross-LOD
+            // coordination before re-enabling.
+            goto skipNFold;
             for (int si = 0; si < shells.Count; si++)
             {
                 // Skip if already bilateral-split
