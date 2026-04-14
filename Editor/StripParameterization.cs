@@ -294,7 +294,25 @@ namespace LightmapUvTool
 
             if (srcParamTriangles.Count == 0)
             {
-                UvtLog.Warn("[StripParameterization] TransferNormalFiltered: all param-triangles degenerate, transfer skipped.");
+                // Fallback: all param-triangles are degenerate (e.g. perfectly flat strip).
+                // Use nearest-vertex UV2 instead of parametric interpolation.
+                UvtLog.Warn("[StripParameterization] TransferNormalFiltered: all param-triangles degenerate, " +
+                    $"using nearest-vertex fallback ({srcParamVertices.Count} src verts)");
+
+                foreach (int vi in targetShell.vertexIndices)
+                {
+                    if (vi >= tgtVertices.Length) continue;
+                    Vector3 tPos = tgtVertices[vi];
+                    float bestDSq = float.MaxValue;
+                    Vector2 bestUv2 = Vector2.zero;
+                    foreach (var sv in srcParamVertices.Values)
+                    {
+                        float dSq = (tPos - sv.pos).sqrMagnitude;
+                        if (dSq < bestDSq) { bestDSq = dSq; bestUv2 = sv.uv2; }
+                    }
+                    if (bestDSq < float.MaxValue)
+                        result[vi] = bestUv2;
+                }
                 return result;
             }
 

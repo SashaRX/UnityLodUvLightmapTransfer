@@ -2757,12 +2757,17 @@ namespace LightmapUvTool
                                                 float uvScale = dgLong / width3D;
                                                 float targetShort = height3D * uvScale;
 
-                                                // Clamp to source UV2 shortest edge
+                                                // Clamp to source UV2 shortest edge, but ensure
+                                                // minimum expansion for visible lightmap coverage
                                                 Vector2 sMin2 = srcUv2Min[chosenSrc];
                                                 Vector2 sMax2 = srcUv2Max[chosenSrc];
                                                 float srcShort = Mathf.Min(
                                                     sMax2.x - sMin2.x, sMax2.y - sMin2.y);
-                                                targetShort = Mathf.Min(targetShort, srcShort);
+                                                float srcLong = Mathf.Max(
+                                                    sMax2.x - sMin2.x, sMax2.y - sMin2.y);
+                                                float minExpand = Mathf.Max(srcLong * 0.02f, 1e-4f);
+                                                targetShort = Mathf.Clamp(targetShort,
+                                                    minExpand, Mathf.Max(srcShort, minExpand));
 
                                                 float uvCenter = xIsLong
                                                     ? (dgMin.y + dgMax.y) * 0.5f
