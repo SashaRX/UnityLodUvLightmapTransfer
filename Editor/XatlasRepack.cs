@@ -394,7 +394,8 @@ namespace LightmapUvTool
             if (overlapping.Count == 0) return 0;
 
             // Build occupancy grid from non-overlapping shells
-            const int kGridRes = 128;
+            // Use 256 for dense atlases (many overlapping shells)
+            int kGridRes = overlapping.Count > 20 ? 256 : 128;
             bool[,] grid = new bool[kGridRes, kGridRes];
 
             for (int i = 0; i < n; i++)
@@ -467,16 +468,53 @@ namespace LightmapUvTool
 
                 if (!placed)
                 {
-                    UvtLog.Verbose($"[xatlas] Free-space fallback: shell {si} — no free space, " +
-                        $"using axis shift");
-                    // Mark this shell's current position as occupied anyway
+                    // Fallback: shift shell away from its closest overlapper using axis-shift
+                    float bestShift = float.MaxValue;
+                    float bestOffX = 0f, bestOffY = 0f;
+                    for (int oi = 0; oi < n; oi++)
+                    {
+                        if (oi == si) continue;
+                        float oMinX2 = Mathf.Max(mn[si].x, mn[oi].x);
+                        float oMinY2 = Mathf.Max(mn[si].y, mn[oi].y);
+                        float oMaxX2 = Mathf.Min(mx[si].x, mx[oi].x);
+                        float oMaxY2 = Mathf.Min(mx[si].y, mx[oi].y);
+                        if (oMaxX2 <= oMinX2 || oMaxY2 <= oMinY2) continue;
+
+                        float shU = (mx[oi].x - mn[si].x) + padU;
+                        float shV = (mx[oi].y - mn[si].y) + padV;
+                        if (shU <= 0f) shU = padU + 0.01f;
+                        if (shV <= 0f) shV = padV + 0.01f;
+
+                        float shift = Mathf.Min(shU, shV);
+                        if (shift < bestShift)
+                        {
+                            bestShift = shift;
+                            bestOffX = shU <= shV ? shU : 0f;
+                            bestOffY = shU <= shV ? 0f : shV;
+                        }
+                    }
+
+                    if (bestShift < float.MaxValue)
+                    {
+                        foreach (int vi in shells[si].vertexIndices)
+                            if ((uint)vi < (uint)uv2.Length)
+                                uv2[vi] = new Vector2(uv2[vi].x + bestOffX, uv2[vi].y + bestOffY);
+                        mn[si] = new Vector2(mn[si].x + bestOffX, mn[si].y + bestOffY);
+                        mx[si] = new Vector2(mx[si].x + bestOffX, mx[si].y + bestOffY);
+                        UvtLog.Verbose($"[xatlas] Free-space fallback: shell {si} " +
+                            $"axis-shifted ({bestOffX:F4},{bestOffY:F4})");
+                        relocated++;
+                    }
+
+                    // Mark occupied
                     int fgMinX = Mathf.Clamp(Mathf.FloorToInt(mn[si].x * kGridRes), 0, kGridRes - 1);
                     int fgMinY = Mathf.Clamp(Mathf.FloorToInt(mn[si].y * kGridRes), 0, kGridRes - 1);
                     int fgMaxX = Mathf.Clamp(Mathf.CeilToInt(mx[si].x * kGridRes), 0, kGridRes - 1);
                     int fgMaxY = Mathf.Clamp(Mathf.CeilToInt(mx[si].y * kGridRes), 0, kGridRes - 1);
                     for (int fy = fgMinY; fy <= fgMaxY; fy++)
                         for (int fx = fgMinX; fx <= fgMaxX; fx++)
-                            grid[fx, fy] = true;
+                            if (fx >= 0 && fx < kGridRes && fy >= 0 && fy < kGridRes)
+                                grid[fx, fy] = true;
                 }
             }
 
