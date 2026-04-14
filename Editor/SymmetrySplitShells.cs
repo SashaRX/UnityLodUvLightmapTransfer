@@ -199,7 +199,51 @@ namespace LightmapUvTool
                     $"threshold={threshold:F4})");
             }
 
-            if (splits.Count == 0) return 0;
+            // ══════════════ Phase 1b: N-fold rotational split ══════════════
+            // For shells not caught by bilateral detection, check for N-fold
+            // rotational symmetry and split into N angular sectors.
+            var nFoldSplits = new List<(int shellIndex, int nFold, int rotAxis, Vector3 center)>();
+            for (int si = 0; si < shells.Count; si++)
+            {
+                // Skip if already bilateral-split
+                bool alreadySplit = false;
+                foreach (var sp in splits)
+                    if (sp.shellIndex == si) { alreadySplit = true; break; }
+                if (alreadySplit) continue;
+
+                var shell = shells[si];
+                if (shell.faceIndices.Count < MIN_FACES) continue;
+
+                int nFold = DetectRotationalSymmetry(shell, verts, uv0, tris);
+                if (nFold < 3) continue;
+
+                // Compute rotation axis and center
+                Vector3 center = Vector3.zero;
+                foreach (int f in shell.faceIndices)
+                {
+                    int v0 = tris[f * 3], v1 = tris[f * 3 + 1], v2 = tris[f * 3 + 2];
+                    center += (verts[v0] + verts[v1] + verts[v2]) / 3f;
+                }
+                center /= shell.faceIndices.Count;
+
+                float cxx = 0, cyy = 0, czz = 0;
+                foreach (int f in shell.faceIndices)
+                {
+                    int v0 = tris[f * 3], v1 = tris[f * 3 + 1], v2 = tris[f * 3 + 2];
+                    Vector3 fc = (verts[v0] + verts[v1] + verts[v2]) / 3f - center;
+                    cxx += fc.x * fc.x; cyy += fc.y * fc.y; czz += fc.z * fc.z;
+                }
+                int rotAxis;
+                if (cxx <= cyy && cxx <= czz) rotAxis = 0;
+                else if (cyy <= czz) rotAxis = 1;
+                else rotAxis = 2;
+
+                nFoldSplits.Add((si, nFold, rotAxis, center));
+                UvtLog.Info($"[SymSplit] Shell {si}: {nFold}-fold rotational on {AxisName(rotAxis)}, " +
+                    $"{shell.faceIndices.Count} faces — will split into {nFold} sectors");
+            }
+
+            if (splits.Count == 0 && nFoldSplits.Count == 0) return 0;
 
             // ══════════════ Phase 2: Split classification ══════════════
 
@@ -549,10 +593,228 @@ namespace LightmapUvTool
                 shells.Add(newShell);
             }
 
-            UvtLog.Info($"[SymSplit] Split {splitData.Count} shell(s), " +
+            int bilateralCount = splitData.Count;
+            UvtLog.Info($"[SymSplit] Split {bilateralCount} shell(s), " +
                 $"added {totalNewVerts} boundary verts ({origVertCount} → {newVertCount})");
 
-            return splitData.Count;
+            // ══════════════ Phase 4: N-fold rotational splits ══════════════
+            int nFoldCount = 0;
+            if (nFoldSplits.Count > 0)
+            {
+                // Re-read mesh data (may have changed from bilateral splits)
+                verts = mesh.vertices;
+                uv0 = mesh.uv;
+                tris = mesh.triangles;
+                origVertCount = verts.Length;
+                newVertOffset = 0;
+
+                foreach (var (shellIdx, nFold, rotAxisIdx, center) in nFoldSplits)
+                {
+                    if (shellIdx >= shells.Count) continue;
+                    var shell = shells[shellIdx];
+                    var faces = shell.faceIndices;
+
+                    // Compute angular position for each face
+                    int projA = (rotAxisIdx + 1) % 3;
+                    int projB = (rotAxisIdx + 2) % 3;
+
+                    var faceAngles = new float[faces.Count];
+                    for (int i = 0; i < faces.Count; i++)
+                    {
+                        int f = faces[i];
+                        int v0 = tris[f * 3], v1 = tris[f * 3 + 1], v2 = tris[f * 3 + 2];
+                        Vector3 fc = (verts[v0] + verts[v1] + verts[v2]) / 3f - center;
+                        faceAngles[i] = Mathf.Atan2(fc[projB], fc[projA]);
+                    }
+
+                    // Assign faces to N sectors
+                    float sectorSize = 2f * Mathf.PI / nFold;
+                    var sectors = new List<int>[nFold];
+                    for (int s = 0; s < nFold; s++) sectors[s] = new List<int>();
+
+                    for (int i = 0; i < faces.Count; i++)
+                    {
+                        float angle = faceAngles[i] + Mathf.PI; // shift to [0, 2π]
+                        int sector = Mathf.Clamp(Mathf.FloorToInt(angle / sectorSize), 0, nFold - 1);
+                        sectors[sector].Add(faces[i]);
+                    }
+
+                    // Skip if any sector is empty
+                    bool anyEmpty = false;
+                    foreach (var sec in sectors) if (sec.Count == 0) anyEmpty = true;
+                    if (anyEmpty)
+                    {
+                        UvtLog.Warn($"[SymSplit] Shell {shellIdx}: N-fold skip (empty sector)");
+                        continue;
+                    }
+
+                    // Find boundary vertices between adjacent sectors
+                    var sectorVerts = new HashSet<int>[nFold];
+                    for (int s = 0; s < nFold; s++)
+                    {
+                        sectorVerts[s] = new HashSet<int>();
+                        foreach (int f in sectors[s])
+                            for (int j = 0; j < 3; j++)
+                                sectorVerts[s].Add(tris[f * 3 + j]);
+                    }
+
+                    // Count total boundary verts needed
+                    // Each sector >0 gets its own copy of boundary verts shared with other sectors
+                    var sectorBoundaryRemap = new Dictionary<int, int>[nFold];
+                    int totalBoundary = 0;
+                    for (int s = 1; s < nFold; s++)
+                    {
+                        sectorBoundaryRemap[s] = new Dictionary<int, int>();
+                        foreach (int vi in sectorVerts[s])
+                        {
+                            // Check if this vert is shared with any other sector
+                            for (int t = 0; t < s; t++)
+                            {
+                                if (sectorVerts[t].Contains(vi) && !sectorBoundaryRemap[s].ContainsKey(vi))
+                                {
+                                    sectorBoundaryRemap[s][vi] = origVertCount + newVertOffset;
+                                    newVertOffset++;
+                                    totalBoundary++;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (totalBoundary == 0)
+                    {
+                        UvtLog.Verbose($"[SymSplit] Shell {shellIdx}: N-fold no boundary (already separate)");
+                        continue;
+                    }
+
+                    // Expand mesh arrays
+                    newVertCount = origVertCount + newVertOffset;
+                    var newVerts = new Vector3[newVertCount];
+                    System.Array.Copy(verts, newVerts, origVertCount);
+                    var newUv0 = new Vector2[newVertCount];
+                    System.Array.Copy(uv0, newUv0, origVertCount);
+
+                    var normals = mesh.normals;
+                    Vector3[] newNormals = null;
+                    if (normals != null && normals.Length == origVertCount)
+                    {
+                        newNormals = new Vector3[newVertCount];
+                        System.Array.Copy(normals, newNormals, origVertCount);
+                    }
+
+                    var tangents = mesh.tangents;
+                    Vector4[] newTangents = null;
+                    if (tangents != null && tangents.Length == origVertCount)
+                    {
+                        newTangents = new Vector4[newVertCount];
+                        System.Array.Copy(tangents, newTangents, origVertCount);
+                    }
+
+                    // Copy UV channels
+                    var uvChannels = new List<Vector2>[8];
+                    for (int ch = 0; ch < 8; ch++)
+                    {
+                        var chData = new List<Vector2>();
+                        mesh.GetUVs(ch, chData);
+                        if (chData.Count == origVertCount)
+                        {
+                            while (chData.Count < newVertCount) chData.Add(Vector2.zero);
+                            uvChannels[ch] = chData;
+                        }
+                    }
+
+                    // Duplicate boundary vertices
+                    for (int s = 1; s < nFold; s++)
+                    {
+                        if (sectorBoundaryRemap[s] == null) continue;
+                        foreach (var kv in sectorBoundaryRemap[s])
+                        {
+                            int src = kv.Key, dst = kv.Value;
+                            if (dst < newVertCount)
+                            {
+                                newVerts[dst] = verts[src];
+                                newUv0[dst] = uv0[src];
+                                if (newNormals != null && src < normals.Length) newNormals[dst] = normals[src];
+                                if (newTangents != null && src < tangents.Length) newTangents[dst] = tangents[src];
+                                for (int ch = 0; ch < 8; ch++)
+                                    if (uvChannels[ch] != null && src < uvChannels[ch].Count)
+                                        uvChannels[ch][dst] = uvChannels[ch][src];
+                            }
+                        }
+                    }
+
+                    // Remap triangle indices for sectors 1..N-1
+                    var newTris = (int[])tris.Clone();
+                    for (int s = 1; s < nFold; s++)
+                    {
+                        if (sectorBoundaryRemap[s] == null) continue;
+                        foreach (int f in sectors[s])
+                        {
+                            for (int j = 0; j < 3; j++)
+                            {
+                                int vi = newTris[f * 3 + j];
+                                if (sectorBoundaryRemap[s].TryGetValue(vi, out int newVi))
+                                    newTris[f * 3 + j] = newVi;
+                            }
+                        }
+                    }
+
+                    // Apply to mesh
+                    mesh.SetVertices(newVerts);
+                    mesh.SetNormals(newNormals);
+                    if (newTangents != null) mesh.SetTangents(newTangents);
+                    for (int ch = 0; ch < 8; ch++)
+                        if (uvChannels[ch] != null)
+                            mesh.SetUVs(ch, uvChannels[ch]);
+                    mesh.SetTriangles(newTris, 0);
+                    mesh.RecalculateBounds();
+
+                    // Update shell list: original shell keeps sector 0, add new shells for 1..N-1
+                    shell.faceIndices = sectors[0];
+                    shell.vertexIndices = new HashSet<int>();
+                    foreach (int f in sectors[0])
+                        for (int j = 0; j < 3; j++)
+                            shell.vertexIndices.Add(newTris[f * 3 + j]);
+                    // Recompute bounds for sector 0
+                    Vector2 mn0 = new Vector2(float.MaxValue, float.MaxValue);
+                    Vector2 mx0 = new Vector2(float.MinValue, float.MinValue);
+                    foreach (int f in sectors[0])
+                        for (int j = 0; j < 3; j++)
+                        {
+                            int vi = newTris[f * 3 + j];
+                            if (vi < newUv0.Length) { mn0 = Vector2.Min(mn0, newUv0[vi]); mx0 = Vector2.Max(mx0, newUv0[vi]); }
+                        }
+                    shell.boundsMin = mn0; shell.boundsMax = mx0;
+                    shell.bboxArea = Mathf.Max(0f, (mx0.x - mn0.x) * (mx0.y - mn0.y));
+
+                    for (int s = 1; s < nFold; s++)
+                    {
+                        var ns = new UvShell { faceIndices = sectors[s], vertexIndices = new HashSet<int>() };
+                        foreach (int f in sectors[s])
+                            for (int j = 0; j < 3; j++)
+                                ns.vertexIndices.Add(newTris[f * 3 + j]);
+                        Vector2 mn = new Vector2(float.MaxValue, float.MaxValue);
+                        Vector2 mx = new Vector2(float.MinValue, float.MinValue);
+                        foreach (int vi in ns.vertexIndices)
+                            if (vi < newUv0.Length) { mn = Vector2.Min(mn, newUv0[vi]); mx = Vector2.Max(mx, newUv0[vi]); }
+                        ns.boundsMin = mn; ns.boundsMax = mx;
+                        ns.bboxArea = Mathf.Max(0f, (mx.x - mn.x) * (mx.y - mn.y));
+                        shells.Add(ns);
+                    }
+
+                    // Update for next iteration
+                    verts = mesh.vertices;
+                    uv0 = mesh.uv;
+                    tris = mesh.triangles;
+                    origVertCount = verts.Length;
+
+                    nFoldCount++;
+                    UvtLog.Info($"[SymSplit] Shell {shellIdx}: N-fold split into {nFold} sectors, " +
+                        $"{totalBoundary} boundary verts duplicated");
+                }
+            }
+
+            return bilateralCount + nFoldCount;
         }
 
         // ── UV0 overlap detection for V-shaped symmetry ──
