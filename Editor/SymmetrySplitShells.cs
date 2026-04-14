@@ -689,29 +689,29 @@ namespace LightmapUvTool
 
                     // Expand mesh arrays
                     newVertCount = origVertCount + newVertOffset;
-                    var newVerts = new Vector3[newVertCount];
-                    System.Array.Copy(verts, newVerts, origVertCount);
-                    var newUv0 = new Vector2[newVertCount];
-                    System.Array.Copy(uv0, newUv0, origVertCount);
+                    var nfVerts = new Vector3[newVertCount];
+                    System.Array.Copy(verts, nfVerts, origVertCount);
+                    var nfUv0 = new Vector2[newVertCount];
+                    System.Array.Copy(uv0, nfUv0, origVertCount);
 
-                    var normals = mesh.normals;
-                    Vector3[] newNormals = null;
-                    if (normals != null && normals.Length == origVertCount)
+                    var nfSrcNormals = mesh.normals;
+                    Vector3[] nfNormals = null;
+                    if (nfSrcNormals != null && nfSrcNormals.Length == origVertCount)
                     {
-                        newNormals = new Vector3[newVertCount];
-                        System.Array.Copy(normals, newNormals, origVertCount);
+                        nfNormals = new Vector3[newVertCount];
+                        System.Array.Copy(nfSrcNormals, nfNormals, origVertCount);
                     }
 
-                    var tangents = mesh.tangents;
-                    Vector4[] newTangents = null;
-                    if (tangents != null && tangents.Length == origVertCount)
+                    var nfSrcTangents = mesh.tangents;
+                    Vector4[] nfTangents = null;
+                    if (nfSrcTangents != null && nfSrcTangents.Length == origVertCount)
                     {
-                        newTangents = new Vector4[newVertCount];
-                        System.Array.Copy(tangents, newTangents, origVertCount);
+                        nfTangents = new Vector4[newVertCount];
+                        System.Array.Copy(nfSrcTangents, nfTangents, origVertCount);
                     }
 
                     // Copy UV channels
-                    var uvChannels = new List<Vector2>[8];
+                    var nfUvChannels = new List<Vector2>[8];
                     for (int ch = 0; ch < 8; ch++)
                     {
                         var chData = new List<Vector2>();
@@ -719,7 +719,7 @@ namespace LightmapUvTool
                         if (chData.Count == origVertCount)
                         {
                             while (chData.Count < newVertCount) chData.Add(Vector2.zero);
-                            uvChannels[ch] = chData;
+                            nfUvChannels[ch] = chData;
                         }
                     }
 
@@ -732,19 +732,19 @@ namespace LightmapUvTool
                             int src = kv.Key, dst = kv.Value;
                             if (dst < newVertCount)
                             {
-                                newVerts[dst] = verts[src];
-                                newUv0[dst] = uv0[src];
-                                if (newNormals != null && src < normals.Length) newNormals[dst] = normals[src];
-                                if (newTangents != null && src < tangents.Length) newTangents[dst] = tangents[src];
+                                nfVerts[dst] = verts[src];
+                                nfUv0[dst] = uv0[src];
+                                if (nfNormals != null && src < nfSrcNormals.Length) nfNormals[dst] = nfSrcNormals[src];
+                                if (nfTangents != null && src < nfSrcTangents.Length) nfTangents[dst] = nfSrcTangents[src];
                                 for (int ch = 0; ch < 8; ch++)
-                                    if (uvChannels[ch] != null && src < uvChannels[ch].Count)
-                                        uvChannels[ch][dst] = uvChannels[ch][src];
+                                    if (nfUvChannels[ch] != null && src < nfUvChannels[ch].Count)
+                                        nfUvChannels[ch][dst] = nfUvChannels[ch][src];
                             }
                         }
                     }
 
                     // Remap triangle indices for sectors 1..N-1
-                    var newTris = (int[])tris.Clone();
+                    var nfTris = (int[])tris.Clone();
                     for (int s = 1; s < nFold; s++)
                     {
                         if (sectorBoundaryRemap[s] == null) continue;
@@ -752,21 +752,21 @@ namespace LightmapUvTool
                         {
                             for (int j = 0; j < 3; j++)
                             {
-                                int vi = newTris[f * 3 + j];
+                                int vi = nfTris[f * 3 + j];
                                 if (sectorBoundaryRemap[s].TryGetValue(vi, out int newVi))
-                                    newTris[f * 3 + j] = newVi;
+                                    nfTris[f * 3 + j] = newVi;
                             }
                         }
                     }
 
                     // Apply to mesh
-                    mesh.SetVertices(newVerts);
-                    mesh.SetNormals(newNormals);
-                    if (newTangents != null) mesh.SetTangents(newTangents);
+                    mesh.SetVertices(nfVerts);
+                    mesh.SetNormals(nfNormals);
+                    if (nfTangents != null) mesh.SetTangents(nfTangents);
                     for (int ch = 0; ch < 8; ch++)
-                        if (uvChannels[ch] != null)
-                            mesh.SetUVs(ch, uvChannels[ch]);
-                    mesh.SetTriangles(newTris, 0);
+                        if (nfUvChannels[ch] != null)
+                            mesh.SetUVs(ch, nfUvChannels[ch]);
+                    mesh.SetTriangles(nfTris, 0);
                     mesh.RecalculateBounds();
 
                     // Update shell list: original shell keeps sector 0, add new shells for 1..N-1
@@ -774,15 +774,15 @@ namespace LightmapUvTool
                     shell.vertexIndices = new HashSet<int>();
                     foreach (int f in sectors[0])
                         for (int j = 0; j < 3; j++)
-                            shell.vertexIndices.Add(newTris[f * 3 + j]);
+                            shell.vertexIndices.Add(nfTris[f * 3 + j]);
                     // Recompute bounds for sector 0
                     Vector2 mn0 = new Vector2(float.MaxValue, float.MaxValue);
                     Vector2 mx0 = new Vector2(float.MinValue, float.MinValue);
                     foreach (int f in sectors[0])
                         for (int j = 0; j < 3; j++)
                         {
-                            int vi = newTris[f * 3 + j];
-                            if (vi < newUv0.Length) { mn0 = Vector2.Min(mn0, newUv0[vi]); mx0 = Vector2.Max(mx0, newUv0[vi]); }
+                            int vi = nfTris[f * 3 + j];
+                            if (vi < nfUv0.Length) { mn0 = Vector2.Min(mn0, nfUv0[vi]); mx0 = Vector2.Max(mx0, nfUv0[vi]); }
                         }
                     shell.boundsMin = mn0; shell.boundsMax = mx0;
                     shell.bboxArea = Mathf.Max(0f, (mx0.x - mn0.x) * (mx0.y - mn0.y));
@@ -792,11 +792,11 @@ namespace LightmapUvTool
                         var ns = new UvShell { faceIndices = sectors[s], vertexIndices = new HashSet<int>() };
                         foreach (int f in sectors[s])
                             for (int j = 0; j < 3; j++)
-                                ns.vertexIndices.Add(newTris[f * 3 + j]);
+                                ns.vertexIndices.Add(nfTris[f * 3 + j]);
                         Vector2 mn = new Vector2(float.MaxValue, float.MaxValue);
                         Vector2 mx = new Vector2(float.MinValue, float.MinValue);
                         foreach (int vi in ns.vertexIndices)
-                            if (vi < newUv0.Length) { mn = Vector2.Min(mn, newUv0[vi]); mx = Vector2.Max(mx, newUv0[vi]); }
+                            if (vi < nfUv0.Length) { mn = Vector2.Min(mn, nfUv0[vi]); mx = Vector2.Max(mx, nfUv0[vi]); }
                         ns.boundsMin = mn; ns.boundsMax = mx;
                         ns.bboxArea = Mathf.Max(0f, (mx.x - mn.x) * (mx.y - mn.y));
                         shells.Add(ns);
