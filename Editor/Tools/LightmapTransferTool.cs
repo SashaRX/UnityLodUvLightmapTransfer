@@ -1252,37 +1252,28 @@ namespace LightmapUvTool
                     }
 
                     // ── Remove stale children from cloned FBX ──
-                    // Keep children whose names match mesh entries OR whose meshes were replaced.
-                    // Old _COL, _Collider, "Lit", duplicate LODs etc. are removed.
+                    // Keep children that have geometry (MeshFilter/SkinnedMeshRenderer) or
+                    // collision nodes. Only remove empty/stale nodes (no mesh, no collision).
                     // Must run BEFORE NormalizeExportHierarchy (which renames LOD0).
-                    var validNames = new HashSet<string>();
-                    foreach (var (entry, resultMesh) in entries)
-                    {
-                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
-                        validNames.Add(meshName);
-                    }
-                    // Also keep children whose meshes were successfully replaced
-                    // (child name may differ from mesh name, e.g. "Body" vs "Body_LOD0")
-                    var replacedMeshes = new HashSet<Mesh>(meshReplacements.Values);
-                    foreach (var mf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
-                    {
-                        if (mf.sharedMesh != null && replacedMeshes.Contains(mf.sharedMesh))
-                            validNames.Add(mf.gameObject.name);
-                    }
-                    foreach (var smr in tempRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true))
-                    {
-                        if (smr.sharedMesh != null && replacedMeshes.Contains(smr.sharedMesh))
-                            validNames.Add(smr.gameObject.name);
-                    }
                     for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
                     {
                         var ch = tempRoot.transform.GetChild(ci);
-                        if (!validNames.Contains(ch.name)
-                            && !MeshHygieneUtility.IsCollisionNodeName(ch.name))
-                        {
-                            UvtLog.Verbose($"[FBX Export] Pruning stale child '{ch.name}'");
-                            UnityEngine.Object.DestroyImmediate(ch.gameObject);
-                        }
+
+                        // Keep collision nodes (handled separately below)
+                        if (MeshHygieneUtility.IsCollisionNodeName(ch.name)) continue;
+
+                        // Keep children with mesh geometry
+                        bool hasMesh = ch.GetComponent<MeshFilter>() != null
+                            || ch.GetComponent<SkinnedMeshRenderer>() != null;
+                        if (hasMesh) continue;
+
+                        // Check grandchildren for mesh (nested hierarchy)
+                        bool hasChildMesh = ch.GetComponentInChildren<MeshFilter>(true) != null
+                            || ch.GetComponentInChildren<SkinnedMeshRenderer>(true) != null;
+                        if (hasChildMesh) continue;
+
+                        UvtLog.Verbose($"[FBX Export] Pruning stale child '{ch.name}' (no mesh)");
+                        UnityEngine.Object.DestroyImmediate(ch.gameObject);
                     }
 
                     // ── Normalize FBX hierarchy ──
