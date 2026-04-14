@@ -479,6 +479,8 @@ namespace LightmapUvTool
                 ColorBtn(new Color(.9f,.3f,.3f), "Reset UV2 (delete sidecar)", 20, ResetUv2FromFbx);
                 EditorGUILayout.Space(2);
                 ColorBtn(new Color(.5f,.15f,.15f), "Reset Pipeline State", 20, ResetPipelineState);
+                EditorGUILayout.Space(2);
+                ColorBtn(new Color(.6f,.5f,.8f), "Restore FBX from git main", 20, RestoreFbxFromGitMain);
 
                 EditorGUILayout.Space(4);
                 H("FBX Export");
@@ -1841,6 +1843,83 @@ namespace LightmapUvTool
             ctx.Refresh(ctx.LodGroup);
             OnRefresh();
             requestRepaint?.Invoke();
+        }
+
+        void RestoreFbxFromGitMain()
+        {
+            if (ctx.LodGroup == null) return;
+
+            var fbxPaths = new HashSet<string>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                Mesh m = e.fbxMesh ?? e.originalMesh;
+                if (m == null) continue;
+                string p = AssetDatabase.GetAssetPath(m);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase))
+                    fbxPaths.Add(p);
+            }
+
+            if (fbxPaths.Count == 0)
+            {
+                UvtLog.Warn("[Restore] No FBX paths found in mesh entries");
+                return;
+            }
+
+            string fileList = string.Join("\n", fbxPaths);
+            if (!EditorUtility.DisplayDialog("Restore FBX from git main",
+                $"Restore original FBX from git main branch?\n\n{fileList}\n\nThis will discard any baked UV2 in the FBX file.",
+                "Restore", "Cancel"))
+                return;
+
+            // Find git repo root from project path
+            string projectPath = System.IO.Directory.GetParent(Application.dataPath).FullName;
+            bool anyRestored = false;
+
+            foreach (string fbx in fbxPaths)
+            {
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "git",
+                        Arguments = $"checkout main -- \"{fbx}\"",
+                        WorkingDirectory = projectPath,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    };
+                    var proc = System.Diagnostics.Process.Start(psi);
+                    proc.WaitForExit(10000);
+                    string stderr = proc.StandardError.ReadToEnd().Trim();
+
+                    if (proc.ExitCode == 0)
+                    {
+                        UvtLog.Info($"[Restore] git checkout main -- {fbx} OK");
+                        anyRestored = true;
+                    }
+                    else
+                    {
+                        UvtLog.Error($"[Restore] git checkout main -- {fbx} failed: {stderr}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    UvtLog.Error($"[Restore] Failed to run git: {ex.Message}");
+                }
+            }
+
+            if (anyRestored)
+            {
+                AssetDatabase.Refresh();
+                foreach (string fbx in fbxPaths)
+                    AssetDatabase.ImportAsset(fbx, ImportAssetOptions.ForceUpdate);
+                AssetDatabase.Refresh();
+                ctx.Refresh(ctx.LodGroup);
+                OnRefresh();
+                requestRepaint?.Invoke();
+                UvtLog.Info("[Restore] FBX restored from git main, reimported");
+            }
         }
 
         void SwitchToPostApplyView()
