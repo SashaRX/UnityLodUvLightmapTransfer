@@ -145,7 +145,14 @@ namespace LightmapUvTool
                 if (axisVotes[1] > axisVotes[bestAxis]) bestAxis = 1;
                 if (axisVotes[2] > axisVotes[bestAxis]) bestAxis = 2;
 
-                float threshold = axisVotes[bestAxis] > 0
+                // Use computed threshold only when there are enough votes to trust it.
+                // With 1-2 votes, a single pair's midpoint drives the threshold,
+                // producing lopsided splits (e.g. A=3, B=1) on simplified LODs
+                // that generate tiny fragments rejected by downstream transfer.
+                // Fall back to origin (0f) for low-confidence cases — matches
+                // the old behavior for models centered at world origin.
+                const int kMinVotesForThreshold = 3;
+                float threshold = axisVotes[bestAxis] >= kMinVotesForThreshold
                     ? axisMidpointSum[bestAxis] / axisVotes[bestAxis]
                     : 0f;
                 splits.Add(new SplitInfo { shellIndex = si, axis = bestAxis, splitThreshold = threshold });
@@ -187,6 +194,16 @@ namespace LightmapUvTool
                 if (groupA.Count == 0 || groupB.Count == 0)
                 {
                     UvtLog.Verbose($"[SymSplit] Shell {sp.shellIndex}: skip (all faces on one side)");
+                    continue;
+                }
+
+                // Skip lopsided splits that produce tiny fragments.
+                // A 1-face shell after split tends to get REJECTED during transfer
+                // (too few faces for reliable UV2 interpolation), causing regressions
+                // on simplified LODs. Require at least 2 faces per group.
+                if (groupA.Count < 2 || groupB.Count < 2)
+                {
+                    UvtLog.Verbose($"[SymSplit] Shell {sp.shellIndex}: skip (lopsided split: A={groupA.Count} B={groupB.Count})");
                     continue;
                 }
 
