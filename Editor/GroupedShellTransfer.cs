@@ -123,13 +123,17 @@ namespace LightmapUvTool
 
         /// <summary>
         /// Records a target shell → source shell match for cross-LOD propagation.
-        /// Includes both 3D and UV0 centroids so later LODs can find the
-        /// corresponding match by combined geometric + UV similarity.
+        /// Stores both centroid and UV0 bbox: heavily-simplified targets on later
+        /// LODs may retain only a fragment of the original UV0 area (e.g. corner
+        /// of a nail pattern), so bbox-overlap matching is more reliable than
+        /// centroid distance.
         /// </summary>
         public struct CrossLodMatchHint
         {
             public Vector3 centroid3D;
             public Vector2 uv0Centroid;
+            public Vector2 uv0BoundsMin;
+            public Vector2 uv0BoundsMax;
             public int sourceShellIndex;
             public int faceCount;
             public ShellStatus quality;
@@ -302,11 +306,21 @@ namespace LightmapUvTool
 
         /// <summary>
         /// Find the best source shell using cross-LOD match hints from a
-        /// previous (more detailed) LOD. Matches on combined 3D + UV0 centroid
-        /// proximity. Returns -1 if no confident hint match exists.
+        /// previous (more detailed) LOD.
+        ///
+        /// Primary match: UV0 bbox containment/overlap. A target shell whose
+        /// UV0 bbox is inside (or substantially overlaps) a hint's UV0 bbox
+        /// represents the same logical feature as the hint's target. Works
+        /// even when heavy decimation leaves only a fragment of the original
+        /// UV0 area (e.g. corner cap of a nail pattern).
+        ///
+        /// Tie-break: among UV0-compatible hints, pick the one with closest
+        /// 3D centroid — this identifies the specific instance (e.g. which
+        /// corner of the box this particular corner-cap belongs to).
         /// </summary>
         static int FindCrossLodHintSource(
             Vector3 targetCentroid, Vector2 targetUv0Centroid,
+            Vector2 targetUv0Min, Vector2 targetUv0Max,
             List<CrossLodMatchHint> hints, int srcShellCount,
             float meshDiagonal,
             out float bestDistSq, out float bestAvg3D)
@@ -314,16 +328,13 @@ namespace LightmapUvTool
             bestDistSq = float.MaxValue;
             bestAvg3D = float.MaxValue;
 
-            // Tolerances: proximity must be very close in BOTH 3D and UV0
-            // to confidently reuse the previous LOD's source. UV0 tolerance
-            // is strict — distinct UV islands (e.g. nail vs panel) differ by
-            // more than 0.01 UV units, while a target's centroid vs the
-            // previous LOD's centroid for the same feature differ by much less.
-            float uv0Tol = 0.01f;
-            float dist3DTol = Mathf.Max(meshDiagonal * 0.02f, 0.01f);
+            // 3D tolerance must be generous: LOD decimation can shift the
+            // centroid of a shell by up to half its diameter. Use 20% of
+            // mesh diagonal as cap to still prevent matches across the mesh.
+            float dist3DTol = Mathf.Max(meshDiagonal * 0.20f, 0.05f);
 
             int bestHint = -1;
-            float bestCombinedScore = float.MaxValue;
+            float bestScore = float.MaxValue;
 
             for (int i = 0; i < hints.Count; i++)
             {
@@ -331,17 +342,34 @@ namespace LightmapUvTool
                 if (h.sourceShellIndex < 0 || h.sourceShellIndex >= srcShellCount) continue;
                 if (h.quality == ShellStatus.Rejected || h.quality == ShellStatus.Unmatched) continue;
 
-                float uv0Dist = (h.uv0Centroid - targetUv0Centroid).magnitude;
-                if (uv0Dist > uv0Tol) continue;
+                // UV0 compatibility: target bbox must overlap hint bbox, and
+                // the target's UV0 centroid must be inside the hint bbox (with
+                // a small epsilon margin). This identifies "same UV feature".
+                float eps = 0.001f;
+                bool centroidInsideHint =
+                    targetUv0Centroid.x >= h.uv0BoundsMin.x - eps &&
+                    targetUv0Centroid.x <= h.uv0BoundsMax.x + eps &&
+                    targetUv0Centroid.y >= h.uv0BoundsMin.y - eps &&
+                    targetUv0Centroid.y <= h.uv0BoundsMax.y + eps;
+
+                bool bboxesOverlap =
+                    targetUv0Min.x < h.uv0BoundsMax.x + eps &&
+                    targetUv0Max.x > h.uv0BoundsMin.x - eps &&
+                    targetUv0Min.y < h.uv0BoundsMax.y + eps &&
+                    targetUv0Max.y > h.uv0BoundsMin.y - eps;
+
+                if (!centroidInsideHint && !bboxesOverlap) continue;
 
                 float dist3D = (h.centroid3D - targetCentroid).magnitude;
                 if (dist3D > dist3DTol) continue;
 
-                // Combined score: weight UV0 more heavily (it's the primary identity)
-                float combinedScore = uv0Dist * 100f + dist3D;
-                if (combinedScore < bestCombinedScore)
+                // Score: prefer closest 3D (same physical instance), break ties
+                // by tighter UV0 centroid proximity (same UV region).
+                float uv0Dist = (h.uv0Centroid - targetUv0Centroid).magnitude;
+                float score = dist3D + uv0Dist * 0.1f;
+                if (score < bestScore)
                 {
-                    bestCombinedScore = combinedScore;
+                    bestScore = score;
                     bestHint = i;
                     bestDistSq = dist3D * dist3D;
                     bestAvg3D = dist3D;
@@ -1074,8 +1102,10 @@ namespace LightmapUvTool
                 if (tN > 0) tCentroid /= tN;
                 result.targetShellCentroids[tsi] = tCentroid;
 
-                // Compute target shell UV0 centroid (for cross-LOD hint matching)
+                // Compute target shell UV0 centroid and bbox (for cross-LOD hint matching)
                 Vector2 tUv0Centroid = Vector2.zero;
+                Vector2 tUv0Min = new Vector2(float.MaxValue, float.MaxValue);
+                Vector2 tUv0Max = new Vector2(float.MinValue, float.MinValue);
                 int tUvN = 0;
                 foreach (int f in tShell.faceIndices)
                 {
@@ -1084,6 +1114,12 @@ namespace LightmapUvTool
                     if (i0 < tUv0.Length && i1 < tUv0.Length && i2 < tUv0.Length)
                     {
                         tUv0Centroid += (tUv0[i0] + tUv0[i1] + tUv0[i2]) / 3f;
+                        tUv0Min = Vector2.Min(tUv0Min, tUv0[i0]);
+                        tUv0Min = Vector2.Min(tUv0Min, tUv0[i1]);
+                        tUv0Min = Vector2.Min(tUv0Min, tUv0[i2]);
+                        tUv0Max = Vector2.Max(tUv0Max, tUv0[i0]);
+                        tUv0Max = Vector2.Max(tUv0Max, tUv0[i1]);
+                        tUv0Max = Vector2.Max(tUv0Max, tUv0[i2]);
                         tUvN++;
                     }
                 }
@@ -1116,7 +1152,8 @@ namespace LightmapUvTool
                     if (previousLodMatchHints != null && previousLodMatchHints.Count > 0)
                     {
                         hintedSrc = FindCrossLodHintSource(
-                            tCentroid, tUv0Centroid, previousLodMatchHints,
+                            tCentroid, tUv0Centroid, tUv0Min, tUv0Max,
+                            previousLodMatchHints,
                             srcShells.Count, meshDiagonal, out hintedDistSq, out hintedAvg3D);
                     }
 
@@ -1126,6 +1163,9 @@ namespace LightmapUvTool
                         chosenDistSq = hintedDistSq;
                         chosenAvg3D = hintedAvg3D;
                         tgtHintMatched[tsi] = true;
+                        UvtLog.Verbose($"[GroupedTransfer] t{tsi} hint-matched to src{chosenSrc} " +
+                            $"(uv0=[{tUv0Min.x:F3},{tUv0Min.y:F3}]-[{tUv0Max.x:F3},{tUv0Max.y:F3}], " +
+                            $"dist3D={hintedAvg3D:F4})");
                     }
                     else
                     {
@@ -3207,9 +3247,11 @@ namespace LightmapUvTool
                 var status = result.targetShellStatus[tsi];
                 if (status == ShellStatus.Rejected || status == ShellStatus.Unmatched) continue;
 
-                // Compute UV0 centroid for the hint
+                // Compute UV0 centroid and bbox for the hint
                 var tShell = tgtShells[tsi];
                 Vector2 uv0C = Vector2.zero;
+                Vector2 uv0Min = new Vector2(float.MaxValue, float.MaxValue);
+                Vector2 uv0Max = new Vector2(float.MinValue, float.MinValue);
                 int uvN = 0;
                 foreach (int f in tShell.faceIndices)
                 {
@@ -3218,6 +3260,12 @@ namespace LightmapUvTool
                     if (i0 < tUv0.Length && i1 < tUv0.Length && i2 < tUv0.Length)
                     {
                         uv0C += (tUv0[i0] + tUv0[i1] + tUv0[i2]) / 3f;
+                        uv0Min = Vector2.Min(uv0Min, tUv0[i0]);
+                        uv0Min = Vector2.Min(uv0Min, tUv0[i1]);
+                        uv0Min = Vector2.Min(uv0Min, tUv0[i2]);
+                        uv0Max = Vector2.Max(uv0Max, tUv0[i0]);
+                        uv0Max = Vector2.Max(uv0Max, tUv0[i1]);
+                        uv0Max = Vector2.Max(uv0Max, tUv0[i2]);
                         uvN++;
                     }
                 }
@@ -3227,6 +3275,8 @@ namespace LightmapUvTool
                 {
                     centroid3D = result.targetShellCentroids[tsi],
                     uv0Centroid = uv0C,
+                    uv0BoundsMin = uv0Min,
+                    uv0BoundsMax = uv0Max,
                     sourceShellIndex = src,
                     faceCount = tShell.faceIndices.Count,
                     quality = status
