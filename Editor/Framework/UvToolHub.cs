@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
 using UnityEngine;
 using UnityEditor;
 
@@ -40,6 +41,7 @@ namespace LightmapUvTool
         string selectedFbxPath;
         string selectedResetLabel;
         string pendingToolId;
+        string windowDebugTag;
 
         [MenuItem("Tools/Mesh Lab")]
         static void Open()
@@ -59,10 +61,11 @@ namespace LightmapUvTool
         void OnEnable()
         {
             wantsMouseMove = true;
+            windowDebugTag = BuildWindowDebugTag();
             // Keep the actual dock/window title stable and aligned with the
             // EditorWindow type name. Unity can log "Invalid editor window"
             // on maximize/minimize for custom windows with a different title.
-            titleContent = new GUIContent(WindowTitle, WindowBrand + " v" + Uv2DataAsset.ToolVersionStr);
+            titleContent = new GUIContent(WindowTitle, BuildWindowBrandText());
 
             // Safety: if the window was closed while a preview was active (e.g., checker
             // materials on renderers), the static IsActive flag persists across editor
@@ -362,8 +365,8 @@ namespace LightmapUvTool
 
             GUILayout.FlexibleSpace();
 
-            EditorGUILayout.LabelField(WindowBrand + " v" + Uv2DataAsset.ToolVersionStr,
-                EditorStyles.miniLabel, GUILayout.Width(120));
+            EditorGUILayout.LabelField(BuildWindowBrandText(),
+                EditorStyles.miniLabel, GUILayout.Width(220));
             GUILayout.Space(6);
 
             // ── Log level ──
@@ -372,6 +375,40 @@ namespace LightmapUvTool
             if (lvl != UvtLog.Current) UvtLog.Current = lvl;
 
             EditorGUILayout.EndHorizontal();
+        }
+
+        string BuildWindowBrandText()
+        {
+            string text = WindowBrand + " v" + Uv2DataAsset.ToolVersionStr;
+            if (!string.IsNullOrEmpty(windowDebugTag))
+                text += " [" + windowDebugTag + "]";
+            return text;
+        }
+
+        static string BuildWindowDebugTag()
+        {
+            try
+            {
+                var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(UvToolHub).Assembly);
+                string resolvedPath = package?.resolvedPath;
+                if (string.IsNullOrEmpty(resolvedPath))
+                    return null;
+
+                string leaf = Path.GetFileName(resolvedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                int atIndex = leaf.LastIndexOf('@');
+                if (atIndex >= 0 && atIndex < leaf.Length - 1)
+                {
+                    string revision = leaf.Substring(atIndex + 1);
+                    if (!string.IsNullOrEmpty(revision))
+                        return revision.Length > 8 ? revision.Substring(0, 8) : revision;
+                }
+
+                return package?.version;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // ════════════════════════════════════════════════════════════
@@ -748,11 +785,23 @@ namespace LightmapUvTool
                 NukeAllSidecars();
             GUI.backgroundColor = bgNuke;
 
-            if (ctx.LodGroup == null) return;
+            bool hasMeshEntries = ctx != null && ctx.MeshEntries != null && ctx.MeshEntries.Count > 0;
+            bool hasLodWorkflow = ctx != null && ctx.LodGroup != null;
+            if (!hasMeshEntries) return;
             EditorGUILayout.Space(2);
             var r = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
             EditorGUI.DrawRect(r, new Color(.3f, .3f, .3f));
             EditorGUILayout.Space(2);
+
+            if (GUILayout.Button("Save Mesh Assets", EditorStyles.miniButton))
+            {
+                foreach (var tool in tools)
+                    if (tool is LightmapTransferTool ltt) { ltt.SaveAllPublic(); break; }
+            }
+
+            if (!hasLodWorkflow) return;
+
+            EditorGUILayout.Space(4);
 
             var bg = GUI.backgroundColor;
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
@@ -803,13 +852,6 @@ namespace LightmapUvTool
                     foreach (var tool in tools)
                         if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
                 }
-            }
-
-            EditorGUILayout.Space(1);
-            if (GUILayout.Button("Save Mesh Assets", EditorStyles.miniButton))
-            {
-                foreach (var tool in tools)
-                    if (tool is LightmapTransferTool ltt) { ltt.SaveAllPublic(); break; }
             }
 
             // Backup current FBX from git main branch
