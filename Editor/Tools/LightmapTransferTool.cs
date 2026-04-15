@@ -927,6 +927,33 @@ namespace LightmapUvTool
             return e.originalMesh;
         }
 
+        static string ResolveExportMeshName(MeshEntry entry, Mesh resultMesh)
+        {
+            if (entry?.fbxMesh != null && !string.IsNullOrEmpty(entry.fbxMesh.name))
+                return entry.fbxMesh.name;
+
+            string fallback = entry?.originalMesh != null ? entry.originalMesh.name : null;
+            if (string.IsNullOrEmpty(fallback) && resultMesh != null)
+                fallback = resultMesh.name;
+
+            // Guard against transient preview/internal names leaking into exported FBX nodes.
+            if (!string.IsNullOrEmpty(fallback) &&
+                (fallback.StartsWith("Hidden/", StringComparison.OrdinalIgnoreCase) ||
+                 fallback.StartsWith("Hidden_", StringComparison.OrdinalIgnoreCase)))
+            {
+                if (entry?.renderer != null && !string.IsNullOrEmpty(entry.renderer.name))
+                    return entry.renderer.name;
+            }
+
+            if (!string.IsNullOrEmpty(fallback))
+                return fallback;
+
+            if (entry?.renderer != null && !string.IsNullOrEmpty(entry.renderer.name))
+                return entry.renderer.name;
+
+            return "Mesh";
+        }
+
         /// <summary>
         /// Copy non-trivial UV channels from source mesh to export mesh.
         /// Preserves channels that have meaningful data (not empty, not all 0, not all 1).
@@ -1115,7 +1142,7 @@ namespace LightmapUvTool
                             PreserveUvChannels(exportMesh, entry.fbxMesh);
                         if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
                             PreserveUvChannels(exportMesh, entry.originalMesh);
-                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        string meshName = ResolveExportMeshName(entry, resultMesh);
                         meshReplacements[meshName] = exportMesh;
                         if (entry.renderer != null)
                             meshRendererTemplates[meshName] = entry.renderer;
@@ -1153,7 +1180,7 @@ namespace LightmapUvTool
                     // Add meshes that weren't found in the clone (new LODs from generation)
                     foreach (var (entry, resultMesh) in entries)
                     {
-                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        string meshName = ResolveExportMeshName(entry, resultMesh);
                         if (replaced.Contains(meshName)) continue;
                         // Remove existing child with same name (from previous export)
                         for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
@@ -1196,7 +1223,7 @@ namespace LightmapUvTool
                     var validNames = new HashSet<string>();
                     foreach (var (entry, resultMesh) in entries)
                     {
-                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        string meshName = ResolveExportMeshName(entry, resultMesh);
                         validNames.Add(meshName);
                     }
                     for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
