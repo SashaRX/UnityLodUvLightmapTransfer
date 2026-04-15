@@ -1280,7 +1280,11 @@ namespace LightmapUvTool
 
             // Check if root has MeshFilter (should be empty pivot)
             var rootMf = root.GetComponent<MeshFilter>();
-            if (rootMf != null && rootMf.sharedMesh != null)
+            var rootSmr = root.GetComponent<SkinnedMeshRenderer>();
+            bool rootHasRenderableMesh =
+                (rootMf != null && rootMf.sharedMesh != null) ||
+                (rootSmr != null && rootSmr.sharedMesh != null);
+            if (rootHasRenderableMesh && !IsRootRendererUsedAsLod0(root, lods))
             {
                 sceneIssues.Add(new SceneIssue
                 {
@@ -1411,6 +1415,11 @@ namespace LightmapUvTool
             {
                 if (issue.kind != SceneIssue.Kind.RootHasMesh) continue;
                 if (issue.gameObject == null || ctx.LodGroup == null) continue;
+                if (IsRootRendererUsedAsLod0(issue.gameObject, ctx.LodGroup.GetLODs()))
+                {
+                    UvtLog.Info($"Skipped root mesh move for '{issue.gameObject.name}': root renderer is already used as LOD0.");
+                    continue;
+                }
 
                 MoveRootMeshToChild(issue.gameObject);
                 movedRoots.Add(issue.gameObject);
@@ -3079,6 +3088,24 @@ namespace LightmapUvTool
         // ═══════════════════════════════════════════════════════════════
         // Helpers
         // ═══════════════════════════════════════════════════════════════
+
+        static bool IsRootRendererUsedAsLod0(GameObject root, LOD[] lods)
+        {
+            if (root == null || lods == null || lods.Length == 0) return false;
+
+            var rootRenderer = root.GetComponent<Renderer>();
+            if (rootRenderer == null) return false;
+
+            var lod0Renderers = lods[0].renderers;
+            if (lod0Renderers == null || lod0Renderers.Length == 0) return false;
+
+            for (int i = 0; i < lod0Renderers.Length; i++)
+            {
+                if (lod0Renderers[i] == rootRenderer)
+                    return true;
+            }
+            return false;
+        }
 
         void DrawScanFixButtons(Action scan, Action fix, System.Collections.IList issues)
         {
