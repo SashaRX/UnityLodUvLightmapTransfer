@@ -1027,6 +1027,94 @@ namespace LightmapUvTool
             }
         }
 
+        static bool TryGetAppliedAoUvTarget(out int uvChannel, out int uvComponent)
+        {
+            uvChannel = -1;
+            uvComponent = 0;
+
+            var ch = VertexAOTool.LastAppliedTargetChannel;
+            if (!ch.HasValue) return false;
+
+            int v = (int)ch.Value;
+            if (v < (int)AOTargetChannel.UV0_X) return false; // AO was stored in vertex color
+
+            uvChannel = (v - (int)AOTargetChannel.UV0_X) / 2;
+            uvComponent = (v - (int)AOTargetChannel.UV0_X) % 2; // 0=X, 1=Y
+            // UV1 (Unity UV set index 1) is reserved for lightmap transfer data.
+            // Never merge AO into this channel during FBX export.
+            if (uvChannel == 1) return false;
+            return true;
+        }
+
+        static void MergeUvComponentFromDonor(Mesh exportMesh, Mesh donorMesh, int uvChannel, int uvComponent)
+        {
+            if (exportMesh == null || donorMesh == null) return;
+            if (exportMesh.vertexCount != donorMesh.vertexCount) return;
+            if (uvChannel < 0 || uvChannel > 7) return;
+            if (uvComponent < 0 || uvComponent > 1) return;
+
+            var donorUv = new List<Vector2>();
+            donorMesh.GetUVs(uvChannel, donorUv);
+            if (donorUv.Count != exportMesh.vertexCount) return;
+
+            var exportUv = new List<Vector2>();
+            exportMesh.GetUVs(uvChannel, exportUv);
+            if (exportUv.Count != exportMesh.vertexCount)
+                exportUv = new List<Vector2>(donorUv);
+
+            for (int i = 0; i < exportUv.Count; i++)
+            {
+                var src = donorUv[i];
+                var dst = exportUv[i];
+                exportUv[i] = uvComponent == 0
+                    ? new Vector2(src.x, dst.y)
+                    : new Vector2(dst.x, src.y);
+            }
+
+            exportMesh.SetUVs(uvChannel, exportUv);
+        }
+
+        static bool HasUvChannelData(Mesh mesh, int channel)
+        {
+            if (mesh == null || channel < 0 || channel > 7) return false;
+            var attr = (VertexAttribute)((int)VertexAttribute.TexCoord0 + channel);
+            if (!mesh.HasVertexAttribute(attr)) return false;
+
+            int dim = mesh.GetVertexAttributeDimension(attr);
+            int vCount = mesh.vertexCount;
+            if (dim <= 2)
+            {
+                var uv = new List<Vector2>();
+                mesh.GetUVs(channel, uv);
+                return uv.Count == vCount;
+            }
+            if (dim == 3)
+            {
+                var uv = new List<Vector3>();
+                mesh.GetUVs(channel, uv);
+                return uv.Count == vCount;
+            }
+
+            var uv4 = new List<Vector4>();
+            mesh.GetUVs(channel, uv4);
+            return uv4.Count == vCount;
+        }
+
+        static Mesh SelectUv2Donor(MeshEntry entry, Mesh resultMesh, int uvChannel)
+        {
+            // AO is written into selected UV component by VertexAOTool.ApplyToMesh,
+            // usually on original/fbx-backed working meshes.
+            // Keep transferred mesh last
+            // so UV1 transfer result stays authoritative while AO comes from AO donor.
+            var candidates = new[] { entry?.originalMesh, entry?.fbxMesh, entry?.repackedMesh, entry?.transferredMesh, resultMesh };
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                var m = candidates[i];
+                if (HasUvChannelData(m, uvChannel)) return m;
+            }
+            return null;
+        }
+
         public void ExportFbxPublic(bool overwriteSource) => ExportFbx(overwriteSource);
         public void ApplyUv2Public() => ApplyUv2ToFbx();
         public void SaveAllPublic() => SaveAll();
@@ -1149,7 +1237,7 @@ namespace LightmapUvTool
                 // vertex data (especially for _COL meshes without sidecar data).
                 var srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
                 bool madeReadable = false;
-                if (srcImporter != null && !srcImporter.isReadable)
+                if (!overwriteSource && srcImporter != null && !srcImporter.isReadable)
                 {
                     srcImporter.isReadable = true;
                     Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
@@ -1185,10 +1273,18 @@ namespace LightmapUvTool
                             // working/original mesh wins so overwrite export persists AO.
                             OverwriteUvChannel(exportMesh, entry.originalMesh, 1);
                         }
+                        // AO often writes into UV2 components. Source meshes may not
+                        // have UV2 at all, so pick the best available donor.
+                        if (TryGetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent))
+                        {
+                            var uv2Donor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
+                            if (uv2Donor != null)
+                                MergeUvComponentFromDonor(exportMesh, uv2Donor, aoUvChannel, aoUvComponent);
+                        }
                         string meshName = ResolveExportMeshName(entry, resultMesh);
                         meshReplacements[meshName] = exportMesh;
-                        if (entry.renderer != null && !meshRendererTemplates.ContainsKey(meshName))
-                            meshRendererTemplates.Add(meshName, entry.renderer);
+                        if (entry.renderer != null)
+                            meshRendererTemplates[meshName] = entry.renderer;
                     }
 
                     // Replace meshes in cloned hierarchy
@@ -1247,6 +1343,11 @@ namespace LightmapUvTool
                         {
                             PreserveUvChannels(exportMesh, entry.originalMesh);
                             OverwriteUvChannel(exportMesh, entry.originalMesh, 1);
+                        if (TryGetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent))
+                        {
+                            var uv2Donor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
+                            if (uv2Donor != null)
+                                MergeUvComponentFromDonor(exportMesh, uv2Donor, aoUvChannel, aoUvComponent);
                         }
                         newMf.sharedMesh = exportMesh;
                         var mr = child.AddComponent<MeshRenderer>();
@@ -1263,15 +1364,30 @@ namespace LightmapUvTool
                     }
 
                     // ── Remove stale children from cloned FBX ──
-                    // Keep only direct children whose names match our mesh entries.
-                    // Old _COL, _Collider, "Lit", duplicate LODs etc. are removed.
+                    // Keep collision nodes, MeshCollider-backed nodes, structural
+                    // containers, and renderable children that still map to the
+                    // export mesh set. Remove only stale renderable leftovers.
                     // Must run BEFORE NormalizeExportHierarchy (which renames LOD0).
-                    var validNames = new HashSet<string>();
+                    var validMeshNames = new HashSet<string>();
                     foreach (var (entry, resultMesh) in entries)
                     {
                         string meshName = ResolveExportMeshName(entry, resultMesh);
-                        validNames.Add(meshName);
+                        validMeshNames.Add(meshName);
                     }
+
+                    // Protect meshes referenced by MeshCollider components.
+                    // Some projects keep collision nodes without strict _COL naming,
+                    // and there can be multiple colliders in the hierarchy.
+                    var colliderMeshNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var colliderRootNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var mc in tempRoot.GetComponentsInChildren<MeshCollider>(true))
+                    {
+                        if (mc == null) continue;
+                        colliderRootNames.Add(mc.gameObject.name);
+                        if (mc.sharedMesh != null && !string.IsNullOrEmpty(mc.sharedMesh.name))
+                            colliderMeshNames.Add(mc.sharedMesh.name);
+                    }
+
                     for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
                     {
                         var ch = tempRoot.transform.GetChild(ci);
@@ -1279,7 +1395,34 @@ namespace LightmapUvTool
                         // they are not part of mesh transfer entries.
                         if (MeshHygieneUtility.IsCollisionNodeName(ch.name))
                             continue;
-                        if (!validNames.Contains(ch.name))
+                        if (colliderRootNames.Contains(ch.name))
+                            continue;
+                        var chMf = ch.GetComponent<MeshFilter>();
+                        if (chMf != null && chMf.sharedMesh != null &&
+                            colliderMeshNames.Contains(chMf.sharedMesh.name))
+                            continue;
+                        var chSmr = ch.GetComponent<SkinnedMeshRenderer>();
+                        bool hasRenderableMesh =
+                            (chMf != null && chMf.sharedMesh != null) ||
+                            (chSmr != null && chSmr.sharedMesh != null);
+                        // Keep structural/container nodes (no direct mesh on node).
+                        // Removing them flattens FBX hierarchy and can break prefabs.
+                        if (!hasRenderableMesh)
+                            continue;
+                        string childMeshName = null;
+                        if (chMf != null && chMf.sharedMesh != null)
+                            childMeshName = chMf.sharedMesh.name;
+                        else if (chSmr != null && chSmr.sharedMesh != null)
+                            childMeshName = chSmr.sharedMesh.name;
+
+                        // Keep nodes when either the node name OR its bound mesh name
+                        // is part of the export set. Some DCC/Unity imports keep node
+                        // names different from mesh names (especially for root LOD0),
+                        // and pruning by node name alone can drop valid LOD content.
+                        bool keepByNodeName = validMeshNames.Contains(ch.name);
+                        bool keepByMeshName = !string.IsNullOrEmpty(childMeshName) &&
+                                              validMeshNames.Contains(childMeshName);
+                        if (!keepByNodeName && !keepByMeshName)
                             UnityEngine.Object.DestroyImmediate(ch.gameObject);
                     }
 
@@ -1426,6 +1569,20 @@ namespace LightmapUvTool
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
                 }
 
+                // Always disable generateSecondaryUV after overwriting FBX with
+                // transferred UV2. This is a post-export fallback in case importer
+                // state changed during export/reimport despite the pre-lock above.
+                if (overwriteSource && groupSucceeded)
+                {
+                    var fbxImp = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
+                    if (fbxImp != null && fbxImp.generateSecondaryUV)
+                    {
+                        fbxImp.generateSecondaryUV = false;
+                        fbxImp.SaveAndReimport();
+                        UvtLog.Info($"[FBX Export] Disabled generateSecondaryUV on '{sourceFbxPath}'");
+                    }
+                }
+
             }
 
             // Clean up scene-generated LOD objects from LodGenerationTool.
@@ -1437,6 +1594,31 @@ namespace LightmapUvTool
             // third-party postprocessors like Bakery). Don't clear sidecar entries.
 
             AssetDatabase.Refresh();
+
+            // Remove stale material remaps created by FBX importer defaults on
+            // collision-only nodes. These should not survive an overwrite export.
+            if (overwriteSource && allGroupsSucceeded)
+            {
+                foreach (string fbxPath in overwrittenFbxPaths)
+                {
+                    var imp = AssetImporter.GetAtPath(fbxPath) as ModelImporter;
+                    if (imp == null) continue;
+                    var map = imp.GetExternalObjectMap();
+                    var toRemove = new List<AssetImporter.SourceAssetIdentifier>();
+                    foreach (var kvp in map)
+                    {
+                        if (kvp.Key.type != typeof(Material)) continue;
+                        if (kvp.Key.name == "Lit" || kvp.Key.name == "No Name")
+                            toRemove.Add(kvp.Key);
+                    }
+                    if (toRemove.Count > 0)
+                    {
+                        foreach (var key in toRemove)
+                            imp.RemoveRemap(key);
+                        imp.SaveAndReimport();
+                    }
+                }
+            }
 #endif
         }
 
@@ -1695,6 +1877,9 @@ namespace LightmapUvTool
         static void NormalizeExportHierarchy(GameObject root)
         {
             string baseName = root.name;
+            string sanitizedBaseName = MeshHygieneUtility.SanitizeName(baseName);
+            if (string.IsNullOrEmpty(sanitizedBaseName))
+                sanitizedBaseName = "Unnamed";
 
             // Reset root transform to identity (clean pivot at origin)
             root.transform.localPosition = Vector3.zero;
@@ -1704,10 +1889,57 @@ namespace LightmapUvTool
             // Rename direct child that matches root name (LOD0 without suffix) to baseName_LOD0
             foreach (Transform child in root.transform)
             {
-                if (child.name == baseName)
+                if (child.name == baseName || child.name == sanitizedBaseName)
                 {
-                    child.name = baseName + "_LOD0";
+                    child.name = sanitizedBaseName + "_LOD0";
                     break;
+                }
+            }
+
+            // Normalize direct child LOD names to contiguous _LOD0.._LODN suffixes.
+            // This prevents importer-side warnings ("_LOD1 found but no _LOD0")
+            // when source names contained invalid characters (e.g. dots) and were
+            // sanitized inconsistently across tools.
+            var directLodChildren = new List<(Transform transform, int index)>();
+            foreach (Transform child in root.transform)
+            {
+                if (MeshHygieneUtility.IsCollisionNodeName(child.name))
+                    continue;
+
+                var mf = child.GetComponent<MeshFilter>();
+                var smr = child.GetComponent<SkinnedMeshRenderer>();
+                bool hasMesh = (mf != null && mf.sharedMesh != null) ||
+                               (smr != null && smr.sharedMesh != null);
+                if (!hasMesh)
+                    continue;
+
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    child.name,
+                    @"_LOD(\d+)$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (!match.Success)
+                    continue;
+
+                int parsedIndex;
+                if (!int.TryParse(match.Groups[1].Value, out parsedIndex))
+                    continue;
+
+                directLodChildren.Add((child, parsedIndex));
+            }
+
+            if (directLodChildren.Count > 0)
+            {
+                directLodChildren.Sort((a, b) =>
+                {
+                    int cmp = a.index.CompareTo(b.index);
+                    return cmp != 0 ? cmp : a.transform.GetSiblingIndex().CompareTo(b.transform.GetSiblingIndex());
+                });
+
+                for (int i = 0; i < directLodChildren.Count; i++)
+                {
+                    string normalizedName = sanitizedBaseName + "_LOD" + i;
+                    if (directLodChildren[i].transform.name != normalizedName)
+                        directLodChildren[i].transform.name = normalizedName;
                 }
             }
 

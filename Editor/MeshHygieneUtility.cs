@@ -67,6 +67,7 @@ namespace LightmapUvTool
         {
             if (string.IsNullOrEmpty(nodeName)) return false;
             return collisionSuffixRegex.IsMatch(nodeName) ||
+                   nodeName.EndsWith("_Col", StringComparison.OrdinalIgnoreCase) ||
                    nodeName.EndsWith("_Collider", StringComparison.OrdinalIgnoreCase) ||
                    nodeName.EndsWith("_Collision", StringComparison.OrdinalIgnoreCase);
         }
@@ -136,8 +137,10 @@ namespace LightmapUvTool
         static bool IsLooseCollisionName(string name)
         {
             if (string.IsNullOrEmpty(name)) return false;
-            return name.Contains("_COL") ||
-                   name.EndsWith("_Collider", StringComparison.OrdinalIgnoreCase);
+            return name.IndexOf("_COL", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.EndsWith("_Col", StringComparison.OrdinalIgnoreCase) ||
+                   name.EndsWith("_Collider", StringComparison.OrdinalIgnoreCase) ||
+                   name.EndsWith("_Collision", StringComparison.OrdinalIgnoreCase);
         }
 
         // ── Mesh stats ──
