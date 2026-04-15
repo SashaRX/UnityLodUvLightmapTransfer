@@ -1339,13 +1339,6 @@ namespace LightmapUvTool
                 if (!groupSucceeded)
                     allGroupsSucceeded = false;
 
-                // For overwrite flow, always lock import settings that can silently
-                // alter UV topology/channels on reimport (Generate Lightmap UVs, weld,
-                // mesh compression, mesh optimization). This preserves baked AO/UV data
-                // even when Sidecar UV2 Mode is disabled.
-                if (overwriteSource)
-                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
-
                 // Save sidecar entries so our postprocessor (order=10000) can
                 // re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
                 // Only when Sidecar UV2 Mode is enabled — otherwise the postprocessor
@@ -1355,6 +1348,15 @@ namespace LightmapUvTool
                     SaveSidecarForExport(sourceFbxPath, entries);
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
                 }
+
+                // For overwrite flow, always lock import settings that can silently
+                // alter UV topology/channels on reimport (Generate Lightmap UVs, weld,
+                // mesh compression, mesh optimization). This preserves baked AO/UV data
+                // even when Sidecar UV2 Mode is disabled.
+                // Important: do this after sidecar save/registration so the reimport
+                // triggered by PrepareImportSettings can immediately re-apply UV2.
+                if (overwriteSource)
+                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
             }
 
             // Clean up scene-generated LOD objects from LodGenerationTool.
