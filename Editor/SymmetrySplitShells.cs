@@ -25,7 +25,6 @@ namespace LightmapUvTool
             public float uvNear;
             public float posFar;
             public float gridCell;
-            public bool adaptive;
         }
 
         static ThresholdMode s_thresholdMode = ThresholdMode.LegacyFixed;
@@ -1114,7 +1113,7 @@ namespace LightmapUvTool
         static ThresholdSet GetThresholds(Mesh mesh, UvShell shell, int shellIndex, string stageTag)
         {
             if (CurrentThresholdMode != ThresholdMode.Adaptive)
-                return new ThresholdSet { uvNear = UV_NEAR, posFar = POS_FAR, gridCell = GRID_CELL, adaptive = false };
+                return new ThresholdSet { uvNear = UV_NEAR, posFar = POS_FAR, gridCell = GRID_CELL };
 
             if (!s_adaptiveModeLogged)
             {
@@ -1148,8 +1147,7 @@ namespace LightmapUvTool
             {
                 uvNear = uvNearAdaptive,
                 posFar = posFarAdaptive,
-                gridCell = gridCellAdaptive,
-                adaptive = true
+                gridCell = gridCellAdaptive
             };
         }
 
