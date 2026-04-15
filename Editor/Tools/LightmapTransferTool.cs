@@ -1200,7 +1200,7 @@ namespace LightmapUvTool
                 // vertex data (especially for _COL meshes without sidecar data).
                 var srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
                 bool madeReadable = false;
-                if (srcImporter != null && !srcImporter.isReadable)
+                if (!overwriteSource && srcImporter != null && !srcImporter.isReadable)
                 {
                     srcImporter.isReadable = true;
                     Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
