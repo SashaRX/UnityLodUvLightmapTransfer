@@ -983,7 +983,12 @@ namespace LightmapUvTool
 
                 // Prepare import settings and reimport FBX so the postprocessor replays UV2
                 Uv2AssetPostprocessor.managedImportPaths.Add(kv.Key);
-                Uv2AssetPostprocessor.PrepareImportSettings(kv.Key);
+                if (!PostprocessorDefineManager.IsEnabled())
+                    Uv2AssetPostprocessor.transientReplayPaths.Add(kv.Key);
+
+                bool reimported = Uv2AssetPostprocessor.PrepareImportSettings(kv.Key);
+                if (!reimported)
+                    AssetDatabase.ImportAsset(kv.Key, ImportAssetOptions.ForceUpdate);
             }
 
             UvtLog.Info($"[Apply] Done — {fbxGroups.Count} FBX(es) updated.");
@@ -1302,33 +1307,6 @@ namespace LightmapUvTool
         public void ApplyUv2Public() => ApplyUv2ToFbx();
         public void SaveAllPublic() => SaveAll();
 
-        static bool EnsureSidecarReplayEnabledForOverwrite()
-        {
-            if (PostprocessorDefineManager.IsEnabled())
-                return true;
-
-            bool enable = EditorUtility.DisplayDialog(
-                "Enable Sidecar UV2 Mode",
-                "Reliable FBX overwrite requires Sidecar UV2 Mode.\n\n" +
-                "Without it, Unity/Bakery can overwrite imported lightmap UVs right after export, " +
-                "so the FBX appears to lose UV2.\n\n" +
-                "Enable it now? Unity will recompile once. After that, rerun Overwrite FBX.",
-                "Enable",
-                "Cancel");
-
-            if (enable)
-            {
-                PostprocessorDefineManager.SetEnabled(true);
-                UvtLog.Warn("[FBX Export] Sidecar UV2 Mode enabled. Rerun Overwrite FBX after Unity recompiles.");
-            }
-            else
-            {
-                UvtLog.Warn("[FBX Export] Overwrite cancelled: Sidecar UV2 Mode is required for reliable UV2 persistence.");
-            }
-
-            return false;
-        }
-
         void ExportFbx(bool overwriteSource)
         {
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
@@ -1337,8 +1315,6 @@ namespace LightmapUvTool
                 UvtLog.Error("[FBX Export] No meshes loaded.");
                 return;
             }
-            if (overwriteSource && !EnsureSidecarReplayEnabledForOverwrite())
-                return;
 
             // Restore any active preview (checker, AO, shell colors) before export
             // so that original materials are captured, not preview materials.
@@ -1805,12 +1781,14 @@ namespace LightmapUvTool
 
                 // Save sidecar entries so our postprocessor (order=10000) can
                 // re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
-                // Only when Sidecar UV2 Mode is enabled — otherwise the postprocessor
-                // is compiled out and sidecar application won't run.
-                if (overwriteSource && PostprocessorDefineManager.IsEnabled())
+                // If Sidecar UV2 Mode is off, mark the path for one-shot replay and
+                // cleanup after the current import finishes.
+                if (overwriteSource)
                 {
                     SaveSidecarForExport(sourceFbxPath, entries);
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
+                    if (!PostprocessorDefineManager.IsEnabled())
+                        Uv2AssetPostprocessor.transientReplayPaths.Add(sourceFbxPath);
                 }
 
                 // Always disable generateSecondaryUV after overwriting FBX with

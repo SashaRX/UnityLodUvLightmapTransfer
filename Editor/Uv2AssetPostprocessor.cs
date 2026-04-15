@@ -12,10 +12,8 @@ namespace LightmapUvTool
 {
     public class Uv2AssetPostprocessor : AssetPostprocessor
     {
-#if LIGHTMAP_UV_TOOL_POSTPROCESSOR
         // Run well after Bakery and other postprocessors (default order = 0).
         public override int GetPostprocessOrder() => 10000;
-#endif
 
         /// <summary>
         /// Paths to bypass during the next reimport. When ApplyUv2ToFbx needs the
@@ -41,6 +39,13 @@ namespace LightmapUvTool
         /// </summary>
         internal static readonly HashSet<string> managedImportPaths = new HashSet<string>();
 
+        /// <summary>
+        /// Paths that should replay sidecar UV data only for the current import.
+        /// After OnPostprocessModel runs, UV entries are cleaned up again if
+        /// persistent sidecar mode is disabled.
+        /// </summary>
+        internal static readonly HashSet<string> transientReplayPaths = new HashSet<string>();
+
         struct ApplyStats
         {
             public int fbxVerts;              // vertex count from fresh FBX import
@@ -61,18 +66,18 @@ namespace LightmapUvTool
         /// so the CleanupTool Import Settings fixer can apply the same enforcement to any
         /// tool-managed FBX without having to pre-register it.
         /// </summary>
-        internal static void PrepareImportSettings(string assetPath, bool force = false)
+        internal static bool PrepareImportSettings(string assetPath, bool force = false)
         {
-            if (bypassPaths.Contains(assetPath)) return;
+            if (bypassPaths.Contains(assetPath)) return false;
 
             var modelImporter = AssetImporter.GetAtPath(assetPath) as ModelImporter;
-            if (modelImporter == null) return;
+            if (modelImporter == null) return false;
 
             if (!force)
             {
                 bool isFbxOverwrite = fbxOverwritePaths.Contains(assetPath);
                 bool isManaged = managedImportPaths.Contains(assetPath);
-                if (!isFbxOverwrite && !isManaged) return;
+                if (!isFbxOverwrite && !isManaged) return false;
             }
 
             bool changed = false;
@@ -102,13 +107,14 @@ namespace LightmapUvTool
                 changed = true;
             }
             if (changed)
+            {
                 modelImporter.SaveAndReimport();
+                return true;
+            }
+
+            return false;
         }
 
-// OnPostprocessModel is gated behind LIGHTMAP_UV_TOOL_POSTPROCESSOR to prevent
-// Unity from triggering mass reimport of all models when the package is installed.
-// The define is added automatically when the user first applies UV2 via sidecar.
-#if LIGHTMAP_UV_TOOL_POSTPROCESSOR
         void OnPostprocessModel(GameObject root)
         {
             string modelPath = assetPath;
@@ -128,14 +134,27 @@ namespace LightmapUvTool
                 return;
             }
 
+            bool persistentMode = PostprocessorDefineManager.IsEnabled();
+            bool isManaged = managedImportPaths.Contains(modelPath);
+            bool transientReplay = transientReplayPaths.Remove(modelPath);
+
+            if (!persistentMode && !isManaged && !transientReplay)
+                return;
+
             string sidecarPath = Uv2DataAsset.GetSidecarPath(modelPath);
 
             // Load sidecar without triggering import loop
             var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
-            if (data == null) return;
+            if (data == null)
+            {
+                managedImportPaths.Remove(modelPath);
+                if (transientReplay && !persistentMode)
+                    ScheduleTransientCleanup(modelPath);
+                return;
+            }
 
             // Collision stripping only runs when explicitly requested via managedImportPaths
-            if (managedImportPaths.Contains(modelPath) &&
+            if (isManaged &&
                 data.collisionEntries != null && data.collisionEntries.Count > 0)
             {
                 foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
@@ -159,7 +178,12 @@ namespace LightmapUvTool
             // Consume managed registration (collision stripping above may have used it).
             managedImportPaths.Remove(modelPath);
 
-            if (data.entries == null || data.entries.Count == 0) return;
+            if (data.entries == null || data.entries.Count == 0)
+            {
+                if (transientReplay && !persistentMode)
+                    ScheduleTransientCleanup(modelPath);
+                return;
+            }
 
             // Always apply UV2 from sidecar if entries exist — ensures persistence
             // across Unity restarts even when third-party postprocessors (e.g. Bakery
@@ -285,8 +309,48 @@ namespace LightmapUvTool
                     }
                 };
             }
+
+            if (transientReplay && !persistentMode)
+                ScheduleTransientCleanup(modelPath);
         }
-#endif // LIGHTMAP_UV_TOOL_POSTPROCESSOR
+
+        static void ScheduleTransientCleanup(string modelPath)
+        {
+            string capturedPath = modelPath;
+            EditorApplication.delayCall += () =>
+            {
+                try
+                {
+                    ClearTemporaryUvEntries(capturedPath);
+                }
+                catch (System.Exception ex)
+                {
+                    UvtLog.Warn($"[UV2 Postprocess] Temporary sidecar cleanup failed for '{capturedPath}': {ex.Message}");
+                }
+            };
+        }
+
+        static void ClearTemporaryUvEntries(string modelPath)
+        {
+            string sidecarPath = Uv2DataAsset.GetSidecarPath(modelPath);
+            var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+            if (data == null || data.entries == null || data.entries.Count == 0) return;
+
+            bool hasCollision = data.collisionEntries != null && data.collisionEntries.Count > 0;
+            data.entries.Clear();
+
+            if (hasCollision)
+            {
+                EditorUtility.SetDirty(data);
+                AssetDatabase.SaveAssets();
+                UvtLog.Info($"[UV2 Postprocess] Cleared temporary UV sidecar entries for '{modelPath}' (collision entries preserved).");
+            }
+            else
+            {
+                AssetDatabase.DeleteAsset(sidecarPath);
+                UvtLog.Info($"[UV2 Postprocess] Removed temporary UV sidecar '{sidecarPath}' after reimport.");
+            }
+        }
 
         static bool IsManagedCollisionObjectName(string objectName, Uv2DataAsset data)
         {

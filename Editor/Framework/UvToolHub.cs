@@ -809,8 +809,8 @@ namespace LightmapUvTool
             if (!sidecarEnabled)
             {
                 EditorGUILayout.HelpBox(
-                    "Reliable FBX overwrite requires Sidecar UV2 Mode. Without it, Unity/Bakery can overwrite imported lightmap UVs immediately after export.",
-                    MessageType.Warning);
+                    "Sidecar UV2 Mode is OFF. FBX overwrite/apply will use temporary sidecar replay for this import only, then UV sidecar entries will be removed again.",
+                    MessageType.Info);
             }
 
             EditorGUILayout.BeginHorizontal();
@@ -836,29 +836,15 @@ namespace LightmapUvTool
             EditorGUI.BeginChangeCheck();
             sidecarEnabled = EditorGUILayout.ToggleLeft("Sidecar UV2 Mode", sidecarEnabled);
             if (EditorGUI.EndChangeCheck())
-            {
-                if (sidecarEnabled)
-                {
-                    if (EditorUtility.DisplayDialog("Enable Sidecar Mode",
-                        "Adds LIGHTMAP_UV_TOOL_POSTPROCESSOR define.\n\n" +
-                        "Unity will recompile and reimport all models (one-time).\n" +
-                        "Required for non-destructive UV2 via sidecar.",
-                        "Enable", "Cancel"))
-                        PostprocessorDefineManager.SetEnabled(true);
-                }
-                else
-                {
-                    PostprocessorDefineManager.SetEnabled(false);
-                }
-            }
+                PostprocessorDefineManager.SetEnabled(sidecarEnabled);
 
-            if (sidecarEnabled)
+            if (!sidecarEnabled)
+                EditorGUILayout.LabelField("Persistent replay is OFF; one-shot FBX/apply replay still works.", EditorStyles.miniLabel);
+
+            if (GUILayout.Button("Apply UV2 (sidecar)", EditorStyles.miniButton))
             {
-                if (GUILayout.Button("Apply UV2 (sidecar)", EditorStyles.miniButton))
-                {
-                    foreach (var tool in tools)
-                        if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
-                }
+                foreach (var tool in tools)
+                    if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
             }
 
             // Backup current FBX from git main branch
@@ -962,12 +948,13 @@ namespace LightmapUvTool
                     deleted++;
             }
 
-            // Offer to disable sidecar mode if active
+            // Offer to disable persistent sidecar mode if active
             if (PostprocessorDefineManager.IsEnabled())
             {
                 if (EditorUtility.DisplayDialog("Disable Sidecar Mode?",
                     "Sidecar UV2 Mode is currently enabled.\n" +
-                    "Disable it to prevent the postprocessor from running on reimport?",
+                    "Disable it to stop persistent UV replay on future reimports?\n" +
+                    "One-shot replay during overwrite/apply will still work.",
                     "Disable", "Keep Enabled"))
                     PostprocessorDefineManager.SetEnabled(false);
             }
