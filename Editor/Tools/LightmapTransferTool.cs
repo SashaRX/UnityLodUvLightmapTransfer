@@ -1105,6 +1105,7 @@ namespace LightmapUvTool
 
                     // Build lookup: original mesh name -> export mesh
                     var meshReplacements = new Dictionary<string, Mesh>();
+                    var meshRendererTemplates = new Dictionary<string, Renderer>();
                     foreach (var (entry, resultMesh) in entries)
                     {
                         var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
@@ -1116,6 +1117,8 @@ namespace LightmapUvTool
                             PreserveUvChannels(exportMesh, entry.originalMesh);
                         string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
                         meshReplacements[meshName] = exportMesh;
+                        if (entry.renderer != null)
+                            meshRendererTemplates[meshName] = entry.renderer;
                     }
 
                     // Replace meshes in cloned hierarchy
@@ -1124,16 +1127,26 @@ namespace LightmapUvTool
                     {
                         if (mf.sharedMesh != null && meshReplacements.TryGetValue(mf.sharedMesh.name, out var replacement))
                         {
-                            replaced.Add(mf.sharedMesh.name);
+                            string meshName = mf.sharedMesh.name;
+                            replaced.Add(meshName);
                             mf.sharedMesh = replacement;
+                            if (meshRendererTemplates.TryGetValue(meshName, out var srcRenderer))
+                            {
+                                var dstRenderer = mf.GetComponent<MeshRenderer>();
+                                if (dstRenderer != null)
+                                    CopyRendererSettings(srcRenderer, dstRenderer);
+                            }
                         }
                     }
                     foreach (var smr in tempRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true))
                     {
                         if (smr.sharedMesh != null && meshReplacements.TryGetValue(smr.sharedMesh.name, out var replacement))
                         {
-                            replaced.Add(smr.sharedMesh.name);
+                            string meshName = smr.sharedMesh.name;
+                            replaced.Add(meshName);
                             smr.sharedMesh = replacement;
+                            if (meshRendererTemplates.TryGetValue(meshName, out var srcRenderer))
+                                CopyRendererSettings(srcRenderer, smr);
                         }
                     }
 
@@ -1326,16 +1339,21 @@ namespace LightmapUvTool
                 if (!groupSucceeded)
                     allGroupsSucceeded = false;
 
+                // For overwrite flow, always lock import settings that can silently
+                // alter UV topology/channels on reimport (Generate Lightmap UVs, weld,
+                // mesh compression, mesh optimization). This preserves baked AO/UV data
+                // even when Sidecar UV2 Mode is disabled.
+                if (overwriteSource)
+                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
+
                 // Save sidecar entries so our postprocessor (order=10000) can
                 // re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
-                // Also disables generateSecondaryUV, weldVertices, etc. via PrepareImportSettings.
                 // Only when Sidecar UV2 Mode is enabled — otherwise the postprocessor
-                // is compiled out and the sidecar would be created for nothing.
+                // is compiled out and sidecar application won't run.
                 if (overwriteSource && PostprocessorDefineManager.IsEnabled())
                 {
                     SaveSidecarForExport(sourceFbxPath, entries);
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
-                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath);
                 }
             }
 
