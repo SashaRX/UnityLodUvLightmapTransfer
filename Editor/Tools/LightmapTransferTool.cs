@@ -995,24 +995,48 @@ namespace LightmapUvTool
             }
         }
 
-        static void MergeUv2XFromDonor(Mesh exportMesh, Mesh donorMesh)
+        static void GetAppliedAoUvTarget(out int uvChannel, out int uvComponent)
+        {
+            // Backward-compatible default used by old flow: UV1.x (Unity's 2nd UV set).
+            uvChannel = 1;
+            uvComponent = 0;
+
+            var ch = VertexAOTool.LastAppliedTargetChannel;
+            if (!ch.HasValue) return;
+
+            int v = (int)ch.Value;
+            if (v < (int)AOTargetChannel.UV0_X) return; // AO was stored in vertex color
+
+            uvChannel = (v - (int)AOTargetChannel.UV0_X) / 2;
+            uvComponent = (v - (int)AOTargetChannel.UV0_X) % 2; // 0=X, 1=Y
+        }
+
+        static void MergeUvComponentFromDonor(Mesh exportMesh, Mesh donorMesh, int uvChannel, int uvComponent)
         {
             if (exportMesh == null || donorMesh == null) return;
             if (exportMesh.vertexCount != donorMesh.vertexCount) return;
+            if (uvChannel < 0 || uvChannel > 7) return;
+            if (uvComponent < 0 || uvComponent > 1) return;
 
-            var donorUv2 = new List<Vector2>();
-            donorMesh.GetUVs(1, donorUv2);
-            if (donorUv2.Count != exportMesh.vertexCount) return;
+            var donorUv = new List<Vector2>();
+            donorMesh.GetUVs(uvChannel, donorUv);
+            if (donorUv.Count != exportMesh.vertexCount) return;
 
-            var exportUv2 = new List<Vector2>();
-            exportMesh.GetUVs(1, exportUv2);
-            if (exportUv2.Count != exportMesh.vertexCount)
-                exportUv2 = new List<Vector2>(donorUv2);
+            var exportUv = new List<Vector2>();
+            exportMesh.GetUVs(uvChannel, exportUv);
+            if (exportUv.Count != exportMesh.vertexCount)
+                exportUv = new List<Vector2>(donorUv);
 
-            for (int i = 0; i < exportUv2.Count; i++)
-                exportUv2[i] = new Vector2(donorUv2[i].x, exportUv2[i].y);
+            for (int i = 0; i < exportUv.Count; i++)
+            {
+                var src = donorUv[i];
+                var dst = exportUv[i];
+                exportUv[i] = uvComponent == 0
+                    ? new Vector2(src.x, dst.y)
+                    : new Vector2(dst.x, src.y);
+            }
 
-            exportMesh.SetUVs(1, exportUv2);
+            exportMesh.SetUVs(uvChannel, exportUv);
         }
 
         static bool HasUvChannelData(Mesh mesh, int channel)
@@ -1041,16 +1065,17 @@ namespace LightmapUvTool
             return uv4.Count == vCount;
         }
 
-        static Mesh SelectUv2Donor(MeshEntry entry, Mesh resultMesh)
+        static Mesh SelectUv2Donor(MeshEntry entry, Mesh resultMesh, int uvChannel)
         {
-            // AO is written into UV2.x by VertexAOTool.ApplyToMesh, which primarily
-            // targets original/fbx-backed working meshes. Keep transferred mesh last
+            // AO is written into selected UV component by VertexAOTool.ApplyToMesh,
+            // usually on original/fbx-backed working meshes.
+            // Keep transferred mesh last
             // so UV1 transfer result stays authoritative while AO comes from AO donor.
             var candidates = new[] { entry?.originalMesh, entry?.fbxMesh, entry?.repackedMesh, entry?.transferredMesh, resultMesh };
             for (int i = 0; i < candidates.Length; i++)
             {
                 var m = candidates[i];
-                if (HasUvChannelData(m, 1)) return m;
+                if (HasUvChannelData(m, uvChannel)) return m;
             }
             return null;
         }
@@ -1206,9 +1231,10 @@ namespace LightmapUvTool
                         }
                         // AO often writes into UV2 components. Source meshes may not
                         // have UV2 at all, so pick the best available donor.
-                        var uv2Donor = SelectUv2Donor(entry, resultMesh);
+                        GetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent);
+                        var uv2Donor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
                         if (uv2Donor != null)
-                            MergeUv2XFromDonor(exportMesh, uv2Donor);
+                            MergeUvComponentFromDonor(exportMesh, uv2Donor, aoUvChannel, aoUvComponent);
                         string meshName = ResolveExportMeshName(entry, resultMesh);
                         meshReplacements[meshName] = exportMesh;
                         if (entry.renderer != null)
@@ -1271,9 +1297,10 @@ namespace LightmapUvTool
                         {
                             PreserveUvChannels(exportMesh, entry.originalMesh);
                         }
-                        var uv2Donor = SelectUv2Donor(entry, resultMesh);
+                        GetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent);
+                        var uv2Donor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
                         if (uv2Donor != null)
-                            MergeUv2XFromDonor(exportMesh, uv2Donor);
+                            MergeUvComponentFromDonor(exportMesh, uv2Donor, aoUvChannel, aoUvComponent);
                         newMf.sharedMesh = exportMesh;
                         var mr = child.AddComponent<MeshRenderer>();
                         if (lastLodRendererTemplate != null)

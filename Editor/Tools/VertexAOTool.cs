@@ -98,6 +98,7 @@ namespace LightmapUvTool
         // ── Lifecycle ──
 
         internal static VertexAOTool ActiveInstance { get; private set; }
+        internal static AOTargetChannel? LastAppliedTargetChannel { get; private set; }
 
         class LodBakeBatch
         {
@@ -760,6 +761,7 @@ namespace LightmapUvTool
             RestorePreview();
 
             var channel = TargetChannel;
+            LastAppliedTargetChannel = channel;
             var appliedMeshes = new HashSet<Mesh>();
             foreach (var kvp in bakedFinalAO)
             {
