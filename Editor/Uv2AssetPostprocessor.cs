@@ -372,8 +372,7 @@ namespace LightmapUvTool
                         stats.finalVerts = mesh.vertexCount;
                         stats.remapped = false;
                         stats.replayUsed = true;
-                        // UV2 count now matches — assign directly
-                        mesh.SetUVs(1, entry.uv2);
+                        ApplyStoredUvChannelsDirect(mesh, entry);
                         UvtLog.Verbose($"[UV2 Postprocess] '{mesh.name}': replay path includes " +
                                        $"meshopt={entry.stepMeshopt}, edgeWeld={entry.stepEdgeWeld}, symmetrySplit={symmetryStep}");
                         return true;
@@ -439,13 +438,50 @@ namespace LightmapUvTool
 
             bool didRemap;
             int nearestFallback, nearestAnyReuse, unmatched;
-            var uv2 = RemapUv2IfNeeded(entry, mesh, out didRemap, out nearestFallback, out nearestAnyReuse, out unmatched);
+            int primaryTargetUvChannel = entry.targetUvChannel >= 0 ? entry.targetUvChannel : 1;
+            string primaryLabel = $"channel {primaryTargetUvChannel}";
+            var uv2 = RemapUvSetIfNeeded(entry, entry.uv2, mesh, primaryLabel, out didRemap, out nearestFallback, out nearestAnyReuse, out unmatched);
             stats.remapped = didRemap;
             stats.nearestFallbackCount = nearestFallback;
             stats.nearestAnyReuseCount = nearestAnyReuse;
             stats.unmatchedVerts = unmatched;
-            mesh.SetUVs(1, uv2);
+            mesh.SetUVs(primaryTargetUvChannel, uv2);
+            if (entry.auxiliaryUv != null && entry.auxiliaryTargetUvChannel >= 0)
+            {
+                bool auxDidRemap;
+                int auxNearestFallback, auxNearestAnyReuse, auxUnmatched;
+                var auxiliaryUv = RemapUvSetIfNeeded(
+                    entry,
+                    entry.auxiliaryUv,
+                    mesh,
+                    $"channel {entry.auxiliaryTargetUvChannel}",
+                    out auxDidRemap,
+                    out auxNearestFallback,
+                    out auxNearestAnyReuse,
+                    out auxUnmatched);
+                if (auxiliaryUv != null && auxiliaryUv.Length == mesh.vertexCount)
+                    mesh.SetUVs(entry.auxiliaryTargetUvChannel, auxiliaryUv);
+            }
             return true;
+        }
+
+        static void ApplyStoredUvChannelsDirect(Mesh mesh, MeshUv2Entry entry)
+        {
+            if (mesh == null || entry?.uv2 == null) return;
+
+            int primaryTargetUvChannel = entry.targetUvChannel >= 0 ? entry.targetUvChannel : 1;
+            if (entry.uv2.Length == mesh.vertexCount)
+                mesh.SetUVs(primaryTargetUvChannel, entry.uv2);
+
+            ApplyAuxiliaryUvChannel(mesh, entry);
+        }
+
+        static void ApplyAuxiliaryUvChannel(Mesh mesh, MeshUv2Entry entry)
+        {
+            if (mesh == null || entry?.auxiliaryUv == null) return;
+            if (entry.auxiliaryTargetUvChannel < 0) return;
+            if (entry.auxiliaryUv.Length != mesh.vertexCount) return;
+            mesh.SetUVs(entry.auxiliaryTargetUvChannel, entry.auxiliaryUv);
         }
 
         static bool ResolveSymmetrySplitStep(MeshUv2Entry entry)
@@ -1112,9 +1148,15 @@ namespace LightmapUvTool
         /// workflow and the postprocessor (different starting vertex count/order from FBX reimport).
         /// This remaps UV2 by matching vertex positions so the correct UV2 reaches each vertex.
         /// </summary>
-        static Vector2[] RemapUv2IfNeeded(MeshUv2Entry entry, Mesh mesh, out bool didRemap,
-                                           out int nearestFallbackCount, out int nearestAnyReuseCount,
-                                           out int unmatchedCount)
+        static Vector2[] RemapUvSetIfNeeded(
+            MeshUv2Entry entry,
+            Vector2[] sourceUv,
+            Mesh mesh,
+            string channelLabel,
+            out bool didRemap,
+            out int nearestFallbackCount,
+            out int nearestAnyReuseCount,
+            out int unmatchedCount)
         {
             didRemap = false;
             nearestFallbackCount = 0;
@@ -1122,8 +1164,9 @@ namespace LightmapUvTool
             unmatchedCount = 0;
 
             // No position data stored — backward compat, use UV2 as-is
-            if (entry.vertPositions == null || entry.vertPositions.Length != entry.uv2.Length)
-                return entry.uv2;
+            if (sourceUv == null) return null;
+            if (entry.vertPositions == null || entry.vertPositions.Length != sourceUv.Length)
+                return sourceUv;
 
             var meshPos = mesh.vertices;
             int count = meshPos.Length;
@@ -1136,7 +1179,7 @@ namespace LightmapUvTool
             var meshUv0 = new List<Vector2>();
             mesh.GetUVs(0, meshUv0);
             bool hasUv0 = entry.vertUv0 != null &&
-                          entry.vertUv0.Length == entry.uv2.Length &&
+                          entry.vertUv0.Length == sourceUv.Length &&
                           meshUv0.Count == count;
 
             // Build position → candidate sidecar indices lookup
@@ -1153,7 +1196,7 @@ namespace LightmapUvTool
             }
 
             var result = new Vector2[count];
-            var used = new bool[entry.uv2.Length];
+            var used = new bool[sourceUv.Length];
             var meshMatched = new bool[count];
             int matched = 0;
 
@@ -1168,7 +1211,7 @@ namespace LightmapUvTool
 
                 if (candidates.Count == 1)
                 {
-                    result[i] = entry.uv2[candidates[0]];
+                    result[i] = sourceUv[candidates[0]];
                     used[candidates[0]] = true;
                     meshMatched[i] = true;
                     matched++;
@@ -1190,7 +1233,7 @@ namespace LightmapUvTool
                     }
                     if (bestIdx >= 0)
                     {
-                        result[i] = entry.uv2[bestIdx];
+                        result[i] = sourceUv[bestIdx];
                         used[bestIdx] = true;
                         meshMatched[i] = true;
                         matched++;
@@ -1203,7 +1246,7 @@ namespace LightmapUvTool
                     {
                         if (!used[ci])
                         {
-                            result[i] = entry.uv2[ci];
+                            result[i] = sourceUv[ci];
                             used[ci] = true;
                             meshMatched[i] = true;
                             matched++;
@@ -1224,7 +1267,7 @@ namespace LightmapUvTool
                         unmatchedMesh.Add(i);
 
                 // Collect unused sidecar indices
-                var unusedSidecar = new List<int>(entry.uv2.Length - matched);
+                var unusedSidecar = new List<int>(sourceUv.Length - matched);
                 for (int i = 0; i < used.Length; i++)
                     if (!used[i]) unusedSidecar.Add(i);
 
@@ -1250,7 +1293,7 @@ namespace LightmapUvTool
 
                     if (bestIdx >= 0 && bestDist < 1e-4f)
                     {
-                        result[mi] = entry.uv2[bestIdx];
+                        result[mi] = sourceUv[bestIdx];
                         used[bestIdx] = true;
                         unusedSidecar.RemoveAt(bestListIdx);
                         matched++;
@@ -1272,7 +1315,7 @@ namespace LightmapUvTool
                     }
                     if (bestIdx >= 0)
                     {
-                        result[mi] = entry.uv2[bestIdx];
+                        result[mi] = sourceUv[bestIdx];
                         matched++;
                         fallbackMatched++;
                         nearestAnyReuseCount++;
@@ -1280,12 +1323,12 @@ namespace LightmapUvTool
                 }
 
                 if (nearestFallbackCount > 0)
-                    UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': {nearestFallbackCount} vertices matched by nearest-unused fallback");
+                    UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': {nearestFallbackCount} {channelLabel} vertices matched by nearest-unused fallback");
 
                 if (nearestAnyReuseCount > 0)
                 {
                     string severity = nearestAnyReuseCount > 5 ? "Sidecar may be invalid." : "Acceptable.";
-                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {nearestAnyReuseCount} vertices used nearest-ANY fallback (reuse). {severity}");
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {nearestAnyReuseCount} {channelLabel} vertices used nearest-ANY fallback (reuse). {severity}");
                 }
             }
 
@@ -1293,8 +1336,8 @@ namespace LightmapUvTool
             unmatchedCount = count - matched;
 
             if (matched < count)
-                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': position remap {matched}/{count} " +
-                                 $"(unmatched vertices will have zero UV2)");
+                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {channelLabel} position remap {matched}/{count} " +
+                                 "(unmatched vertices will keep zero)");
 
             return result;
         }

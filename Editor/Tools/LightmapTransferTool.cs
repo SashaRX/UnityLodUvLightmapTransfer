@@ -952,38 +952,12 @@ namespace LightmapUvTool
                 string fbxPath = AssetDatabase.GetAssetPath(pathMesh);
                 if (string.IsNullOrEmpty(fbxPath)) continue;
 
-                var uv2List = new List<Vector2>();
-                resultMesh.GetUVs(1, uv2List);
-                if (uv2List.Count == 0) continue;
-
-                var positions = resultMesh.vertices;
-                var uv0List = new List<Vector2>();
-                (e.originalMesh ?? resultMesh).GetUVs(0, uv0List);
-
-                if (!fbxGroups.ContainsKey(fbxPath))
-                    fbxGroups[fbxPath] = new List<MeshUv2Entry>();
-
-                string meshName = e.fbxMesh != null ? e.fbxMesh.name : e.originalMesh.name;
-                MeshFingerprint fp = e.fbxMesh != null ? MeshFingerprint.Compute(e.fbxMesh) : null;
-
-                fbxGroups[fbxPath].Add(new MeshUv2Entry
+                if (TryBuildSidecarEntry(e, resultMesh, out var sidecarEntry))
                 {
-                    meshName = meshName,
-                    uv2 = uv2List.ToArray(),
-                    welded = e.wasWelded,
-                    edgeWelded = e.wasEdgeWelded,
-                    vertPositions = positions,
-                    vertUv0 = uv0List.ToArray(),
-                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
-                    toolVersion = Uv2DataAsset.ToolVersionStr,
-                    sourceFingerprint = fp,
-                    targetUvChannel = 1,
-                    stepMeshopt = e.wasWelded,
-                    stepEdgeWeld = e.wasEdgeWelded,
-                    stepSymmetrySplit = e.wasSymmetrySplit,
-                    stepRepack = (e.lodIndex == ctx.SourceLodIndex),
-                    stepTransfer = (e.lodIndex != ctx.SourceLodIndex),
-                });
+                    if (!fbxGroups.ContainsKey(fbxPath))
+                        fbxGroups[fbxPath] = new List<MeshUv2Entry>();
+                    fbxGroups[fbxPath].Add(sidecarEntry);
+                }
             }
 
             if (fbxGroups.Count == 0) { UvtLog.Warn("[Apply] No meshes with UV2 data."); return; }
@@ -1227,6 +1201,97 @@ namespace LightmapUvTool
                 if (HasUvChannelData(m, uvChannel)) return m;
             }
             return null;
+        }
+
+        bool TryBuildSidecarEntry(MeshEntry entry, Mesh resultMesh, out MeshUv2Entry sidecarEntry)
+        {
+            sidecarEntry = null;
+            if (entry == null || resultMesh == null)
+                return false;
+
+            bool hasAppliedAoTarget = TryGetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent);
+            var sidecarMesh = UnityEngine.Object.Instantiate(resultMesh);
+            sidecarMesh.name = resultMesh.name;
+            try
+            {
+                if (entry.fbxMesh != null)
+                    PreserveUvChannels(sidecarMesh, entry.fbxMesh);
+                if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
+                {
+                    PreserveUvChannels(sidecarMesh, entry.originalMesh);
+                    OverwriteUvChannel(sidecarMesh, entry.originalMesh, 1);
+                }
+
+                Vector2[] auxiliaryUv = null;
+                int auxiliaryTargetUvChannel = -1;
+                if (hasAppliedAoTarget && aoUvChannel != 1)
+                {
+                    var uvDonor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
+                    if (uvDonor != null)
+                    {
+                        MergeUvComponentFromDonor(sidecarMesh, uvDonor, aoUvChannel, aoUvComponent);
+                        var auxiliaryUvList = new List<Vector2>();
+                        sidecarMesh.GetUVs(aoUvChannel, auxiliaryUvList);
+                        if (auxiliaryUvList.Count == sidecarMesh.vertexCount)
+                        {
+                            auxiliaryUv = auxiliaryUvList.ToArray();
+                            auxiliaryTargetUvChannel = aoUvChannel;
+                        }
+                    }
+                }
+
+                var primaryUvList = new List<Vector2>();
+                sidecarMesh.GetUVs(1, primaryUvList);
+                Vector2[] primaryUv = primaryUvList.Count == sidecarMesh.vertexCount
+                    ? primaryUvList.ToArray()
+                    : null;
+                int primaryTargetUvChannel = 1;
+                if (primaryUv == null && auxiliaryUv != null)
+                {
+                    primaryUv = auxiliaryUv;
+                    primaryTargetUvChannel = auxiliaryTargetUvChannel;
+                    auxiliaryUv = null;
+                    auxiliaryTargetUvChannel = -1;
+                }
+
+                if (primaryUv == null)
+                    return false;
+
+                var positions = sidecarMesh.vertices;
+                var uv0List = new List<Vector2>();
+                (entry.originalMesh ?? resultMesh).GetUVs(0, uv0List);
+
+                string meshName = entry.fbxMesh != null
+                    ? entry.fbxMesh.name
+                    : (entry.originalMesh != null ? entry.originalMesh.name : resultMesh.name);
+                MeshFingerprint fp = entry.fbxMesh != null ? MeshFingerprint.Compute(entry.fbxMesh) : null;
+
+                sidecarEntry = new MeshUv2Entry
+                {
+                    meshName = meshName,
+                    uv2 = primaryUv,
+                    welded = entry.wasWelded,
+                    edgeWelded = entry.wasEdgeWelded,
+                    vertPositions = positions,
+                    vertUv0 = uv0List.ToArray(),
+                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
+                    toolVersion = Uv2DataAsset.ToolVersionStr,
+                    sourceFingerprint = fp,
+                    targetUvChannel = primaryTargetUvChannel,
+                    auxiliaryUv = auxiliaryUv,
+                    auxiliaryTargetUvChannel = auxiliaryTargetUvChannel,
+                    stepMeshopt = entry.wasWelded,
+                    stepEdgeWeld = entry.wasEdgeWelded,
+                    stepSymmetrySplit = entry.wasSymmetrySplit,
+                    stepRepack = (entry.lodIndex == ctx.SourceLodIndex),
+                    stepTransfer = (entry.lodIndex != ctx.SourceLodIndex),
+                };
+                return true;
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(sidecarMesh);
+            }
         }
 
         public void ExportFbxPublic(bool overwriteSource) => ExportFbx(overwriteSource);
@@ -1782,35 +1847,10 @@ namespace LightmapUvTool
             foreach (var (e, resultMesh) in entries)
             {
                 if (resultMesh == null) continue;
-                var uv2List = new List<Vector2>();
-                resultMesh.GetUVs(1, uv2List);
-                if (uv2List.Count == 0) continue;
+                if (!TryBuildSidecarEntry(e, resultMesh, out var sidecarEntry))
+                    continue;
 
-                var positions = resultMesh.vertices;
-                var uv0List = new List<Vector2>();
-                (e.originalMesh ?? resultMesh).GetUVs(0, uv0List);
-
-                string meshName = e.fbxMesh != null ? e.fbxMesh.name : e.originalMesh.name;
-                MeshFingerprint fp = e.fbxMesh != null ? MeshFingerprint.Compute(e.fbxMesh) : null;
-
-                data.Set(new MeshUv2Entry
-                {
-                    meshName = meshName,
-                    uv2 = uv2List.ToArray(),
-                    welded = e.wasWelded,
-                    edgeWelded = e.wasEdgeWelded,
-                    vertPositions = positions,
-                    vertUv0 = uv0List.ToArray(),
-                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
-                    toolVersion = Uv2DataAsset.ToolVersionStr,
-                    sourceFingerprint = fp,
-                    targetUvChannel = 1,
-                    stepMeshopt = e.wasWelded,
-                    stepEdgeWeld = e.wasEdgeWelded,
-                    stepSymmetrySplit = e.wasSymmetrySplit,
-                    stepRepack = (e.lodIndex == ctx.SourceLodIndex),
-                    stepTransfer = (e.lodIndex != ctx.SourceLodIndex),
-                });
+                data.Set(sidecarEntry);
                 saved++;
             }
 
