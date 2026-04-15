@@ -2971,6 +2971,8 @@ namespace LightmapUvTool
         {
             string baseName = UvToolContext.ExtractGroupKey(root.name);
             if (string.IsNullOrEmpty(baseName)) baseName = root.name;
+            baseName = MeshHygieneUtility.SanitizeName(baseName);
+            if (string.IsNullOrEmpty(baseName)) baseName = "Unnamed";
 
             var rootMf = root.GetComponent<MeshFilter>();
             var rootMr = root.GetComponent<MeshRenderer>();
@@ -3010,21 +3012,35 @@ namespace LightmapUvTool
             {
                 if (colSet.Contains(child.gameObject)) continue;
                 var mf = child.GetComponent<MeshFilter>();
-                if (mf == null || mf.sharedMesh == null) continue;
-                lodCandidates.Add((child, MeshHygieneUtility.GetTriangleCount(mf.sharedMesh)));
+                var smr = child.GetComponent<SkinnedMeshRenderer>();
+                var mesh = mf != null ? mf.sharedMesh : (smr != null ? smr.sharedMesh : null);
+                if (mesh == null) continue;
+                lodCandidates.Add((child, MeshHygieneUtility.GetTriangleCount(mesh)));
             }
 
             // Sort by polycount descending (LOD0 = highest)
             lodCandidates.Sort((a, b) => b.polyCount.CompareTo(a.polyCount));
 
             // Rename to _LOD0, _LOD1, etc.
+            // Use a temporary naming pass first to avoid collisions when
+            // children already contain one of the target names.
             for (int i = 0; i < lodCandidates.Count; i++)
             {
-                string newName = baseName + "_LOD" + i;
-                if (lodCandidates[i].t.name != newName)
+                string tmpName = "__UVTMP_LOD_" + i + "_" + Guid.NewGuid().ToString("N");
+                if (lodCandidates[i].t.name != tmpName)
                 {
                     Undo.RecordObject(lodCandidates[i].t.gameObject, "Rename LOD");
-                    lodCandidates[i].t.name = newName;
+                    lodCandidates[i].t.name = tmpName;
+                }
+            }
+
+            for (int i = 0; i < lodCandidates.Count; i++)
+            {
+                string finalName = baseName + "_LOD" + i;
+                if (lodCandidates[i].t.name != finalName)
+                {
+                    Undo.RecordObject(lodCandidates[i].t.gameObject, "Rename LOD");
+                    lodCandidates[i].t.name = finalName;
                 }
             }
 
