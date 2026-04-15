@@ -1235,6 +1235,10 @@ namespace LightmapUvTool
                     for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
                     {
                         var ch = tempRoot.transform.GetChild(ci);
+                        // Preserve existing collision nodes from source FBX even when
+                        // they are not part of mesh transfer entries.
+                        if (MeshHygieneUtility.IsCollisionNodeName(ch.name))
+                            continue;
                         if (!validNames.Contains(ch.name))
                             UnityEngine.Object.DestroyImmediate(ch.gameObject);
                     }
