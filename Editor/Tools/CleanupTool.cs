@@ -3030,7 +3030,7 @@ namespace LightmapUvTool
                     dstMr.scaleInLightmap = srcMr.scaleInLightmap;
                 }
                 GameObjectUtility.SetStaticEditorFlags(lod0Child,
-                    GameObjectUtility.GetStaticEditorFlags(root));
+                    GameObjectUtility.GetStaticEditorFlags(root.gameObject));
                 Undo.DestroyObjectImmediate(rootMr);
             }
             // MeshCollider stays on the node (root) — the convention is
