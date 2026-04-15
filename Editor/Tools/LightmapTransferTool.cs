@@ -995,6 +995,38 @@ namespace LightmapUvTool
             }
         }
 
+        static void OverwriteUvChannel(Mesh exportMesh, Mesh sourceMesh, int channel)
+        {
+            if (exportMesh == null || sourceMesh == null) return;
+            if (channel < 0 || channel > 7) return;
+            if (sourceMesh.vertexCount != exportMesh.vertexCount) return;
+            var attr = (VertexAttribute)((int)VertexAttribute.TexCoord0 + channel);
+            if (!sourceMesh.HasVertexAttribute(attr)) return;
+
+            int dim = sourceMesh.GetVertexAttributeDimension(attr);
+            if (dim <= 2)
+            {
+                var uv = new List<Vector2>();
+                sourceMesh.GetUVs(channel, uv);
+                if (uv.Count == exportMesh.vertexCount)
+                    exportMesh.SetUVs(channel, uv);
+            }
+            else if (dim == 3)
+            {
+                var uv = new List<Vector3>();
+                sourceMesh.GetUVs(channel, uv);
+                if (uv.Count == exportMesh.vertexCount)
+                    exportMesh.SetUVs(channel, uv);
+            }
+            else
+            {
+                var uv = new List<Vector4>();
+                sourceMesh.GetUVs(channel, uv);
+                if (uv.Count == exportMesh.vertexCount)
+                    exportMesh.SetUVs(channel, uv);
+            }
+        }
+
         public void ExportFbxPublic(bool overwriteSource) => ExportFbx(overwriteSource);
         public void ApplyUv2Public() => ApplyUv2ToFbx();
         public void SaveAllPublic() => SaveAll();
@@ -1147,7 +1179,12 @@ namespace LightmapUvTool
                         if (entry.fbxMesh != null)
                             PreserveUvChannels(exportMesh, entry.fbxMesh);
                         if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
+                        {
                             PreserveUvChannels(exportMesh, entry.originalMesh);
+                            // AO often writes into UV2 components. Ensure UV2 from the
+                            // working/original mesh wins so overwrite export persists AO.
+                            OverwriteUvChannel(exportMesh, entry.originalMesh, 1);
+                        }
                         string meshName = ResolveExportMeshName(entry, resultMesh);
                         meshReplacements[meshName] = exportMesh;
                         if (entry.renderer != null)
@@ -1207,7 +1244,10 @@ namespace LightmapUvTool
                         if (entry.fbxMesh != null)
                             PreserveUvChannels(exportMesh, entry.fbxMesh);
                         if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
+                        {
                             PreserveUvChannels(exportMesh, entry.originalMesh);
+                            OverwriteUvChannel(exportMesh, entry.originalMesh, 1);
+                        }
                         newMf.sharedMesh = exportMesh;
                         var mr = child.AddComponent<MeshRenderer>();
                         if (lastLodRendererTemplate != null)
@@ -1515,7 +1555,22 @@ namespace LightmapUvTool
         {
             if (src == null || dst == null) return;
 
-            dst.sharedMaterials = src.sharedMaterials;
+            var srcMats = src.sharedMaterials;
+            bool hasPreviewMat = false;
+            for (int i = 0; i < srcMats.Length; i++)
+            {
+                var m = srcMats[i];
+                string shaderName = m != null && m.shader != null ? m.shader.name : null;
+                if (!string.IsNullOrEmpty(shaderName) &&
+                    (shaderName.Equals("Hidden/Internal-Colored", StringComparison.OrdinalIgnoreCase) ||
+                     shaderName.StartsWith("Hidden/LightmapUvTool/", StringComparison.OrdinalIgnoreCase)))
+                {
+                    hasPreviewMat = true;
+                    break;
+                }
+            }
+            if (!hasPreviewMat)
+                dst.sharedMaterials = srcMats;
             dst.shadowCastingMode = src.shadowCastingMode;
             dst.receiveShadows = src.receiveShadows;
             dst.lightProbeUsage = src.lightProbeUsage;
