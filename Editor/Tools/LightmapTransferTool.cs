@@ -1177,12 +1177,6 @@ namespace LightmapUvTool
                         exportPath = "Assets" + exportPath.Substring(dataPath.Length);
                 }
 
-                // For overwrite flow, lock import settings BEFORE export.
-                // This avoids an extra post-export reimport that can let third-party
-                // importers (e.g. Bakery) touch UV2 again before user validation.
-                if (overwriteSource)
-                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
-
                 // Ensure FBX meshes are readable so the FBX Exporter can access
                 // vertex data (especially for _COL meshes without sidecar data).
                 var srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
