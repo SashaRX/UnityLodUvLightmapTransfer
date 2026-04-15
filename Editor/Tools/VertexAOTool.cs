@@ -567,7 +567,7 @@ namespace LightmapUvTool
             if (candidateRenderers == null || candidateRenderers.Length == 0)
                 return;
 
-            Bounds targetBounds = ComputeRendererBounds(batch.targetEntries);
+            var targetAnchors = ComputeTargetAnchors(batch.targetEntries, out Bounds targetBounds);
             float effectiveRadius = Mathf.Max(targetBounds.extents.magnitude * settings.occluderRadiusMultiplier, 0.01f);
 
             var targetRendererIds = new HashSet<int>(
@@ -601,23 +601,23 @@ namespace LightmapUvTool
                     continue;
                 if (MeshHygieneUtility.IsCollisionNodeName(renderer.name))
                     continue;
-                if (!TryGetRendererMesh(renderer, out var mesh))
+                if (!TryGetRendererOccluderData(renderer, out var mesh, out var matrix, out var bounds, out var anchor))
                     continue;
-                if (!IsWithinOccluderRange(targetBounds, renderer.bounds, effectiveRadius))
+                if (!IsWithinOccluderRange(targetBounds, targetAnchors, bounds, anchor, effectiveRadius))
                     continue;
 
-                batch.occluderMeshes.Add((mesh, renderer.transform.localToWorldMatrix));
+                batch.occluderMeshes.Add((mesh, matrix));
                 batch.renderableOccluderCount++;
             }
 
             if (!settings.includeCollisionOccluders)
                 return;
 
-            int liveColliderCount = CollectLiveCollisionOccluders(batch, root, targetBounds, effectiveRadius);
+            int liveColliderCount = CollectLiveCollisionOccluders(batch, root, targetBounds, targetAnchors, effectiveRadius);
             if (liveColliderCount > 0 || string.IsNullOrEmpty(ctx?.SourceFbxPath))
                 return;
 
-            CollectSidecarCollisionOccluders(batch, candidateRenderers, targetBounds, effectiveRadius);
+            CollectSidecarCollisionOccluders(batch, candidateRenderers, targetBounds, targetAnchors, effectiveRadius);
         }
 
         GameObject ResolveOccluderRoot(List<MeshEntry> targetEntries)
@@ -637,6 +637,7 @@ namespace LightmapUvTool
             LodBakeBatch batch,
             GameObject root,
             Bounds targetBounds,
+            List<Vector3> targetAnchors,
             float effectiveRadius)
         {
             int added = 0;
@@ -647,9 +648,9 @@ namespace LightmapUvTool
                     continue;
                 if (!seen.Add(go.GetInstanceID()))
                     continue;
-                if (!TryGetCollisionMesh(go, out var mesh, out var matrix, out var bounds))
+                if (!TryGetCollisionMesh(go, out var mesh, out var matrix, out var bounds, out var anchor))
                     continue;
-                if (!IsWithinOccluderRange(targetBounds, bounds, effectiveRadius))
+                if (!IsWithinOccluderRange(targetBounds, targetAnchors, bounds, anchor, effectiveRadius))
                     continue;
 
                 batch.occluderMeshes.Add((mesh, matrix));
@@ -663,6 +664,7 @@ namespace LightmapUvTool
             LodBakeBatch batch,
             Renderer[] candidateRenderers,
             Bounds targetBounds,
+            List<Vector3> targetAnchors,
             float effectiveRadius)
         {
             var sidecarEntries = CollisionMeshTool.GetCollisionMeshesFromSidecar(ctx.SourceFbxPath);
@@ -699,7 +701,8 @@ namespace LightmapUvTool
                         continue;
 
                     var bounds = TransformBounds(mesh.bounds, matrix);
-                    if (!IsWithinOccluderRange(targetBounds, bounds, effectiveRadius))
+                    var anchor = GetMeshWorldAnchor(mesh, matrix);
+                    if (!IsWithinOccluderRange(targetBounds, targetAnchors, bounds, anchor, effectiveRadius))
                         continue;
 
                     batch.occluderMeshes.Add((mesh, matrix));
@@ -779,11 +782,32 @@ namespace LightmapUvTool
             return false;
         }
 
-        static bool TryGetCollisionMesh(GameObject go, out Mesh mesh, out Matrix4x4 matrix, out Bounds bounds)
+        static bool TryGetRendererOccluderData(
+            Renderer renderer,
+            out Mesh mesh,
+            out Matrix4x4 matrix,
+            out Bounds bounds,
+            out Vector3 anchor)
         {
             mesh = null;
             matrix = Matrix4x4.identity;
             bounds = default;
+            anchor = Vector3.zero;
+            if (!TryGetRendererMesh(renderer, out mesh) || mesh == null)
+                return false;
+
+            matrix = renderer.transform.localToWorldMatrix;
+            bounds = GetRendererWorldBounds(renderer, mesh, matrix);
+            anchor = GetRendererWorldAnchor(renderer, mesh, matrix);
+            return true;
+        }
+
+        static bool TryGetCollisionMesh(GameObject go, out Mesh mesh, out Matrix4x4 matrix, out Bounds bounds, out Vector3 anchor)
+        {
+            mesh = null;
+            matrix = Matrix4x4.identity;
+            bounds = default;
+            anchor = Vector3.zero;
             if (go == null)
                 return false;
 
@@ -803,30 +827,63 @@ namespace LightmapUvTool
 
             matrix = go.transform.localToWorldMatrix;
             bounds = TransformBounds(mesh.bounds, matrix);
+            anchor = GetMeshWorldAnchor(mesh, matrix);
             return true;
         }
 
-        static Bounds ComputeRendererBounds(List<MeshEntry> entries)
+        static List<Vector3> ComputeTargetAnchors(List<MeshEntry> entries, out Bounds bounds)
         {
-            Bounds bounds = default;
+            bounds = default;
             bool hasBounds = false;
+            var anchors = new List<Vector3>();
             foreach (var entry in entries)
             {
                 if (entry?.renderer == null)
                     continue;
 
+                var mesh = entry.originalMesh ?? entry.fbxMesh;
+                if (mesh == null)
+                    continue;
+
+                var matrix = entry.renderer.transform.localToWorldMatrix;
+                var worldBounds = GetRendererWorldBounds(entry.renderer, mesh, matrix);
+                anchors.Add(GetRendererWorldAnchor(entry.renderer, mesh, matrix));
+
                 if (!hasBounds)
                 {
-                    bounds = entry.renderer.bounds;
+                    bounds = worldBounds;
                     hasBounds = true;
                 }
                 else
                 {
-                    bounds.Encapsulate(entry.renderer.bounds);
+                    bounds.Encapsulate(worldBounds);
                 }
             }
 
-            return hasBounds ? bounds : new Bounds(Vector3.zero, Vector3.one * 0.01f);
+            if (!hasBounds)
+                bounds = new Bounds(Vector3.zero, Vector3.one * 0.01f);
+            return anchors;
+        }
+
+        static Bounds GetRendererWorldBounds(Renderer renderer, Mesh mesh, Matrix4x4 matrix)
+        {
+            if (renderer is SkinnedMeshRenderer || mesh == null)
+                return renderer.bounds;
+            return TransformBounds(mesh.bounds, matrix);
+        }
+
+        static Vector3 GetRendererWorldAnchor(Renderer renderer, Mesh mesh, Matrix4x4 matrix)
+        {
+            if (renderer is SkinnedMeshRenderer || mesh == null)
+                return renderer.bounds.center;
+            return GetMeshWorldAnchor(mesh, matrix);
+        }
+
+        static Vector3 GetMeshWorldAnchor(Mesh mesh, Matrix4x4 matrix)
+        {
+            if (mesh == null)
+                return matrix.MultiplyPoint3x4(Vector3.zero);
+            return matrix.MultiplyPoint3x4(mesh.bounds.center);
         }
 
         static Bounds TransformBounds(Bounds localBounds, Matrix4x4 matrix)
@@ -849,8 +906,28 @@ namespace LightmapUvTool
             return worldBounds;
         }
 
-        static bool IsWithinOccluderRange(Bounds targetBounds, Bounds candidateBounds, float radius)
-            => BoundsDistance(targetBounds, candidateBounds) <= radius;
+        static bool IsWithinOccluderRange(
+            Bounds targetBounds,
+            List<Vector3> targetAnchors,
+            Bounds candidateBounds,
+            Vector3 candidateAnchor,
+            float radius)
+        {
+            if (BoundsDistance(targetBounds, candidateBounds) <= radius)
+                return true;
+
+            if (targetAnchors == null || targetAnchors.Count == 0)
+                return false;
+
+            float sqrRadius = radius * radius;
+            for (int i = 0; i < targetAnchors.Count; i++)
+            {
+                if ((targetAnchors[i] - candidateAnchor).sqrMagnitude <= sqrRadius)
+                    return true;
+            }
+
+            return false;
+        }
 
         static float BoundsDistance(Bounds a, Bounds b)
         {
