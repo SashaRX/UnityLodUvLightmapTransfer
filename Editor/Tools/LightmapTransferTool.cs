@@ -1790,6 +1790,9 @@ namespace LightmapUvTool
         static void NormalizeExportHierarchy(GameObject root)
         {
             string baseName = root.name;
+            string sanitizedBaseName = MeshHygieneUtility.SanitizeName(baseName);
+            if (string.IsNullOrEmpty(sanitizedBaseName))
+                sanitizedBaseName = "Unnamed";
 
             // Reset root transform to identity (clean pivot at origin)
             root.transform.localPosition = Vector3.zero;
@@ -1799,10 +1802,57 @@ namespace LightmapUvTool
             // Rename direct child that matches root name (LOD0 without suffix) to baseName_LOD0
             foreach (Transform child in root.transform)
             {
-                if (child.name == baseName)
+                if (child.name == baseName || child.name == sanitizedBaseName)
                 {
-                    child.name = baseName + "_LOD0";
+                    child.name = sanitizedBaseName + "_LOD0";
                     break;
+                }
+            }
+
+            // Normalize direct child LOD names to contiguous _LOD0.._LODN suffixes.
+            // This prevents importer-side warnings ("_LOD1 found but no _LOD0")
+            // when source names contained invalid characters (e.g. dots) and were
+            // sanitized inconsistently across tools.
+            var directLodChildren = new List<(Transform transform, int index)>();
+            foreach (Transform child in root.transform)
+            {
+                if (MeshHygieneUtility.IsCollisionNodeName(child.name))
+                    continue;
+
+                var mf = child.GetComponent<MeshFilter>();
+                var smr = child.GetComponent<SkinnedMeshRenderer>();
+                bool hasMesh = (mf != null && mf.sharedMesh != null) ||
+                               (smr != null && smr.sharedMesh != null);
+                if (!hasMesh)
+                    continue;
+
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    child.name,
+                    @"_LOD(\d+)$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (!match.Success)
+                    continue;
+
+                int parsedIndex;
+                if (!int.TryParse(match.Groups[1].Value, out parsedIndex))
+                    continue;
+
+                directLodChildren.Add((child, parsedIndex));
+            }
+
+            if (directLodChildren.Count > 0)
+            {
+                directLodChildren.Sort((a, b) =>
+                {
+                    int cmp = a.index.CompareTo(b.index);
+                    return cmp != 0 ? cmp : a.transform.GetSiblingIndex().CompareTo(b.transform.GetSiblingIndex());
+                });
+
+                for (int i = 0; i < directLodChildren.Count; i++)
+                {
+                    string normalizedName = sanitizedBaseName + "_LOD" + i;
+                    if (directLodChildren[i].transform.name != normalizedName)
+                        directLodChildren[i].transform.name = normalizedName;
                 }
             }
 
