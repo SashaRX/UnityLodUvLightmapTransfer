@@ -901,49 +901,30 @@ namespace LightmapUvTool
 
         Mesh GetResultMesh(MeshEntry e)
         {
-            Mesh SelectWithUv2Fallback(Mesh preferred)
-            {
-                if (preferred == null) return null;
-                if (HasUvChannelData(preferred, 1)) return preferred;
-
-                var candidates = new[] { e.originalMesh, e.transferredMesh, e.repackedMesh, e.fbxMesh };
-                for (int i = 0; i < candidates.Length; i++)
-                {
-                    var c = candidates[i];
-                    if (c == null || c == preferred) continue;
-                    if (c.vertexCount != preferred.vertexCount) continue;
-                    if (c.subMeshCount != preferred.subMeshCount) continue;
-                    if (HasUvChannelData(c, 1))
-                        return c;
-                }
-
-                return preferred;
-            }
-
             // Source LOD: prefer repacked mesh
             if (e.lodIndex == ctx.SourceLodIndex && e.repackedMesh != null)
-                return SelectWithUv2Fallback(e.repackedMesh);
+                return e.repackedMesh;
             // Target LODs: prefer transferred mesh
             if (e.transferredMesh != null)
-                return SelectWithUv2Fallback(e.transferredMesh);
+                return e.transferredMesh;
             // Welded/modified meshes
             if (e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit)
-                return SelectWithUv2Fallback(e.originalMesh);
+                return e.originalMesh;
             // Generated LODs or any mesh that differs from the original FBX
             if (e.originalMesh != null && e.originalMesh != e.fbxMesh)
-                return SelectWithUv2Fallback(e.originalMesh);
+                return e.originalMesh;
             // Generated LODs: originalMesh == fbxMesh but it's not from a .fbx file
             if (e.originalMesh != null)
             {
                 string path = AssetDatabase.GetAssetPath(e.originalMesh);
                 // Mesh not from .fbx = generated in memory or .asset → include it
                 if (string.IsNullOrEmpty(path) || !path.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
-                    return SelectWithUv2Fallback(e.originalMesh);
+                    return e.originalMesh;
             }
             // Fallback: return original mesh as-is for clean re-export
             // (allows "Overwrite Source FBX" to fix FBX metadata like
             // material names and collider attributes without UV2 pipeline)
-            return SelectWithUv2Fallback(e.originalMesh);
+            return e.originalMesh;
         }
 
         static string ResolveExportMeshName(MeshEntry entry, Mesh resultMesh)
@@ -1014,36 +995,24 @@ namespace LightmapUvTool
             }
         }
 
-        static void OverwriteUvChannel(Mesh exportMesh, Mesh sourceMesh, int channel)
+        static void MergeUv2XFromDonor(Mesh exportMesh, Mesh donorMesh)
         {
-            if (exportMesh == null || sourceMesh == null) return;
-            if (channel < 0 || channel > 7) return;
-            if (sourceMesh.vertexCount != exportMesh.vertexCount) return;
-            var attr = (VertexAttribute)((int)VertexAttribute.TexCoord0 + channel);
-            if (!sourceMesh.HasVertexAttribute(attr)) return;
+            if (exportMesh == null || donorMesh == null) return;
+            if (exportMesh.vertexCount != donorMesh.vertexCount) return;
 
-            int dim = sourceMesh.GetVertexAttributeDimension(attr);
-            if (dim <= 2)
-            {
-                var uv = new List<Vector2>();
-                sourceMesh.GetUVs(channel, uv);
-                if (uv.Count == exportMesh.vertexCount)
-                    exportMesh.SetUVs(channel, uv);
-            }
-            else if (dim == 3)
-            {
-                var uv = new List<Vector3>();
-                sourceMesh.GetUVs(channel, uv);
-                if (uv.Count == exportMesh.vertexCount)
-                    exportMesh.SetUVs(channel, uv);
-            }
-            else
-            {
-                var uv = new List<Vector4>();
-                sourceMesh.GetUVs(channel, uv);
-                if (uv.Count == exportMesh.vertexCount)
-                    exportMesh.SetUVs(channel, uv);
-            }
+            var donorUv2 = new List<Vector2>();
+            donorMesh.GetUVs(1, donorUv2);
+            if (donorUv2.Count != exportMesh.vertexCount) return;
+
+            var exportUv2 = new List<Vector2>();
+            exportMesh.GetUVs(1, exportUv2);
+            if (exportUv2.Count != exportMesh.vertexCount)
+                exportUv2 = new List<Vector2>(donorUv2);
+
+            for (int i = 0; i < exportUv2.Count; i++)
+                exportUv2[i] = new Vector2(donorUv2[i].x, exportUv2[i].y);
+
+            exportMesh.SetUVs(1, exportUv2);
         }
 
         static bool HasUvChannelData(Mesh mesh, int channel)
@@ -1237,7 +1206,7 @@ namespace LightmapUvTool
                         // have UV2 at all, so pick the best available donor.
                         var uv2Donor = SelectUv2Donor(entry, resultMesh);
                         if (uv2Donor != null)
-                            OverwriteUvChannel(exportMesh, uv2Donor, 1);
+                            MergeUv2XFromDonor(exportMesh, uv2Donor);
                         string meshName = ResolveExportMeshName(entry, resultMesh);
                         meshReplacements[meshName] = exportMesh;
                         if (entry.renderer != null)
@@ -1302,7 +1271,7 @@ namespace LightmapUvTool
                         }
                         var uv2Donor = SelectUv2Donor(entry, resultMesh);
                         if (uv2Donor != null)
-                            OverwriteUvChannel(exportMesh, uv2Donor, 1);
+                            MergeUv2XFromDonor(exportMesh, uv2Donor);
                         newMf.sharedMesh = exportMesh;
                         var mr = child.AddComponent<MeshRenderer>();
                         if (lastLodRendererTemplate != null)
