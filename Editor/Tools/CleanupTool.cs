@@ -1307,7 +1307,7 @@ namespace LightmapUvTool
             bool rootHasRenderableMesh =
                 (rootMf != null && rootMf.sharedMesh != null) ||
                 (rootSmr != null && rootSmr.sharedMesh != null);
-            if (rootHasRenderableMesh && !IsRootRendererUsedAsLod0(root, lods))
+            if (rootHasRenderableMesh && !IsRootRendererUsedAsLod0(root.gameObject, lods))
             {
                 sceneIssues.Add(new SceneIssue
                 {
