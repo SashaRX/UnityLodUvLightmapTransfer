@@ -1359,6 +1359,14 @@ namespace LightmapUvTool
                         if (chMf != null && chMf.sharedMesh != null &&
                             colliderMeshNames.Contains(chMf.sharedMesh.name))
                             continue;
+                        var chSmr = ch.GetComponent<SkinnedMeshRenderer>();
+                        bool hasRenderableMesh =
+                            (chMf != null && chMf.sharedMesh != null) ||
+                            (chSmr != null && chSmr.sharedMesh != null);
+                        // Keep structural/container nodes (no direct mesh on node).
+                        // Removing them flattens FBX hierarchy and can break prefabs.
+                        if (!hasRenderableMesh)
+                            continue;
                         if (!validNames.Contains(ch.name))
                             UnityEngine.Object.DestroyImmediate(ch.gameObject);
                     }
