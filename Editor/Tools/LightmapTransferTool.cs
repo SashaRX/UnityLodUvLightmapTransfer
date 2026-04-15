@@ -901,30 +901,49 @@ namespace LightmapUvTool
 
         Mesh GetResultMesh(MeshEntry e)
         {
+            Mesh SelectWithUv2Fallback(Mesh preferred)
+            {
+                if (preferred == null) return null;
+                if (HasUvChannelData(preferred, 1)) return preferred;
+
+                var candidates = new[] { e.originalMesh, e.transferredMesh, e.repackedMesh, e.fbxMesh };
+                for (int i = 0; i < candidates.Length; i++)
+                {
+                    var c = candidates[i];
+                    if (c == null || c == preferred) continue;
+                    if (c.vertexCount != preferred.vertexCount) continue;
+                    if (c.subMeshCount != preferred.subMeshCount) continue;
+                    if (HasUvChannelData(c, 1))
+                        return c;
+                }
+
+                return preferred;
+            }
+
             // Source LOD: prefer repacked mesh
             if (e.lodIndex == ctx.SourceLodIndex && e.repackedMesh != null)
-                return e.repackedMesh;
+                return SelectWithUv2Fallback(e.repackedMesh);
             // Target LODs: prefer transferred mesh
             if (e.transferredMesh != null)
-                return e.transferredMesh;
+                return SelectWithUv2Fallback(e.transferredMesh);
             // Welded/modified meshes
             if (e.wasWelded || e.wasEdgeWelded || e.wasSymmetrySplit)
-                return e.originalMesh;
+                return SelectWithUv2Fallback(e.originalMesh);
             // Generated LODs or any mesh that differs from the original FBX
             if (e.originalMesh != null && e.originalMesh != e.fbxMesh)
-                return e.originalMesh;
+                return SelectWithUv2Fallback(e.originalMesh);
             // Generated LODs: originalMesh == fbxMesh but it's not from a .fbx file
             if (e.originalMesh != null)
             {
                 string path = AssetDatabase.GetAssetPath(e.originalMesh);
                 // Mesh not from .fbx = generated in memory or .asset → include it
                 if (string.IsNullOrEmpty(path) || !path.EndsWith(".fbx", System.StringComparison.OrdinalIgnoreCase))
-                    return e.originalMesh;
+                    return SelectWithUv2Fallback(e.originalMesh);
             }
             // Fallback: return original mesh as-is for clean re-export
             // (allows "Overwrite Source FBX" to fix FBX metadata like
             // material names and collider attributes without UV2 pipeline)
-            return e.originalMesh;
+            return SelectWithUv2Fallback(e.originalMesh);
         }
 
         static string ResolveExportMeshName(MeshEntry entry, Mesh resultMesh)
