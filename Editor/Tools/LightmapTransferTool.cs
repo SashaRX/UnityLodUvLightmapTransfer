@@ -927,6 +927,33 @@ namespace LightmapUvTool
             return e.originalMesh;
         }
 
+        static string ResolveExportMeshName(MeshEntry entry, Mesh resultMesh)
+        {
+            if (entry?.fbxMesh != null && !string.IsNullOrEmpty(entry.fbxMesh.name))
+                return entry.fbxMesh.name;
+
+            string fallback = entry?.originalMesh != null ? entry.originalMesh.name : null;
+            if (string.IsNullOrEmpty(fallback) && resultMesh != null)
+                fallback = resultMesh.name;
+
+            // Guard against transient preview/internal names leaking into exported FBX nodes.
+            if (!string.IsNullOrEmpty(fallback) &&
+                (fallback.StartsWith("Hidden/", StringComparison.OrdinalIgnoreCase) ||
+                 fallback.StartsWith("Hidden_", StringComparison.OrdinalIgnoreCase)))
+            {
+                if (entry?.renderer != null && !string.IsNullOrEmpty(entry.renderer.name))
+                    return entry.renderer.name;
+            }
+
+            if (!string.IsNullOrEmpty(fallback))
+                return fallback;
+
+            if (entry?.renderer != null && !string.IsNullOrEmpty(entry.renderer.name))
+                return entry.renderer.name;
+
+            return "Mesh";
+        }
+
         /// <summary>
         /// Copy non-trivial UV channels from source mesh to export mesh.
         /// Preserves channels that have meaningful data (not empty, not all 0, not all 1).
@@ -966,6 +993,94 @@ namespace LightmapUvTool
                     if (uv.Count > 0) exportMesh.SetUVs(ch, uv);
                 }
             }
+        }
+
+        static bool TryGetAppliedAoUvTarget(out int uvChannel, out int uvComponent)
+        {
+            uvChannel = -1;
+            uvComponent = 0;
+
+            var ch = VertexAOTool.LastAppliedTargetChannel;
+            if (!ch.HasValue) return false;
+
+            int v = (int)ch.Value;
+            if (v < (int)AOTargetChannel.UV0_X) return false; // AO was stored in vertex color
+
+            uvChannel = (v - (int)AOTargetChannel.UV0_X) / 2;
+            uvComponent = (v - (int)AOTargetChannel.UV0_X) % 2; // 0=X, 1=Y
+            // UV1 (Unity UV set index 1) is reserved for lightmap transfer data.
+            // Never merge AO into this channel during FBX export.
+            if (uvChannel == 1) return false;
+            return true;
+        }
+
+        static void MergeUvComponentFromDonor(Mesh exportMesh, Mesh donorMesh, int uvChannel, int uvComponent)
+        {
+            if (exportMesh == null || donorMesh == null) return;
+            if (exportMesh.vertexCount != donorMesh.vertexCount) return;
+            if (uvChannel < 0 || uvChannel > 7) return;
+            if (uvComponent < 0 || uvComponent > 1) return;
+
+            var donorUv = new List<Vector2>();
+            donorMesh.GetUVs(uvChannel, donorUv);
+            if (donorUv.Count != exportMesh.vertexCount) return;
+
+            var exportUv = new List<Vector2>();
+            exportMesh.GetUVs(uvChannel, exportUv);
+            if (exportUv.Count != exportMesh.vertexCount)
+                exportUv = new List<Vector2>(donorUv);
+
+            for (int i = 0; i < exportUv.Count; i++)
+            {
+                var src = donorUv[i];
+                var dst = exportUv[i];
+                exportUv[i] = uvComponent == 0
+                    ? new Vector2(src.x, dst.y)
+                    : new Vector2(dst.x, src.y);
+            }
+
+            exportMesh.SetUVs(uvChannel, exportUv);
+        }
+
+        static bool HasUvChannelData(Mesh mesh, int channel)
+        {
+            if (mesh == null || channel < 0 || channel > 7) return false;
+            var attr = (VertexAttribute)((int)VertexAttribute.TexCoord0 + channel);
+            if (!mesh.HasVertexAttribute(attr)) return false;
+
+            int dim = mesh.GetVertexAttributeDimension(attr);
+            int vCount = mesh.vertexCount;
+            if (dim <= 2)
+            {
+                var uv = new List<Vector2>();
+                mesh.GetUVs(channel, uv);
+                return uv.Count == vCount;
+            }
+            if (dim == 3)
+            {
+                var uv = new List<Vector3>();
+                mesh.GetUVs(channel, uv);
+                return uv.Count == vCount;
+            }
+
+            var uv4 = new List<Vector4>();
+            mesh.GetUVs(channel, uv4);
+            return uv4.Count == vCount;
+        }
+
+        static Mesh SelectUv2Donor(MeshEntry entry, Mesh resultMesh, int uvChannel)
+        {
+            // AO is written into selected UV component by VertexAOTool.ApplyToMesh,
+            // usually on original/fbx-backed working meshes.
+            // Keep transferred mesh last
+            // so UV1 transfer result stays authoritative while AO comes from AO donor.
+            var candidates = new[] { entry?.originalMesh, entry?.fbxMesh, entry?.repackedMesh, entry?.transferredMesh, resultMesh };
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                var m = candidates[i];
+                if (HasUvChannelData(m, uvChannel)) return m;
+            }
+            return null;
         }
 
         public void ExportFbxPublic(bool overwriteSource) => ExportFbx(overwriteSource);
@@ -1084,7 +1199,7 @@ namespace LightmapUvTool
                 // vertex data (especially for _COL meshes without sidecar data).
                 var srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
                 bool madeReadable = false;
-                if (srcImporter != null && !srcImporter.isReadable)
+                if (!overwriteSource && srcImporter != null && !srcImporter.isReadable)
                 {
                     srcImporter.isReadable = true;
                     Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
@@ -1105,6 +1220,7 @@ namespace LightmapUvTool
 
                     // Build lookup: original mesh name -> export mesh
                     var meshReplacements = new Dictionary<string, Mesh>();
+                    var meshRendererTemplates = new Dictionary<string, Renderer>();
                     foreach (var (entry, resultMesh) in entries)
                     {
                         var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
@@ -1113,9 +1229,21 @@ namespace LightmapUvTool
                         if (entry.fbxMesh != null)
                             PreserveUvChannels(exportMesh, entry.fbxMesh);
                         if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
+                        {
                             PreserveUvChannels(exportMesh, entry.originalMesh);
-                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        }
+                        // AO often writes into UV2 components. Source meshes may not
+                        // have UV2 at all, so pick the best available donor.
+                        if (TryGetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent))
+                        {
+                            var uv2Donor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
+                            if (uv2Donor != null)
+                                MergeUvComponentFromDonor(exportMesh, uv2Donor, aoUvChannel, aoUvComponent);
+                        }
+                        string meshName = ResolveExportMeshName(entry, resultMesh);
                         meshReplacements[meshName] = exportMesh;
+                        if (entry.renderer != null)
+                            meshRendererTemplates[meshName] = entry.renderer;
                     }
 
                     // Replace meshes in cloned hierarchy
@@ -1124,23 +1252,33 @@ namespace LightmapUvTool
                     {
                         if (mf.sharedMesh != null && meshReplacements.TryGetValue(mf.sharedMesh.name, out var replacement))
                         {
-                            replaced.Add(mf.sharedMesh.name);
+                            string meshName = mf.sharedMesh.name;
+                            replaced.Add(meshName);
                             mf.sharedMesh = replacement;
+                            if (meshRendererTemplates.TryGetValue(meshName, out var srcRenderer))
+                            {
+                                var dstRenderer = mf.GetComponent<MeshRenderer>();
+                                if (dstRenderer != null)
+                                    CopyRendererSettings(srcRenderer, dstRenderer);
+                            }
                         }
                     }
                     foreach (var smr in tempRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true))
                     {
                         if (smr.sharedMesh != null && meshReplacements.TryGetValue(smr.sharedMesh.name, out var replacement))
                         {
-                            replaced.Add(smr.sharedMesh.name);
+                            string meshName = smr.sharedMesh.name;
+                            replaced.Add(meshName);
                             smr.sharedMesh = replacement;
+                            if (meshRendererTemplates.TryGetValue(meshName, out var srcRenderer))
+                                CopyRendererSettings(srcRenderer, smr);
                         }
                     }
 
                     // Add meshes that weren't found in the clone (new LODs from generation)
                     foreach (var (entry, resultMesh) in entries)
                     {
-                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        string meshName = ResolveExportMeshName(entry, resultMesh);
                         if (replaced.Contains(meshName)) continue;
                         // Remove existing child with same name (from previous export)
                         for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
@@ -1161,7 +1299,15 @@ namespace LightmapUvTool
                         if (entry.fbxMesh != null)
                             PreserveUvChannels(exportMesh, entry.fbxMesh);
                         if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
+                        {
                             PreserveUvChannels(exportMesh, entry.originalMesh);
+                        }
+                        if (TryGetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent))
+                        {
+                            var uv2Donor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
+                            if (uv2Donor != null)
+                                MergeUvComponentFromDonor(exportMesh, uv2Donor, aoUvChannel, aoUvComponent);
+                        }
                         newMf.sharedMesh = exportMesh;
                         var mr = child.AddComponent<MeshRenderer>();
                         if (lastLodRendererTemplate != null)
@@ -1183,12 +1329,44 @@ namespace LightmapUvTool
                     var validNames = new HashSet<string>();
                     foreach (var (entry, resultMesh) in entries)
                     {
-                        string meshName = entry.fbxMesh != null ? entry.fbxMesh.name : resultMesh.name;
+                        string meshName = ResolveExportMeshName(entry, resultMesh);
                         validNames.Add(meshName);
                     }
+
+                    // Protect meshes referenced by MeshCollider components.
+                    // Some projects keep collision nodes without strict _COL naming,
+                    // and there can be multiple colliders in the hierarchy.
+                    var colliderMeshNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var colliderRootNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var mc in tempRoot.GetComponentsInChildren<MeshCollider>(true))
+                    {
+                        if (mc == null) continue;
+                        colliderRootNames.Add(mc.gameObject.name);
+                        if (mc.sharedMesh != null && !string.IsNullOrEmpty(mc.sharedMesh.name))
+                            colliderMeshNames.Add(mc.sharedMesh.name);
+                    }
+
                     for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
                     {
                         var ch = tempRoot.transform.GetChild(ci);
+                        // Preserve existing collision nodes from source FBX even when
+                        // they are not part of mesh transfer entries.
+                        if (MeshHygieneUtility.IsCollisionNodeName(ch.name))
+                            continue;
+                        if (colliderRootNames.Contains(ch.name))
+                            continue;
+                        var chMf = ch.GetComponent<MeshFilter>();
+                        if (chMf != null && chMf.sharedMesh != null &&
+                            colliderMeshNames.Contains(chMf.sharedMesh.name))
+                            continue;
+                        var chSmr = ch.GetComponent<SkinnedMeshRenderer>();
+                        bool hasRenderableMesh =
+                            (chMf != null && chMf.sharedMesh != null) ||
+                            (chSmr != null && chSmr.sharedMesh != null);
+                        // Keep structural/container nodes (no direct mesh on node).
+                        // Removing them flattens FBX hierarchy and can break prefabs.
+                        if (!hasRenderableMesh)
+                            continue;
                         if (!validNames.Contains(ch.name))
                             UnityEngine.Object.DestroyImmediate(ch.gameObject);
                     }
@@ -1342,6 +1520,7 @@ namespace LightmapUvTool
                     SaveSidecarForExport(sourceFbxPath, entries);
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
                 }
+
             }
 
             // Clean up scene-generated LOD objects from LodGenerationTool.
@@ -1471,7 +1650,22 @@ namespace LightmapUvTool
         {
             if (src == null || dst == null) return;
 
-            dst.sharedMaterials = src.sharedMaterials;
+            var srcMats = src.sharedMaterials;
+            bool hasPreviewMat = false;
+            for (int i = 0; i < srcMats.Length; i++)
+            {
+                var m = srcMats[i];
+                string shaderName = m != null && m.shader != null ? m.shader.name : null;
+                if (!string.IsNullOrEmpty(shaderName) &&
+                    (shaderName.Equals("Hidden/Internal-Colored", StringComparison.OrdinalIgnoreCase) ||
+                     shaderName.StartsWith("Hidden/LightmapUvTool/", StringComparison.OrdinalIgnoreCase)))
+                {
+                    hasPreviewMat = true;
+                    break;
+                }
+            }
+            if (!hasPreviewMat)
+                dst.sharedMaterials = srcMats;
             dst.shadowCastingMode = src.shadowCastingMode;
             dst.receiveShadows = src.receiveShadows;
             dst.lightProbeUsage = src.lightProbeUsage;
