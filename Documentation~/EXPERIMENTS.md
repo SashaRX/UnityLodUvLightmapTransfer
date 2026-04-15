@@ -102,6 +102,67 @@
 - **Логи этапов:** добавлены явные служебные логи старта этапов `Stage 1/2: Detect+Apply N-fold` и `Stage 2/2: Detect+Apply binary on remaining`.
 - **Итоговая диагностика:** итоговый лог `Split params` дополнен `applied splits total`, чтобы сверять число реально применённых split с числом сериализованных `SplitParams`.
 
+## Эксперимент 2026-04-15 — Adaptive `UV_NEAR/POS_FAR` для shell matching
+
+- **Гипотеза:** фиксированные пороги (`UV_NEAR`, `POS_FAR`) слишком жёсткие для крупных shell и слишком мягкие для мелких, поэтому:
+  - улучшится matching в **symmetry shell** (особенно при слабом scale drift между source/target);
+  - улучшится matching на **LOD2+ с похожими shell**, где несколько кандидатов близки по descriptor, но отличаются масштабом.
+- **Ожидаемый эффект:** рост процента корректных соответствий без роста ложных матчей и без дестабилизации повторных прогонов.
+
+### Предлагаемая формула/эвристика
+
+Для каждого source shell считаем масштабные признаки:
+- `uvArea` — площадь shell в UV0;
+- `boundaryLength` — длина UV0-границы shell;
+- `uvDiag` — диагональ AABB shell в UV0;
+- `posDiag` — диагональ AABB shell в object/world space.
+
+Нормируем относительно медианы по shell в текущей группе:
+- `sUv = clamp(uvDiag / medianUvDiag, 0.5, 2.0)`
+- `sPos = clamp(posDiag / medianPosDiag, 0.5, 2.0)`
+
+Адаптивные пороги:
+- `UV_NEAR_adaptive = UV_NEAR_legacy * lerp(0.85, 1.35, (sUv - 0.5) / 1.5)`
+- `POS_FAR_adaptive = POS_FAR_legacy * lerp(0.80, 1.40, (sPos - 0.5) / 1.5)`
+
+Дополнительные правила стабилизации:
+- нижняя/верхняя граница: `UV_NEAR_adaptive ∈ [0.75x, 1.50x]`, `POS_FAR_adaptive ∈ [0.70x, 1.60x]` от legacy;
+- если `uvArea` ниже `P10` по группе, принудительно `UV_NEAR_adaptive *= 0.9` (борьба с false-positive на микрошеллах);
+- если `boundaryLength / sqrt(uvArea)` выше `P90` (тонкие/рваные shell), не расширять `UV_NEAR` выше `1.15x` legacy.
+
+### Набор тестов и метрики сравнения с legacy
+
+**Сцены/модели (минимум):**
+1. Простая симметрия: «базовый симметричный проп» (лево/право зеркальные shell).
+2. Playground LODGroup (эталонная сложная сцена пакета).
+3. Модель с 3+ LOD, где на LOD2/LOD3 есть несколько визуально похожих shell.
+4. Стресс-кейс с мелкими fragment shell (после dedup/merge path).
+
+**Сценарий прогона:**
+- для каждого кейса: legacy vs adaptive;
+- по 10 повторных прогонов на одинаковом входе (для проверки детерминизма).
+
+**Метрики:**
+- `%correct_match` — доля shell с ожидаемым source shell id/group id;
+- `fallback_count` — число переходов на descriptor-distance fallback;
+- `overlap_count` — итоговые UV2 overlap после post-hoc fixing;
+- `rerun_stability` — совпадение mapping hash между 10 прогонами (в %);
+- `time_ms` — среднее время этапа matching.
+
+### Stop/Go критерии
+
+**GO (оставляем adaptive по умолчанию), если одновременно:**
+- `%correct_match` не хуже legacy на простом symmetry-кейсе и ≥ `+3%` на LOD2+ похожих shell;
+- `fallback_count` не растёт более чем на `+10%` относительно legacy;
+- `rerun_stability` ≥ `99.5%` (расхождения только в диагностике, не в результате UV2);
+- `overlap_count` не увеличивается.
+
+**STOP (откатываемся на legacy), если выполняется любой пункт:**
+- деградация `%correct_match` на symmetry-кейсе более чем на `1%`;
+- рост `overlap_count` на любом эталонном кейсе;
+- `rerun_stability < 99%` или недетерминизм в target shell выборе;
+- прирост `time_ms` matching этапа > `20%` без компенсирующего выигрыша по качеству.
+
 ---
 
 ## FBX Export & Collision — Known Issues & Constraints
