@@ -1008,6 +1008,9 @@ namespace LightmapUvTool
 
             uvChannel = (v - (int)AOTargetChannel.UV0_X) / 2;
             uvComponent = (v - (int)AOTargetChannel.UV0_X) % 2; // 0=X, 1=Y
+            // UV1 (Unity UV set index 1) is reserved for lightmap transfer data.
+            // Never merge AO into this channel during FBX export.
+            if (uvChannel == 1) return false;
             return true;
         }
 
