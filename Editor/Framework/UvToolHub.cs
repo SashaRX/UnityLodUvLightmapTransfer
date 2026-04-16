@@ -486,7 +486,7 @@ namespace LightmapUvTool
             if (spotNext != canvas.SpotMode)
             {
                 canvas.SpotMode = spotNext;
-                if (!canvas.SpotMode) canvas.ClearHoverState();
+                if (!canvas.SpotMode) canvas.ClearHoverState(clearSelection: false);
                 SceneView.RepaintAll();
             }
             canvas.LockSelection = GUILayout.Toggle(canvas.LockSelection, "Lock", EditorStyles.toolbarButton, GUILayout.Width(40));

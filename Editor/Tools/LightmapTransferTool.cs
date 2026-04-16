@@ -3115,9 +3115,14 @@ namespace LightmapUvTool
 
         public void OnSceneGUI(SceneView sv)
         {
-            if (!canvas.SpotMode || sv == null)
+            if (sv == null) return;
+
+            if (Event.current.type == EventType.Repaint)
+                DrawSelectedShellOverlay3D();
+
+            if (!canvas.SpotMode)
             {
-                if (canvas.HoverHitValid) canvas.ClearHoverState();
+                if (canvas.HoverHitValid) canvas.ClearHoverState(clearSelection: false);
                 return;
             }
 
@@ -3163,9 +3168,6 @@ namespace LightmapUvTool
             }
 
             if (e.type != EventType.Repaint) return;
-
-            // Draw selected shell overlay in 3D
-            DrawSelectedShellOverlay3D();
 
             // Draw spot projection on all meshes
             Vector2 projUv;
