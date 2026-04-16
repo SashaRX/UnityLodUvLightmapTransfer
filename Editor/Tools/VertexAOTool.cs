@@ -444,6 +444,22 @@ namespace LightmapUvTool
                 }
                 GUI.backgroundColor = bgc;
                 EditorGUILayout.EndHorizontal();
+
+                // Export vertex colors to FBX (after Apply)
+                GUI.backgroundColor = new Color(.4f, .7f, .95f);
+                if (GUILayout.Button("Overwrite FBX (Vertex Colors)", GUILayout.Height(22)))
+                {
+                    var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
+                    if (hub.Length > 0)
+                    {
+                        var transferTool = hub[0].FindTool<LightmapTransferTool>();
+                        if (transferTool != null)
+                            transferTool.ExportVertexColorsToFbx();
+                        else
+                            UvtLog.Error("[Vertex AO] LightmapTransferTool not found.");
+                    }
+                }
+                GUI.backgroundColor = bgc;
             }
         }
 

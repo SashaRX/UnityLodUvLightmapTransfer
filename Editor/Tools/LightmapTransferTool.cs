@@ -1340,6 +1340,210 @@ namespace LightmapUvTool
         public void ApplyUv2Public() => ApplyUv2ToFbx();
         public void SaveAllPublic() => SaveAll();
 
+        /// <summary>
+        /// Export only vertex colors (e.g. baked AO) to FBX without running the
+        /// UV2 pipeline. Copies vertex colors from scene meshes onto the FBX clone
+        /// and overwrites the source FBX. Only updates included mesh entries.
+        /// </summary>
+        public void ExportVertexColorsToFbx()
+        {
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (ctx?.MeshEntries == null || ctx.MeshEntries.Count == 0)
+            {
+                UvtLog.Error("[FBX Export] No meshes loaded.");
+                return;
+            }
+
+            RestoreAllPreviews();
+
+            // Find source FBX path
+            string sourceFbxPath = ctx.SourceFbxPath;
+            if (string.IsNullOrEmpty(sourceFbxPath))
+            {
+                foreach (var e in ctx.MeshEntries)
+                {
+                    if (e.fbxMesh == null) continue;
+                    string p = AssetDatabase.GetAssetPath(e.fbxMesh);
+                    if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase))
+                    { sourceFbxPath = p; break; }
+                }
+            }
+            if (string.IsNullOrEmpty(sourceFbxPath))
+            {
+                UvtLog.Error("[FBX Export] Cannot find source FBX path.");
+                return;
+            }
+
+            if (!EditorUtility.DisplayDialog("Overwrite FBX (Vertex Colors)",
+                $"Overwrite '{System.IO.Path.GetFileName(sourceFbxPath)}' with current vertex colors?\n\n" +
+                "Only vertex colors will be updated. UV2 and mesh topology stay unchanged.",
+                "Overwrite", "Cancel"))
+                return;
+
+            // Make FBX readable if needed
+            var srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
+            bool madeReadable = false;
+            if (srcImporter != null && !srcImporter.isReadable)
+            {
+                srcImporter.isReadable = true;
+                Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
+                srcImporter.SaveAndReimport();
+                madeReadable = true;
+            }
+
+            // Clone the FBX prefab
+            var fbxAsset = AssetDatabase.LoadMainAssetAtPath(sourceFbxPath) as GameObject;
+            if (fbxAsset == null)
+            {
+                UvtLog.Error($"[FBX Export] Cannot load FBX asset at '{sourceFbxPath}'.");
+                return;
+            }
+
+            var tempRoot = UnityEngine.Object.Instantiate(fbxAsset);
+            tempRoot.name = fbxAsset.name;
+
+            try
+            {
+                // Copy vertex colors from scene meshes onto FBX clone meshes by name
+                int updated = 0;
+                foreach (var e in ctx.MeshEntries)
+                {
+                    if (!e.include) continue;
+                    Mesh sceneMesh = e.originalMesh ?? e.fbxMesh;
+                    if (sceneMesh == null) continue;
+
+                    // Find matching mesh in clone by name
+                    foreach (var cloneMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+                    {
+                        if (cloneMf == null || cloneMf.sharedMesh == null) continue;
+                        if (cloneMf.sharedMesh.name != sceneMesh.name) continue;
+
+                        // Clone the mesh to avoid modifying the FBX sub-asset
+                        var cloneMesh = UnityEngine.Object.Instantiate(cloneMf.sharedMesh);
+                        cloneMesh.name = cloneMf.sharedMesh.name;
+
+                        // Copy vertex colors
+                        if (sceneMesh.colors32 != null && sceneMesh.colors32.Length == cloneMesh.vertexCount)
+                        {
+                            cloneMesh.colors32 = sceneMesh.colors32;
+                            updated++;
+                        }
+                        else if (sceneMesh.colors != null && sceneMesh.colors.Length == cloneMesh.vertexCount)
+                        {
+                            cloneMesh.colors = sceneMesh.colors;
+                            updated++;
+                        }
+
+                        cloneMf.sharedMesh = cloneMesh;
+                        break;
+                    }
+                }
+
+                if (updated == 0)
+                {
+                    UvtLog.Warn("[FBX Export] No vertex colors found to export.");
+                    return;
+                }
+
+                // Normalize hierarchy (bake transforms, rename LODs)
+                var renameMap = NormalizeExportHierarchy(tempRoot);
+
+                // Assign LOD0 material to collision nodes
+                Material colFallbackMat = null;
+                foreach (var e in ctx.MeshEntries)
+                {
+                    if (e.renderer != null && e.renderer.sharedMaterial != null &&
+                        !CheckerTexturePreview.IsPreviewShader(e.renderer.sharedMaterial.shader.name))
+                    {
+                        colFallbackMat = e.renderer.sharedMaterial;
+                        break;
+                    }
+                }
+                foreach (var colMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+                {
+                    if (colMf == null || colMf.sharedMesh == null) continue;
+                    if (!MeshHygieneUtility.IsCollisionNodeName(colMf.gameObject.name)) continue;
+                    var colMr = colMf.GetComponent<MeshRenderer>();
+                    if (colFallbackMat != null)
+                    {
+                        if (colMr == null)
+                            colMr = colMf.gameObject.AddComponent<MeshRenderer>();
+                        colMr.sharedMaterials = new[] { colFallbackMat };
+                    }
+                    else if (colMr != null)
+                        UnityEngine.Object.DestroyImmediate(colMr);
+                }
+
+                // Trim material arrays
+                foreach (var mr in tempRoot.GetComponentsInChildren<MeshRenderer>(true))
+                {
+                    if (mr == null) continue;
+                    var mf = mr.GetComponent<MeshFilter>();
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    var mats = mr.sharedMaterials;
+                    if (mats.Length > mf.sharedMesh.subMeshCount)
+                    {
+                        var trimmed = new Material[mf.sharedMesh.subMeshCount];
+                        System.Array.Copy(mats, trimmed, trimmed.Length);
+                        mr.sharedMaterials = trimmed;
+                    }
+                }
+
+                // Backup .meta
+                string fullPath = System.IO.Path.GetFullPath(sourceFbxPath);
+                string metaBak = fullPath + ".meta.bak";
+                if (System.IO.File.Exists(fullPath + ".meta"))
+                    System.IO.File.Copy(fullPath + ".meta", metaBak, true);
+
+                // Export
+                var exportOptions = new UnityEditor.Formats.Fbx.Exporter.ExportModelOptions
+                {
+                    ExportFormat = UnityEditor.Formats.Fbx.Exporter.ExportFormat.Binary
+                };
+                UnityEditor.Formats.Fbx.Exporter.ModelExporter.ExportObjects(
+                    sourceFbxPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
+
+                UvtLog.Info($"[FBX Export] Exported vertex colors ({updated} mesh(es)) -> {sourceFbxPath}");
+
+                // Restore .meta
+                if (System.IO.File.Exists(metaBak))
+                {
+                    System.IO.File.Copy(metaBak, fullPath + ".meta", true);
+                    System.IO.File.Delete(metaBak);
+                }
+                string fbxBak = fullPath + ".bak";
+                if (System.IO.File.Exists(fbxBak))
+                    System.IO.File.Delete(fbxBak);
+
+                AssetDatabase.Refresh();
+
+                // Re-link scene mesh references
+                if (ctx.LodGroup != null)
+                    RelinkSceneMeshReferences(sourceFbxPath, renameMap.Count > 0 ? renameMap : null, ctx.LodGroup);
+            }
+            catch (Exception ex)
+            {
+                UvtLog.Error("[FBX Export] Vertex color export failed: " + ex);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(tempRoot);
+            }
+
+            // Restore readability
+            if (madeReadable && srcImporter != null)
+            {
+                srcImporter.isReadable = false;
+                Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
+                srcImporter.SaveAndReimport();
+            }
+
+            if (ctx.LodGroup != null) ctx.Refresh(ctx.LodGroup);
+#else
+            UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
+#endif
+        }
+
         void ExportFbx(bool overwriteSource)
         {
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
