@@ -1412,6 +1412,9 @@ namespace LightmapUvTool
             bool allGroupsSucceeded = true;
             var overwrittenFbxPaths = new HashSet<string>();
             var transientReplayEntriesByPath = new Dictionary<string, List<MeshUv2Entry>>();
+            // Collected node renames from NormalizeExportHierarchy, per FBX path.
+            // Used after reimport to re-link scene mesh references.
+            var meshRenamesByFbx = new Dictionary<string, Dictionary<string, string>>();
             foreach (var kv in fbxGroups)
             {
                 string sourceFbxPath = kv.Key;
@@ -1667,7 +1670,10 @@ namespace LightmapUvTool
                     // ── Normalize FBX hierarchy ──
                     // Ensure root is a clean pivot (identity transform, no mesh)
                     // and LOD0 child named same as root gets _LOD0 suffix.
-                    NormalizeExportHierarchy(tempRoot);
+                    // Returns a map of oldNodeName → newNodeName for mesh re-linking.
+                    var nodeRenameMap = NormalizeExportHierarchy(tempRoot);
+                    if (nodeRenameMap.Count > 0)
+                        meshRenamesByFbx[sourceFbxPath] = nodeRenameMap;
 
                     // Add collision meshes from sidecar (if any).
                     // When sidecar provides collision data, remove existing _COL
@@ -1869,6 +1875,19 @@ namespace LightmapUvTool
             // third-party postprocessors like Bakery). Don't clear sidecar entries.
 
             AssetDatabase.Refresh();
+
+            // Re-link scene mesh references after FBX reimport when
+            // NormalizeExportHierarchy renamed nodes (e.g. sanitizing names,
+            // adding _LOD0 suffix). Without this, MeshFilter/MeshCollider
+            // references go Missing because sub-asset names changed.
+            if (overwriteSource && allGroupsSucceeded && ctx?.LodGroup != null)
+            {
+                foreach (var kvp in meshRenamesByFbx)
+                {
+                    if (kvp.Value.Count > 0)
+                        RelinkSceneMeshReferences(kvp.Key, kvp.Value, ctx.LodGroup);
+                }
+            }
 
             // Remove stale material remaps created by FBX importer defaults on
             // collision-only nodes. This clears unwanted "Lit"/"No Name" entries
@@ -2155,8 +2174,13 @@ namespace LightmapUvTool
         /// - Collision node transforms baked into vertices (pivot at origin).
         /// Does NOT move meshes off the root — preserves original FBX structure.
         /// </summary>
-        static void NormalizeExportHierarchy(GameObject root)
+        /// <summary>
+        /// Returns a dictionary of oldNodeName → newNodeName for nodes that were renamed.
+        /// Used to re-link scene mesh references after FBX reimport.
+        /// </summary>
+        static Dictionary<string, string> NormalizeExportHierarchy(GameObject root)
         {
+            var renameMap = new Dictionary<string, string>();
             string baseName = root.name;
             string sanitizedBaseName = MeshHygieneUtility.SanitizeName(baseName);
             if (string.IsNullOrEmpty(sanitizedBaseName))
@@ -2172,7 +2196,10 @@ namespace LightmapUvTool
             {
                 if (child.name == baseName || child.name == sanitizedBaseName)
                 {
+                    string oldName = child.name;
                     child.name = sanitizedBaseName + "_LOD0";
+                    if (oldName != child.name)
+                        renameMap[oldName] = child.name;
                     break;
                 }
             }
@@ -2219,8 +2246,12 @@ namespace LightmapUvTool
                 for (int i = 0; i < directLodChildren.Count; i++)
                 {
                     string normalizedName = sanitizedBaseName + "_LOD" + i;
-                    if (directLodChildren[i].transform.name != normalizedName)
+                    string oldName = directLodChildren[i].transform.name;
+                    if (oldName != normalizedName)
+                    {
                         directLodChildren[i].transform.name = normalizedName;
+                        renameMap[oldName] = normalizedName;
+                    }
                 }
             }
 
@@ -2269,6 +2300,106 @@ namespace LightmapUvTool
                 t.localPosition = Vector3.zero;
                 t.localRotation = Quaternion.identity;
                 t.localScale = Vector3.one;
+            }
+
+            return renameMap;
+        }
+
+        /// <summary>
+        /// After FBX reimport, mesh sub-assets may have been renamed by
+        /// NormalizeExportHierarchy. Re-link scene MeshFilter/MeshCollider
+        /// references that now point to Missing (Mesh) to the new sub-assets.
+        /// </summary>
+        static void RelinkSceneMeshReferences(
+            string fbxPath,
+            Dictionary<string, string> renameMap,
+            LODGroup lodGroup)
+        {
+            if (renameMap == null || renameMap.Count == 0) return;
+            if (lodGroup == null) return;
+
+            // Load all mesh sub-assets from the reimported FBX
+            var subAssets = AssetDatabase.LoadAllAssetsAtPath(fbxPath);
+            var meshByName = new Dictionary<string, Mesh>();
+            foreach (var asset in subAssets)
+            {
+                var mesh = asset as Mesh;
+                if (mesh != null)
+                    meshByName[mesh.name] = mesh;
+            }
+
+            // Build oldName → new Mesh lookup
+            var oldToNewMesh = new Dictionary<string, Mesh>();
+            foreach (var kvp in renameMap)
+            {
+                if (meshByName.TryGetValue(kvp.Value, out var newMesh))
+                    oldToNewMesh[kvp.Key] = newMesh;
+            }
+
+            if (oldToNewMesh.Count == 0) return;
+
+            // Walk scene objects under the LODGroup and fix broken references
+            var root = lodGroup.transform;
+            foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (mf == null) continue;
+                // Missing mesh shows as null but was previously assigned
+                if (mf.sharedMesh == null)
+                {
+                    // Try to match by GameObject name (which still has old naming)
+                    foreach (var kvp in oldToNewMesh)
+                    {
+                        if (mf.gameObject.name == kvp.Key ||
+                            mf.gameObject.name.Contains(kvp.Key))
+                        {
+                            Undo.RecordObject(mf, "Relink Mesh");
+                            mf.sharedMesh = kvp.Value;
+                            UvtLog.Info($"[FBX Export] Relinked mesh on '{mf.gameObject.name}' -> '{kvp.Value.name}'");
+                            break;
+                        }
+                    }
+                }
+                else if (mf.sharedMesh != null)
+                {
+                    // Mesh exists but might be stale (pointing to old sub-asset)
+                    string meshName = mf.sharedMesh.name;
+                    if (oldToNewMesh.TryGetValue(meshName, out var replacement) &&
+                        mf.sharedMesh != replacement)
+                    {
+                        Undo.RecordObject(mf, "Relink Mesh");
+                        mf.sharedMesh = replacement;
+                        UvtLog.Info($"[FBX Export] Relinked mesh '{meshName}' -> '{replacement.name}' on '{mf.gameObject.name}'");
+                    }
+                }
+            }
+
+            // Also fix MeshCollider references
+            foreach (var mc in root.GetComponentsInChildren<MeshCollider>(true))
+            {
+                if (mc == null || mc.sharedMesh == null) continue;
+                string meshName = mc.sharedMesh.name;
+                if (oldToNewMesh.TryGetValue(meshName, out var replacement) &&
+                    mc.sharedMesh != replacement)
+                {
+                    Undo.RecordObject(mc, "Relink Collider Mesh");
+                    mc.sharedMesh = replacement;
+                    UvtLog.Info($"[FBX Export] Relinked collider mesh '{meshName}' -> '{replacement.name}'");
+                }
+            }
+
+            // Rename scene GameObjects to match new FBX node names
+            foreach (var kvp in renameMap)
+            {
+                foreach (Transform child in root)
+                {
+                    if (child.name == kvp.Key)
+                    {
+                        Undo.RecordObject(child.gameObject, "Rename to match FBX");
+                        child.name = kvp.Value;
+                        UvtLog.Info($"[FBX Export] Renamed scene object '{kvp.Key}' -> '{kvp.Value}'");
+                        break;
+                    }
+                }
             }
         }
 
