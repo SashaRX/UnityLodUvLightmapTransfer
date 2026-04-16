@@ -314,6 +314,22 @@ namespace LightmapUvTool
             var rootMf = root.GetComponent<MeshFilter>();
             if (rootMf != null && rootMf.sharedMesh != null)
                 EditorGUILayout.HelpBox("Root has mesh — should be empty pivot.", MessageType.Warning);
+
+            // Scale warnings
+            if (root.localScale != Vector3.one)
+                EditorGUILayout.HelpBox(
+                    $"Root scale: {root.localScale} — should be (1,1,1). Click Normalize to fix.",
+                    MessageType.Warning);
+            foreach (Transform child in root)
+            {
+                if (child.localScale != Vector3.one)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"{child.name}: scale {child.localScale} — not normalized.",
+                        MessageType.Warning);
+                    break; // show only first to avoid spam
+                }
+            }
         }
 
         void DrawEditableName(GameObject go, string suffix)
@@ -459,6 +475,11 @@ namespace LightmapUvTool
                 }
             }
 
+            // Normalize scale: bake non-identity transforms into mesh vertices.
+            // Common issue: FBX imported at scale 0.01 with 100x compensating
+            // scale on nodes, or vice versa. Bake into verts → set scale to 1,1,1.
+            NormalizeChildScales(root);
+
             // Rebuild LODGroup from hierarchy naming
             RebuildLodGroupFromNames();
 
@@ -468,6 +489,108 @@ namespace LightmapUvTool
             ctx.Refresh(ctx.LodGroup);
             requestRepaint?.Invoke();
             UvtLog.Info("Normalized hierarchy.");
+        }
+
+        /// <summary>
+        /// Bake non-identity transforms into mesh vertices for root and all children.
+        /// Handles the common case of FBX at scale 0.01 with 100x node compensation.
+        /// After this, all transforms are identity and vertex positions are in world-correct space.
+        /// </summary>
+        void NormalizeChildScales(Transform root)
+        {
+            bool rootHasScale = root.localScale != Vector3.one;
+            Matrix4x4 rootScaleMatrix = rootHasScale
+                ? Matrix4x4.Scale(root.localScale)
+                : Matrix4x4.identity;
+
+            // Process each direct child: bake rootScale * childLocal into mesh, reset to identity
+            foreach (Transform child in root)
+            {
+                var mf = child.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+
+                bool childHasTransform = child.localPosition != Vector3.zero ||
+                                         child.localRotation != Quaternion.identity ||
+                                         child.localScale != Vector3.one;
+
+                if (!rootHasScale && !childHasTransform)
+                    continue;
+
+                if (!mf.sharedMesh.isReadable)
+                {
+                    UvtLog.Warn($"Cannot normalize transform on '{child.name}' — mesh not readable.");
+                    continue;
+                }
+
+                // Combined matrix: root scale * child local transform
+                Matrix4x4 combined = rootHasScale
+                    ? rootScaleMatrix * Matrix4x4.TRS(child.localPosition, child.localRotation, child.localScale)
+                    : Matrix4x4.TRS(child.localPosition, child.localRotation, child.localScale);
+
+                BakeMatrixIntoMesh(mf, combined);
+
+                if (childHasTransform)
+                {
+                    Undo.RecordObject(child, "Normalize Transform");
+                    child.localPosition = Vector3.zero;
+                    child.localRotation = Quaternion.identity;
+                    child.localScale = Vector3.one;
+                }
+
+                UvtLog.Info($"Normalized transform on '{child.name}' → identity");
+            }
+
+            // If root had mesh (shouldn't happen after earlier normalization), bake it too
+            if (rootHasScale)
+            {
+                var rootMf = root.GetComponent<MeshFilter>();
+                if (rootMf != null && rootMf.sharedMesh != null && rootMf.sharedMesh.isReadable)
+                    BakeMatrixIntoMesh(rootMf, rootScaleMatrix);
+
+                Undo.RecordObject(root, "Normalize Root Scale");
+                root.localScale = Vector3.one;
+                UvtLog.Info($"Normalized root scale → (1,1,1)");
+            }
+        }
+
+        static void BakeMatrixIntoMesh(MeshFilter mf, Matrix4x4 matrix)
+        {
+            var mesh = mf.sharedMesh;
+            if (mesh == null || !mesh.isReadable) return;
+
+            // Clone if it's an asset-backed mesh
+            if (!string.IsNullOrEmpty(UnityEditor.AssetDatabase.GetAssetPath(mesh)))
+            {
+                mesh = Object.Instantiate(mesh);
+                mesh.name = mf.sharedMesh.name;
+                Undo.RecordObject(mf, "Bake Transform");
+                mf.sharedMesh = mesh;
+            }
+
+            var verts = mesh.vertices;
+            var normals = mesh.normals;
+            for (int i = 0; i < verts.Length; i++)
+            {
+                verts[i] = matrix.MultiplyPoint3x4(verts[i]);
+                if (normals != null && i < normals.Length)
+                    normals[i] = matrix.MultiplyVector(normals[i]).normalized;
+            }
+            mesh.SetVertices(verts);
+            if (normals != null && normals.Length > 0)
+                mesh.SetNormals(normals);
+
+            var tangents = mesh.tangents;
+            if (tangents != null && tangents.Length > 0)
+            {
+                for (int i = 0; i < tangents.Length; i++)
+                {
+                    Vector3 tVec = matrix.MultiplyVector(
+                        new Vector3(tangents[i].x, tangents[i].y, tangents[i].z)).normalized;
+                    tangents[i] = new Vector4(tVec.x, tVec.y, tVec.z, tangents[i].w);
+                }
+                mesh.tangents = tangents;
+            }
+            mesh.RecalculateBounds();
         }
 
         void RebuildLodGroupFromNames()

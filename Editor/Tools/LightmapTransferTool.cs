@@ -2255,46 +2255,26 @@ namespace LightmapUvTool
                 }
             }
 
-            // Collision nodes: bake transform offset into vertices, then reset to identity.
-            // This keeps the mesh in place but puts the pivot at 0,0,0.
-            foreach (var colMf in root.GetComponentsInChildren<MeshFilter>(true))
+            // Bake non-identity transforms into mesh vertices for ALL children,
+            // then reset to identity. This normalizes scale (common problem:
+            // FBX imported at 0.01 with compensating 100x scale on node) and
+            // ensures exported FBX has clean 1,1,1 scale on every node.
+            foreach (var childMf in root.GetComponentsInChildren<MeshFilter>(true))
             {
-                if (colMf == null || colMf.sharedMesh == null) continue;
-                if (!MeshHygieneUtility.IsCollisionNodeName(colMf.gameObject.name))
-                    continue;
+                if (childMf == null || childMf.sharedMesh == null) continue;
+                // Skip root itself (already reset above)
+                if (childMf.transform == root.transform) continue;
 
-                var t = colMf.transform;
+                var t = childMf.transform;
                 if (t.localPosition == Vector3.zero &&
                     t.localRotation == Quaternion.identity &&
                     t.localScale == Vector3.one)
                     continue; // already at identity
 
-                // Bake local transform into mesh vertices
-                var mesh = colMf.sharedMesh;
+                var mesh = childMf.sharedMesh;
                 if (!mesh.isReadable) continue;
-                var localMatrix = Matrix4x4.TRS(t.localPosition, t.localRotation, t.localScale);
-                var verts = mesh.vertices;
-                var normals = mesh.normals;
-                for (int i = 0; i < verts.Length; i++)
-                {
-                    verts[i] = localMatrix.MultiplyPoint3x4(verts[i]);
-                    if (i < normals.Length)
-                        normals[i] = localMatrix.MultiplyVector(normals[i]).normalized;
-                }
-                mesh.SetVertices(verts);
-                if (normals.Length > 0)
-                    mesh.SetNormals(normals);
-                var tangents = mesh.tangents;
-                if (tangents.Length > 0)
-                {
-                    for (int i = 0; i < tangents.Length; i++)
-                    {
-                        Vector3 tVec = localMatrix.MultiplyVector(new Vector3(tangents[i].x, tangents[i].y, tangents[i].z)).normalized;
-                        tangents[i] = new Vector4(tVec.x, tVec.y, tVec.z, tangents[i].w);
-                    }
-                    mesh.tangents = tangents;
-                }
-                mesh.RecalculateBounds();
+
+                BakeTransformIntoMesh(mesh, t);
 
                 // Reset transform to identity
                 t.localPosition = Vector3.zero;
@@ -2303,6 +2283,43 @@ namespace LightmapUvTool
             }
 
             return renameMap;
+        }
+
+        /// <summary>
+        /// Bake a Transform's local position/rotation/scale into mesh vertex data.
+        /// After calling, the transform can be safely reset to identity without
+        /// changing the visual result. Handles vertices, normals, and tangents.
+        /// </summary>
+        static void BakeTransformIntoMesh(Mesh mesh, Transform t)
+        {
+            if (mesh == null || !mesh.isReadable) return;
+
+            var localMatrix = Matrix4x4.TRS(t.localPosition, t.localRotation, t.localScale);
+            var verts = mesh.vertices;
+            var normals = mesh.normals;
+
+            for (int i = 0; i < verts.Length; i++)
+            {
+                verts[i] = localMatrix.MultiplyPoint3x4(verts[i]);
+                if (normals != null && i < normals.Length)
+                    normals[i] = localMatrix.MultiplyVector(normals[i]).normalized;
+            }
+            mesh.SetVertices(verts);
+            if (normals != null && normals.Length > 0)
+                mesh.SetNormals(normals);
+
+            var tangents = mesh.tangents;
+            if (tangents != null && tangents.Length > 0)
+            {
+                for (int i = 0; i < tangents.Length; i++)
+                {
+                    Vector3 tVec = localMatrix.MultiplyVector(
+                        new Vector3(tangents[i].x, tangents[i].y, tangents[i].z)).normalized;
+                    tangents[i] = new Vector4(tVec.x, tVec.y, tVec.z, tangents[i].w);
+                }
+                mesh.tangents = tangents;
+            }
+            mesh.RecalculateBounds();
         }
 
         /// <summary>
