@@ -664,9 +664,23 @@ namespace LightmapUvTool
             var bestMeshes = new Dictionary<MeshEntry, Mesh>();
             var bestTransfers = new Dictionary<MeshEntry, (Mesh transferred, GroupedShellTransfer.TransferResult tr)>();
 
+            bool cancelled = false;
+            try
+            {
             for (int ci = 0; ci < separationConfigs.Length; ci++)
             {
                 float sepThresh = separationConfigs[ci];
+
+                if (EditorUtility.DisplayCancelableProgressBar(
+                    "Auto-tune Pipeline",
+                    $"Config {ci + 1}/{separationConfigs.Length} (separation={sepThresh:P0})",
+                    (float)ci / separationConfigs.Length))
+                {
+                    UvtLog.Warn("[Pipeline] Auto-tune cancelled by user.");
+                    cancelled = true;
+                    break;
+                }
+
                 if (ci > 0)
                 {
                     UvtLog.Info($"[Pipeline] Auto-tune retry #{ci} (separation={sepThresh:P0})...");
@@ -749,9 +763,14 @@ namespace LightmapUvTool
                     break;
                 }
             }
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
 
             // Restore best config if not the last one tested
-            if (bestMeshes.Count > 0)
+            if (bestMeshes.Count > 0 && !cancelled)
             {
                 foreach (var kv in bestMeshes)
                 {
@@ -768,6 +787,12 @@ namespace LightmapUvTool
             // Cleanup saved copies
             foreach (var m in savedMeshes.Values)
                 UnityEngine.Object.DestroyImmediate(m);
+
+            if (cancelled)
+            {
+                requestRepaint?.Invoke();
+                return;
+            }
 
             if (separationConfigs.Length > 1 && bestConfigIdx > 0)
                 UvtLog.Info($"[Pipeline] Auto-tune: selected config #{bestConfigIdx} " +
