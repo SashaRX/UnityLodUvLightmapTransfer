@@ -967,23 +967,31 @@ namespace LightmapUvTool
             if (fbxGroups.Count == 0) { UvtLog.Warn("[Apply] No meshes with UV2 data."); return; }
 
             // Save sidecar assets
+            bool persistentSidecarMode = PostprocessorDefineManager.IsEnabled();
             foreach (var kv in fbxGroups)
             {
-                string sidecarPath = Uv2DataAsset.GetSidecarPath(kv.Key);
-                var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
-                if (data == null)
+                if (persistentSidecarMode)
                 {
-                    data = ScriptableObject.CreateInstance<Uv2DataAsset>();
-                    AssetDatabase.CreateAsset(data, sidecarPath);
+                    string sidecarPath = Uv2DataAsset.GetSidecarPath(kv.Key);
+                    var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+                    if (data == null)
+                    {
+                        data = ScriptableObject.CreateInstance<Uv2DataAsset>();
+                        AssetDatabase.CreateAsset(data, sidecarPath);
+                    }
+                    foreach (var entry in kv.Value)
+                        data.Set(entry);
+                    EditorUtility.SetDirty(data);
+                    AssetDatabase.SaveAssets();
                 }
-                foreach (var entry in kv.Value)
-                    data.Set(entry);
-                EditorUtility.SetDirty(data);
-                AssetDatabase.SaveAssets();
+                else
+                {
+                    Uv2AssetPostprocessor.SetTransientReplayEntries(kv.Key, kv.Value);
+                }
 
                 // Prepare import settings and reimport FBX so the postprocessor replays UV2
                 Uv2AssetPostprocessor.managedImportPaths.Add(kv.Key);
-                if (!PostprocessorDefineManager.IsEnabled())
+                if (!persistentSidecarMode)
                     Uv2AssetPostprocessor.transientReplayPaths.Add(kv.Key);
 
                 bool reimported = Uv2AssetPostprocessor.PrepareImportSettings(kv.Key);
@@ -1557,69 +1565,76 @@ namespace LightmapUvTool
                     }
 
                     // ── Remove stale children from cloned FBX ──
-                    // Keep collision nodes, MeshCollider-backed nodes, structural
-                    // containers, and renderable children that still map to the
-                    // export mesh set. Remove only stale renderable leftovers.
+                    // For full LOD workflows we prune renderable leftovers that no longer
+                    // belong to the export set. For standalone/partial FBX overwrite we
+                    // must preserve untouched siblings and only replace the selected mesh.
                     // Must run BEFORE NormalizeExportHierarchy (which renames LOD0).
-                    var validMeshNames = new HashSet<string>();
-                    foreach (var (entry, resultMesh) in entries)
+                    if (!(ctx != null && ctx.StandaloneMesh))
                     {
-                        string meshName = ResolveExportMeshName(entry, resultMesh);
-                        validMeshNames.Add(meshName);
-                    }
-
-                    // Protect meshes referenced by MeshCollider components.
-                    // Some projects keep collision nodes without strict _COL naming,
-                    // and there can be multiple colliders in the hierarchy.
-                    var colliderMeshNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    var colliderRootNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var mc in tempRoot.GetComponentsInChildren<MeshCollider>(true))
-                    {
-                        if (mc == null) continue;
-                        colliderRootNames.Add(mc.gameObject.name);
-                        if (mc.sharedMesh != null && !string.IsNullOrEmpty(mc.sharedMesh.name))
-                            colliderMeshNames.Add(mc.sharedMesh.name);
-                    }
-
-                    for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
-                    {
-                        var ch = tempRoot.transform.GetChild(ci);
-                        // Preserve existing collision nodes from source FBX even when
-                        // they are not part of mesh transfer entries.
-                        if (MeshHygieneUtility.IsCollisionNodeName(ch.name))
-                            continue;
-                        if (colliderRootNames.Contains(ch.name))
-                            continue;
-                        var chMf = ch.GetComponent<MeshFilter>();
-                        if (chMf != null && chMf.sharedMesh != null &&
-                            colliderMeshNames.Contains(chMf.sharedMesh.name))
-                            continue;
-                        var chSmr = ch.GetComponent<SkinnedMeshRenderer>();
-                        bool hasRenderableMesh =
-                            (chMf != null && chMf.sharedMesh != null) ||
-                            (chSmr != null && chSmr.sharedMesh != null);
-                        // Keep structural/container nodes (no direct mesh on node).
-                        // Removing them flattens FBX hierarchy and can break prefabs.
-                        if (!hasRenderableMesh)
-                            continue;
-                        string childMeshName = null;
-                        if (chMf != null && chMf.sharedMesh != null)
-                            childMeshName = chMf.sharedMesh.name;
-                        else if (chSmr != null && chSmr.sharedMesh != null)
-                            childMeshName = chSmr.sharedMesh.name;
-
-                        // Keep nodes when either the node name OR its bound mesh name
-                        // is part of the export set. Some DCC/Unity imports keep node
-                        // names different from mesh names (especially for root LOD0),
-                        // and pruning by node name alone can drop valid LOD content.
-                        bool keepByNodeName = validMeshNames.Contains(ch.name);
-                        bool keepByMeshName = !string.IsNullOrEmpty(childMeshName) &&
-                                              validMeshNames.Contains(childMeshName);
-                        if (!keepByNodeName && !keepByMeshName)
+                        var validMeshNames = new HashSet<string>();
+                        foreach (var (entry, resultMesh) in entries)
                         {
-                            UvtLog.Verbose($"[FBX Export] Pruning stale child '{ch.name}'");
-                            UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                            string meshName = ResolveExportMeshName(entry, resultMesh);
+                            validMeshNames.Add(meshName);
                         }
+
+                        // Protect meshes referenced by MeshCollider components.
+                        // Some projects keep collision nodes without strict _COL naming,
+                        // and there can be multiple colliders in the hierarchy.
+                        var colliderMeshNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        var colliderRootNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var mc in tempRoot.GetComponentsInChildren<MeshCollider>(true))
+                        {
+                            if (mc == null) continue;
+                            colliderRootNames.Add(mc.gameObject.name);
+                            if (mc.sharedMesh != null && !string.IsNullOrEmpty(mc.sharedMesh.name))
+                                colliderMeshNames.Add(mc.sharedMesh.name);
+                        }
+
+                        for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
+                        {
+                            var ch = tempRoot.transform.GetChild(ci);
+                            // Preserve existing collision nodes from source FBX even when
+                            // they are not part of mesh transfer entries.
+                            if (MeshHygieneUtility.IsCollisionNodeName(ch.name))
+                                continue;
+                            if (colliderRootNames.Contains(ch.name))
+                                continue;
+                            var chMf = ch.GetComponent<MeshFilter>();
+                            if (chMf != null && chMf.sharedMesh != null &&
+                                colliderMeshNames.Contains(chMf.sharedMesh.name))
+                                continue;
+                            var chSmr = ch.GetComponent<SkinnedMeshRenderer>();
+                            bool hasRenderableMesh =
+                                (chMf != null && chMf.sharedMesh != null) ||
+                                (chSmr != null && chSmr.sharedMesh != null);
+                            // Keep structural/container nodes (no direct mesh on node).
+                            // Removing them flattens FBX hierarchy and can break prefabs.
+                            if (!hasRenderableMesh)
+                                continue;
+                            string childMeshName = null;
+                            if (chMf != null && chMf.sharedMesh != null)
+                                childMeshName = chMf.sharedMesh.name;
+                            else if (chSmr != null && chSmr.sharedMesh != null)
+                                childMeshName = chSmr.sharedMesh.name;
+
+                            // Keep nodes when either the node name OR its bound mesh name
+                            // is part of the export set. Some DCC/Unity imports keep node
+                            // names different from mesh names (especially for root LOD0),
+                            // and pruning by node name alone can drop valid LOD content.
+                            bool keepByNodeName = validMeshNames.Contains(ch.name);
+                            bool keepByMeshName = !string.IsNullOrEmpty(childMeshName) &&
+                                                  validMeshNames.Contains(childMeshName);
+                            if (!keepByNodeName && !keepByMeshName)
+                            {
+                                UvtLog.Verbose($"[FBX Export] Pruning stale child '{ch.name}'");
+                                UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        UvtLog.Verbose("[FBX Export] Standalone overwrite: preserving untouched sibling meshes in source FBX.");
                     }
 
                     // ── Normalize FBX hierarchy ──
@@ -1785,9 +1800,15 @@ namespace LightmapUvTool
                 // cleanup after the current import finishes.
                 if (overwriteSource)
                 {
-                    SaveSidecarForExport(sourceFbxPath, entries);
+                    var sidecarEntries = BuildSidecarEntriesForExport(entries);
+                    bool persistentSidecarMode = PostprocessorDefineManager.IsEnabled();
+                    if (persistentSidecarMode)
+                        SaveSidecarForExport(sourceFbxPath, sidecarEntries);
+                    else
+                        Uv2AssetPostprocessor.SetTransientReplayEntries(sourceFbxPath, sidecarEntries);
+
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
-                    if (!PostprocessorDefineManager.IsEnabled())
+                    if (!persistentSidecarMode)
                         Uv2AssetPostprocessor.transientReplayPaths.Add(sourceFbxPath);
                 }
 
@@ -1844,11 +1865,26 @@ namespace LightmapUvTool
 #endif
         }
 
+        List<MeshUv2Entry> BuildSidecarEntriesForExport(List<(MeshEntry entry, Mesh resultMesh)> entries)
+        {
+            var sidecarEntries = new List<MeshUv2Entry>();
+            foreach (var (e, resultMesh) in entries)
+            {
+                if (resultMesh == null) continue;
+                if (!TryBuildSidecarEntry(e, resultMesh, out var sidecarEntry))
+                    continue;
+
+                sidecarEntries.Add(sidecarEntry);
+            }
+
+            return sidecarEntries;
+        }
+
         /// <summary>
         /// Build and save sidecar UV2 entries from export data so the postprocessor
         /// can re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
         /// </summary>
-        void SaveSidecarForExport(string fbxPath, List<(MeshEntry entry, Mesh resultMesh)> entries)
+        void SaveSidecarForExport(string fbxPath, List<MeshUv2Entry> sidecarEntries)
         {
             string sidecarPath = Uv2DataAsset.GetSidecarPath(fbxPath);
             var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
@@ -1859,12 +1895,8 @@ namespace LightmapUvTool
             }
 
             int saved = 0;
-            foreach (var (e, resultMesh) in entries)
+            foreach (var sidecarEntry in sidecarEntries)
             {
-                if (resultMesh == null) continue;
-                if (!TryBuildSidecarEntry(e, resultMesh, out var sidecarEntry))
-                    continue;
-
                 data.Set(sidecarEntry);
                 saved++;
             }

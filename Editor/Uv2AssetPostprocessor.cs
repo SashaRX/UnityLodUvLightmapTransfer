@@ -45,6 +45,22 @@ namespace LightmapUvTool
         /// persistent sidecar mode is disabled.
         /// </summary>
         internal static readonly HashSet<string> transientReplayPaths = new HashSet<string>();
+        internal static readonly Dictionary<string, List<MeshUv2Entry>> transientReplayEntries =
+            new Dictionary<string, List<MeshUv2Entry>>();
+
+        internal static void SetTransientReplayEntries(string assetPath, List<MeshUv2Entry> entries)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+                return;
+
+            if (entries == null || entries.Count == 0)
+            {
+                transientReplayEntries.Remove(assetPath);
+                return;
+            }
+
+            transientReplayEntries[assetPath] = new List<MeshUv2Entry>(entries);
+        }
 
         struct ApplyStats
         {
@@ -137,20 +153,35 @@ namespace LightmapUvTool
             bool persistentMode = PostprocessorDefineManager.IsEnabled();
             bool isManaged = managedImportPaths.Contains(modelPath);
             bool transientReplay = transientReplayPaths.Remove(modelPath);
+            transientReplayEntries.TryGetValue(modelPath, out var transientEntries);
+            if (transientReplay)
+                transientReplayEntries.Remove(modelPath);
 
             if (!persistentMode && !isManaged && !transientReplay)
                 return;
 
             string sidecarPath = Uv2DataAsset.GetSidecarPath(modelPath);
 
-            // Load sidecar without triggering import loop
-            var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
-            if (data == null)
+            // Load persistent sidecar only when needed. Temporary UV replay data lives in memory.
+            var persistentData = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+            if (persistentData == null && transientEntries == null)
             {
                 managedImportPaths.Remove(modelPath);
-                if (transientReplay && !persistentMode)
-                    ScheduleTransientCleanup(modelPath);
                 return;
+            }
+
+            Uv2DataAsset data;
+            bool usingTransientEntries = transientReplay && transientEntries != null;
+            if (usingTransientEntries)
+            {
+                data = ScriptableObject.CreateInstance<Uv2DataAsset>();
+                data.entries = transientEntries;
+                if (persistentData != null && persistentData.collisionEntries != null)
+                    data.collisionEntries = persistentData.collisionEntries;
+            }
+            else
+            {
+                data = persistentData;
             }
 
             // Collision stripping only runs when explicitly requested via managedImportPaths
@@ -179,11 +210,7 @@ namespace LightmapUvTool
             managedImportPaths.Remove(modelPath);
 
             if (data.entries == null || data.entries.Count == 0)
-            {
-                if (transientReplay && !persistentMode)
-                    ScheduleTransientCleanup(modelPath);
                 return;
-            }
 
             // Always apply UV2 from sidecar if entries exist — ensures persistence
             // across Unity restarts even when third-party postprocessors (e.g. Bakery
@@ -241,6 +268,12 @@ namespace LightmapUvTool
                             $"{totalFbxVerts}→{totalFinalVerts} verts (−{saved}, −{pct:F1}%) | " +
                             $"replay={replayCount} legacy={legacyCount} remap={remapCount} " +
                             $"stale={staleCount} fallback={totalFallback}");
+
+                if (usingTransientEntries)
+                {
+                    UvtLog.Info($"[UV2 Postprocess] '{modelPath}': transient replay consumed; no sidecar asset changes were written.");
+                    return;
+                }
 
                 // ── POST-IMPORT VALIDATION ──
                 // Check mesh data AFTER Unity's import pipeline fully completes.
@@ -310,46 +343,6 @@ namespace LightmapUvTool
                 };
             }
 
-            if (transientReplay && !persistentMode)
-                ScheduleTransientCleanup(modelPath);
-        }
-
-        static void ScheduleTransientCleanup(string modelPath)
-        {
-            string capturedPath = modelPath;
-            EditorApplication.delayCall += () =>
-            {
-                try
-                {
-                    ClearTemporaryUvEntries(capturedPath);
-                }
-                catch (System.Exception ex)
-                {
-                    UvtLog.Warn($"[UV2 Postprocess] Temporary sidecar cleanup failed for '{capturedPath}': {ex.Message}");
-                }
-            };
-        }
-
-        static void ClearTemporaryUvEntries(string modelPath)
-        {
-            string sidecarPath = Uv2DataAsset.GetSidecarPath(modelPath);
-            var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
-            if (data == null || data.entries == null || data.entries.Count == 0) return;
-
-            bool hasCollision = data.collisionEntries != null && data.collisionEntries.Count > 0;
-            data.entries.Clear();
-
-            if (hasCollision)
-            {
-                EditorUtility.SetDirty(data);
-                AssetDatabase.SaveAssets();
-                UvtLog.Info($"[UV2 Postprocess] Cleared temporary UV sidecar entries for '{modelPath}' (collision entries preserved).");
-            }
-            else
-            {
-                AssetDatabase.DeleteAsset(sidecarPath);
-                UvtLog.Info($"[UV2 Postprocess] Removed temporary UV sidecar '{sidecarPath}' after reimport.");
-            }
         }
 
         static bool IsManagedCollisionObjectName(string objectName, Uv2DataAsset data)
