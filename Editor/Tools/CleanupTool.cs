@@ -46,7 +46,7 @@ namespace LightmapUvTool
 
         struct MaterialIssue
         {
-            public enum Kind { HiddenShader, MismatchedMaterial, ExtraSlot, ImporterRemap, DuplicateSlot }
+            public enum Kind { HiddenShader, MismatchedMaterial, ExtraSlot, ImporterRemap, DuplicateSlot, NullSlot }
             public Kind kind;
             public Renderer renderer;
             public int submeshIndex;
@@ -408,11 +408,33 @@ namespace LightmapUvTool
                 var mesh = e.meshFilter.sharedMesh;
                 if (mesh == null) continue;
 
+                // Check null material slots (empty slots within valid submesh range)
+                for (int i = 0; i < mats.Length && i < mesh.subMeshCount; i++)
+                {
+                    if (mats[i] == null)
+                    {
+                        string key = e.meshGroupKey ?? e.renderer.name;
+                        Material suggested = null;
+                        if (lod0Mats.TryGetValue(key, out var l0Null) && i < l0Null.Length)
+                            suggested = l0Null[i];
+
+                        materialIssues.Add(new MaterialIssue
+                        {
+                            kind = MaterialIssue.Kind.NullSlot,
+                            renderer = e.renderer,
+                            submeshIndex = i,
+                            current = null,
+                            suggested = suggested,
+                            description = $"{e.renderer.name}: material slot [{i}] is empty (null)"
+                        });
+                    }
+                }
+
                 // Check hidden shaders
                 for (int i = 0; i < mats.Length; i++)
                 {
                     if (mats[i] == null) continue;
-                    if (mats[i].shader.name.StartsWith("Hidden/LightmapUvTool/"))
+                    if (mats[i].shader.name.StartsWith(CheckerTexturePreview.ToolShaderPrefix))
                     {
                         string key = e.meshGroupKey ?? e.renderer.name;
                         Material suggested = null;
@@ -442,7 +464,7 @@ namespace LightmapUvTool
                         {
                             if (mats[i] == l0[i]) continue;
                             // Skip if already flagged as hidden shader
-                            if (mats[i] != null && mats[i].shader.name.StartsWith("Hidden/LightmapUvTool/"))
+                            if (mats[i] != null && mats[i].shader.name.StartsWith(CheckerTexturePreview.ToolShaderPrefix))
                                 continue;
                             materialIssues.Add(new MaterialIssue
                             {
@@ -517,7 +539,7 @@ namespace LightmapUvTool
                 if (e.lodIndex != 0 || e.renderer == null) continue;
                 foreach (var mat in e.renderer.sharedMaterials)
                 {
-                    if (mat != null && !mat.shader.name.StartsWith("Hidden/LightmapUvTool/"))
+                    if (mat != null && !mat.shader.name.StartsWith(CheckerTexturePreview.ToolShaderPrefix))
                         correctMats[mat.name] = mat;
                 }
             }
@@ -567,7 +589,7 @@ namespace LightmapUvTool
                     if (mat == null) continue;
 
                     bool isHidden = mat.name.StartsWith("Hidden_LightmapUvTool")
-                                 || mat.shader.name.StartsWith("Hidden/LightmapUvTool/");
+                                 || mat.shader.name.StartsWith(CheckerTexturePreview.ToolShaderPrefix);
                     bool isDefault = mat.name == "Lit" || mat.name == "No Name"
                                   || (mat.name == "Standard" && mat.shader.name == "Standard");
 
@@ -633,6 +655,7 @@ namespace LightmapUvTool
 
                 switch (issue.kind)
                 {
+                    case MaterialIssue.Kind.NullSlot:
                     case MaterialIssue.Kind.HiddenShader:
                     case MaterialIssue.Kind.MismatchedMaterial:
                         if (issue.suggested != null && issue.submeshIndex < mats.Length)
@@ -1284,7 +1307,7 @@ namespace LightmapUvTool
             bool rootHasRenderableMesh =
                 (rootMf != null && rootMf.sharedMesh != null) ||
                 (rootSmr != null && rootSmr.sharedMesh != null);
-            if (rootHasRenderableMesh && !IsRootRendererUsedAsLod0(root, lods))
+            if (rootHasRenderableMesh && !IsRootRendererUsedAsLod0(root.gameObject, lods))
             {
                 sceneIssues.Add(new SceneIssue
                 {
@@ -3007,7 +3030,7 @@ namespace LightmapUvTool
                     dstMr.scaleInLightmap = srcMr.scaleInLightmap;
                 }
                 GameObjectUtility.SetStaticEditorFlags(lod0Child,
-                    GameObjectUtility.GetStaticEditorFlags(root));
+                    GameObjectUtility.GetStaticEditorFlags(root.gameObject));
                 Undo.DestroyObjectImmediate(rootMr);
             }
             // MeshCollider stays on the node (root) — the convention is

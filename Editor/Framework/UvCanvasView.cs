@@ -157,7 +157,7 @@ namespace LightmapUvTool
             ActiveFillModeIndex = Mathf.Clamp(ActiveFillModeIndex, 0, Mathf.Max(0, FillModes.Count - 1));
         }
 
-        public void ClearHoverState(bool repaint = true)
+        public void ClearHoverState(bool repaint = true, bool clearSelection = true)
         {
             HoverHitValid = false;
             HoveredShellId = -1;
@@ -165,11 +165,14 @@ namespace LightmapUvTool
             HoverWorldPos = Vector3.zero;
             CanvasSpotValid = false;
             HasHoveredShell = false;
-            HasSelectedShell = false;
             HoveredShellDebug = null;
-            SelectedShellDebug = null;
             lastHitMeshId = -1;
             lastHitShellId = -1;
+            if (clearSelection)
+            {
+                HasSelectedShell = false;
+                SelectedShellDebug = null;
+            }
             if (repaint) RequestRepaint?.Invoke();
         }
 
@@ -392,7 +395,16 @@ namespace LightmapUvTool
 
                 // Double-click → focus SceneView camera on shell
                 if (e.clickCount == 2 && HasSelectedShell)
-                    OnDoubleClickShell?.Invoke(SelectedShell);
+                {
+                    try
+                    {
+                        OnDoubleClickShell?.Invoke(SelectedShell);
+                    }
+                    catch (Exception ex)
+                    {
+                        UvtLog.Error($"[UV Canvas] Double-click shell focus failed: {ex.Message}");
+                    }
+                }
 
                 e.Use(); RequestRepaint?.Invoke(); SceneView.RepaintAll();
             }

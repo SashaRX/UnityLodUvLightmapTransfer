@@ -488,6 +488,8 @@ namespace LightmapUvTool
                 ColorBtn(new Color(.9f,.3f,.3f), "Reset UV2 (delete sidecar)", 20, ResetUv2FromFbx);
                 EditorGUILayout.Space(2);
                 ColorBtn(new Color(.5f,.15f,.15f), "Reset Pipeline State", 20, ResetPipelineState);
+                EditorGUILayout.Space(2);
+                ColorBtn(new Color(.6f,.5f,.8f), "Save FBX from main (_main)", 20, RestoreFbxFromGitMain);
 
                 EditorGUILayout.Space(4);
                 H("FBX Export");
@@ -564,7 +566,7 @@ namespace LightmapUvTool
             requestRepaint?.Invoke();
         }
 
-        void ExecSymmetrySplit(bool includeTargets)
+        void ExecSymmetrySplit(bool includeTargets, float separationThreshold = 0.10f)
         {
             if (ctx.LodGroup == null) return;
             SymmetrySplitShells.CurrentThresholdMode = symSplitThresholdMode;
@@ -584,7 +586,7 @@ namespace LightmapUvTool
                 var uv0 = e.originalMesh.uv;
                 if (uv0 == null || uv0.Length == 0) continue;
                 var shells = UvShellExtractor.Extract(uv0, e.originalMesh.triangles);
-                int split = SymmetrySplitShells.Split(e.originalMesh, shells, out var splitParams);
+                int split = SymmetrySplitShells.Split(e.originalMesh, shells, out var splitParams, separationThreshold);
                 if (split > 0)
                 {
                     e.wasSymmetrySplit = true;
@@ -623,7 +625,7 @@ namespace LightmapUvTool
                     // Fallback to independent detection if no prescribed params
                     if (split == 0)
                     {
-                        split = SymmetrySplitShells.Split(e.originalMesh, shells);
+                        split = SymmetrySplitShells.Split(e.originalMesh, shells, separationThreshold);
                         if (split > 0)
                             UvtLog.Info($"[SymSplit] '{e.originalMesh.name}' LOD{e.lodIndex}: {split} shells split (independent)");
                     }
@@ -648,16 +650,153 @@ namespace LightmapUvTool
             // 2. Weld
             ExecWeldUv0();
 
-            // 3. SymSplit
-            ExecSymmetrySplit(splitTargetsInSymmetryStep);
+            // ── Auto-tune: try multiple SymSplit configs, pick best ──
+            // Save working copies so we can restore between attempts.
+            var savedMeshes = new Dictionary<MeshEntry, Mesh>();
+            foreach (var e in ctx.MeshEntries)
+                if (e.originalMesh != null)
+                    savedMeshes[e] = UnityEngine.Object.Instantiate(e.originalMesh);
 
-            // 4. Repack
-            var src = ctx.ForLod(ctx.SourceLodIndex);
-            if (ctx.RepackPerMesh) ExecRepackPerMesh(src);
-            else ExecRepack(src);
+            float[] separationConfigs = { 0.10f, 0.05f, 0.20f };
+            int bestRejected = int.MaxValue;
+            float bestCoverage = 0f;
+            int bestConfigIdx = 0;
+            var bestMeshes = new Dictionary<MeshEntry, Mesh>();
+            var bestTransfers = new Dictionary<MeshEntry, (Mesh transferred, GroupedShellTransfer.TransferResult tr)>();
 
-            // 5. Transfer
-            if (ctx.HasRepack) ExecTransferAll();
+            bool cancelled = false;
+            try
+            {
+            for (int ci = 0; ci < separationConfigs.Length; ci++)
+            {
+                float sepThresh = separationConfigs[ci];
+
+                if (EditorUtility.DisplayCancelableProgressBar(
+                    "Auto-tune Pipeline",
+                    $"Config {ci + 1}/{separationConfigs.Length} (separation={sepThresh:P0})",
+                    (float)ci / separationConfigs.Length))
+                {
+                    UvtLog.Warn("[Pipeline] Auto-tune cancelled by user.");
+                    cancelled = true;
+                    break;
+                }
+
+                if (ci > 0)
+                {
+                    UvtLog.Info($"[Pipeline] Auto-tune retry #{ci} (separation={sepThresh:P0})...");
+                    // Restore saved meshes
+                    foreach (var kv in savedMeshes)
+                    {
+                        kv.Key.originalMesh = UnityEngine.Object.Instantiate(kv.Value);
+                        kv.Key.originalMesh.name = kv.Value.name;
+                        kv.Key.wasSymmetrySplit = false;
+                        kv.Key.repackedMesh = null;
+                        kv.Key.transferredMesh = null;
+                        kv.Key.shellTransferResult = null;
+                    }
+                    ctx.ClearAllCaches();
+                    accumulatedOverlapHints.Clear();
+                    shellTransformCache.Clear();
+                    ctx.HasRepack = false;
+                    ctx.HasTransfer = false;
+                }
+
+                // 3. SymSplit
+                ExecSymmetrySplit(splitTargetsInSymmetryStep, sepThresh);
+
+                // 4. Repack
+                var src = ctx.ForLod(ctx.SourceLodIndex);
+                if (ctx.RepackPerMesh) ExecRepackPerMesh(src);
+                else ExecRepack(src);
+
+                // 5. Transfer
+                if (ctx.HasRepack) ExecTransferAll();
+
+                // Evaluate quality
+                int totalRejected = 0;
+                int totalOverlaps = 0;
+                int totalVerts = 0;
+                int totalTransferred = 0;
+                foreach (var e in ctx.MeshEntries)
+                {
+                    if (e.shellTransferResult == null) continue;
+                    totalRejected += e.shellTransferResult.shellsRejected;
+                    totalOverlaps += e.shellTransferResult.shellsOverlapFixed;
+                    totalVerts += e.shellTransferResult.verticesTotal;
+                    totalTransferred += e.shellTransferResult.verticesTransferred;
+                }
+                float coverage = totalVerts > 0 ? (float)totalTransferred / totalVerts : 0f;
+                int totalIssues = totalRejected + totalOverlaps;
+
+                UvtLog.Info($"[Pipeline] Config #{ci} (sep={sepThresh:P0}): " +
+                    $"rejected={totalRejected}, overlaps={totalOverlaps}, coverage={coverage:P0}");
+
+                bool better = false;
+                if (totalIssues < bestRejected)
+                    better = true;
+                else if (totalIssues == bestRejected && coverage > bestCoverage)
+                    better = true;
+
+                if (better)
+                {
+                    bestRejected = totalIssues;
+                    bestCoverage = coverage;
+                    bestConfigIdx = ci;
+                    // Save best meshes
+                    foreach (var m in bestMeshes.Values) UnityEngine.Object.DestroyImmediate(m);
+                    bestMeshes.Clear();
+                    bestTransfers.Clear();
+                    foreach (var e in ctx.MeshEntries)
+                    {
+                        if (e.originalMesh != null)
+                            bestMeshes[e] = UnityEngine.Object.Instantiate(e.originalMesh);
+                        if (e.transferredMesh != null)
+                            bestTransfers[e] = (UnityEngine.Object.Instantiate(e.transferredMesh),
+                                e.shellTransferResult);
+                    }
+                }
+
+                // Early exit if perfect
+                if (totalIssues == 0 && coverage >= 0.99f)
+                {
+                    if (ci > 0) UvtLog.Info($"[Pipeline] Perfect result on config #{ci}, stopping.");
+                    break;
+                }
+            }
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            // Restore best config if not the last one tested
+            if (bestMeshes.Count > 0 && !cancelled)
+            {
+                foreach (var kv in bestMeshes)
+                {
+                    kv.Key.originalMesh = kv.Value;
+                    kv.Key.originalMesh.name = kv.Value.name;
+                }
+                foreach (var kv in bestTransfers)
+                {
+                    kv.Key.transferredMesh = kv.Value.transferred;
+                    kv.Key.shellTransferResult = kv.Value.tr;
+                }
+            }
+
+            // Cleanup saved copies
+            foreach (var m in savedMeshes.Values)
+                UnityEngine.Object.DestroyImmediate(m);
+
+            if (cancelled)
+            {
+                requestRepaint?.Invoke();
+                return;
+            }
+
+            if (separationConfigs.Length > 1 && bestConfigIdx > 0)
+                UvtLog.Info($"[Pipeline] Auto-tune: selected config #{bestConfigIdx} " +
+                    $"(sep={separationConfigs[bestConfigIdx]:P0})");
 
             UvtLog.Info("[Pipeline] Complete.");
             requestRepaint?.Invoke();
@@ -795,7 +934,11 @@ namespace LightmapUvTool
 
         void ApplyUv2ToFbx()
         {
-            if (ctx.LodGroup == null) return;
+            if (ctx?.MeshEntries == null || ctx.MeshEntries.Count == 0)
+            {
+                UvtLog.Warn("[Apply] No meshes loaded.");
+                return;
+            }
             UvtLog.Info("[Apply] Applying UV2 to FBX...");
 
             // Pre-import pass: reimport FBXs with postprocessor bypassed to get raw vertex order
@@ -838,60 +981,47 @@ namespace LightmapUvTool
                 string fbxPath = AssetDatabase.GetAssetPath(pathMesh);
                 if (string.IsNullOrEmpty(fbxPath)) continue;
 
-                var uv2List = new List<Vector2>();
-                resultMesh.GetUVs(1, uv2List);
-                if (uv2List.Count == 0) continue;
-
-                var positions = resultMesh.vertices;
-                var uv0List = new List<Vector2>();
-                (e.originalMesh ?? resultMesh).GetUVs(0, uv0List);
-
-                if (!fbxGroups.ContainsKey(fbxPath))
-                    fbxGroups[fbxPath] = new List<MeshUv2Entry>();
-
-                string meshName = e.fbxMesh != null ? e.fbxMesh.name : e.originalMesh.name;
-                MeshFingerprint fp = e.fbxMesh != null ? MeshFingerprint.Compute(e.fbxMesh) : null;
-
-                fbxGroups[fbxPath].Add(new MeshUv2Entry
+                if (TryBuildSidecarEntry(e, resultMesh, out var sidecarEntry))
                 {
-                    meshName = meshName,
-                    uv2 = uv2List.ToArray(),
-                    welded = e.wasWelded,
-                    edgeWelded = e.wasEdgeWelded,
-                    vertPositions = positions,
-                    vertUv0 = uv0List.ToArray(),
-                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
-                    toolVersion = Uv2DataAsset.ToolVersionStr,
-                    sourceFingerprint = fp,
-                    targetUvChannel = 1,
-                    stepMeshopt = e.wasWelded,
-                    stepEdgeWeld = e.wasEdgeWelded,
-                    stepSymmetrySplit = e.wasSymmetrySplit,
-                    stepRepack = (e.lodIndex == ctx.SourceLodIndex),
-                    stepTransfer = (e.lodIndex != ctx.SourceLodIndex),
-                });
+                    if (!fbxGroups.ContainsKey(fbxPath))
+                        fbxGroups[fbxPath] = new List<MeshUv2Entry>();
+                    fbxGroups[fbxPath].Add(sidecarEntry);
+                }
             }
 
             if (fbxGroups.Count == 0) { UvtLog.Warn("[Apply] No meshes with UV2 data."); return; }
 
             // Save sidecar assets
+            bool persistentSidecarMode = PostprocessorDefineManager.IsEnabled();
             foreach (var kv in fbxGroups)
             {
-                string sidecarPath = Uv2DataAsset.GetSidecarPath(kv.Key);
-                var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
-                if (data == null)
+                if (persistentSidecarMode)
                 {
-                    data = ScriptableObject.CreateInstance<Uv2DataAsset>();
-                    AssetDatabase.CreateAsset(data, sidecarPath);
+                    string sidecarPath = Uv2DataAsset.GetSidecarPath(kv.Key);
+                    var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+                    if (data == null)
+                    {
+                        data = ScriptableObject.CreateInstance<Uv2DataAsset>();
+                        AssetDatabase.CreateAsset(data, sidecarPath);
+                    }
+                    foreach (var entry in kv.Value)
+                        data.Set(entry);
+                    EditorUtility.SetDirty(data);
+                    AssetDatabase.SaveAssets();
                 }
-                foreach (var entry in kv.Value)
-                    data.Set(entry);
-                EditorUtility.SetDirty(data);
-                AssetDatabase.SaveAssets();
+                else
+                {
+                    Uv2AssetPostprocessor.SetTransientReplayEntries(kv.Key, kv.Value);
+                }
 
                 // Prepare import settings and reimport FBX so the postprocessor replays UV2
                 Uv2AssetPostprocessor.managedImportPaths.Add(kv.Key);
-                Uv2AssetPostprocessor.PrepareImportSettings(kv.Key);
+                if (!persistentSidecarMode)
+                    Uv2AssetPostprocessor.transientReplayPaths.Add(kv.Key);
+
+                bool reimported = Uv2AssetPostprocessor.PrepareImportSettings(kv.Key);
+                if (!reimported)
+                    AssetDatabase.ImportAsset(kv.Key, ImportAssetOptions.ForceUpdate);
             }
 
             UvtLog.Info($"[Apply] Done — {fbxGroups.Count} FBX(es) updated.");
@@ -1115,14 +1245,352 @@ namespace LightmapUvTool
             return null;
         }
 
+        bool TryBuildSidecarEntry(MeshEntry entry, Mesh resultMesh, out MeshUv2Entry sidecarEntry)
+        {
+            sidecarEntry = null;
+            if (entry == null || resultMesh == null)
+                return false;
+
+            bool hasAppliedAoTarget = TryGetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent);
+            var sidecarMesh = UnityEngine.Object.Instantiate(resultMesh);
+            sidecarMesh.name = resultMesh.name;
+            try
+            {
+                if (entry.fbxMesh != null)
+                    PreserveUvChannels(sidecarMesh, entry.fbxMesh);
+                if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
+                {
+                    PreserveUvChannels(sidecarMesh, entry.originalMesh);
+                    OverwriteUvChannel(sidecarMesh, entry.originalMesh, 1);
+                }
+
+                Vector2[] auxiliaryUv = null;
+                int auxiliaryTargetUvChannel = -1;
+                if (hasAppliedAoTarget && aoUvChannel != 1)
+                {
+                    var uvDonor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
+                    if (uvDonor != null)
+                    {
+                        MergeUvComponentFromDonor(sidecarMesh, uvDonor, aoUvChannel, aoUvComponent);
+                        var auxiliaryUvList = new List<Vector2>();
+                        sidecarMesh.GetUVs(aoUvChannel, auxiliaryUvList);
+                        if (auxiliaryUvList.Count == sidecarMesh.vertexCount)
+                        {
+                            auxiliaryUv = auxiliaryUvList.ToArray();
+                            auxiliaryTargetUvChannel = aoUvChannel;
+                        }
+                    }
+                }
+
+                var primaryUvList = new List<Vector2>();
+                sidecarMesh.GetUVs(1, primaryUvList);
+                Vector2[] primaryUv = primaryUvList.Count == sidecarMesh.vertexCount
+                    ? primaryUvList.ToArray()
+                    : null;
+                int primaryTargetUvChannel = 1;
+                if (primaryUv == null && auxiliaryUv != null)
+                {
+                    primaryUv = auxiliaryUv;
+                    primaryTargetUvChannel = auxiliaryTargetUvChannel;
+                    auxiliaryUv = null;
+                    auxiliaryTargetUvChannel = -1;
+                }
+
+                if (primaryUv == null)
+                    return false;
+
+                var positions = sidecarMesh.vertices;
+                var uv0List = new List<Vector2>();
+                (entry.originalMesh ?? resultMesh).GetUVs(0, uv0List);
+
+                string meshName = entry.fbxMesh != null
+                    ? entry.fbxMesh.name
+                    : (entry.originalMesh != null ? entry.originalMesh.name : resultMesh.name);
+                MeshFingerprint fp = entry.fbxMesh != null ? MeshFingerprint.Compute(entry.fbxMesh) : null;
+
+                sidecarEntry = new MeshUv2Entry
+                {
+                    meshName = meshName,
+                    uv2 = primaryUv,
+                    welded = entry.wasWelded,
+                    edgeWelded = entry.wasEdgeWelded,
+                    vertPositions = positions,
+                    vertUv0 = uv0List.ToArray(),
+                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
+                    toolVersion = Uv2DataAsset.ToolVersionStr,
+                    sourceFingerprint = fp,
+                    targetUvChannel = primaryTargetUvChannel,
+                    auxiliaryUv = auxiliaryUv,
+                    auxiliaryTargetUvChannel = auxiliaryTargetUvChannel,
+                    stepMeshopt = entry.wasWelded,
+                    stepEdgeWeld = entry.wasEdgeWelded,
+                    stepSymmetrySplit = entry.wasSymmetrySplit,
+                    stepRepack = (entry.lodIndex == ctx.SourceLodIndex),
+                    stepTransfer = (entry.lodIndex != ctx.SourceLodIndex),
+                };
+                return true;
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(sidecarMesh);
+            }
+        }
+
         public void ExportFbxPublic(bool overwriteSource) => ExportFbx(overwriteSource);
         public void ApplyUv2Public() => ApplyUv2ToFbx();
         public void SaveAllPublic() => SaveAll();
 
+        /// <summary>
+        /// Export only vertex colors (e.g. baked AO) to FBX without running the
+        /// UV2 pipeline. Copies vertex colors from scene meshes onto the FBX clone
+        /// and overwrites the source FBX. Only updates included mesh entries.
+        /// </summary>
+        public void ExportVertexColorsToFbx()
+        {
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (ctx?.MeshEntries == null || ctx.MeshEntries.Count == 0)
+            {
+                UvtLog.Error("[FBX Export] No meshes loaded.");
+                return;
+            }
+
+            RestoreAllPreviews();
+
+            string sourceFbxPath = ResolveFbxPath();
+            if (string.IsNullOrEmpty(sourceFbxPath))
+            {
+                UvtLog.Error("[FBX Export] Cannot find source FBX path.");
+                return;
+            }
+
+            if (!EditorUtility.DisplayDialog("Overwrite FBX (Vertex Colors)",
+                $"Overwrite '{System.IO.Path.GetFileName(sourceFbxPath)}' with current vertex colors?\n\n" +
+                "Only vertex colors will be updated. UV2 and mesh topology stay unchanged.",
+                "Overwrite", "Cancel"))
+                return;
+
+            // ── Phase 1: Prepare importer (single reimport) ──
+            var srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
+            bool needsReimport = false;
+            if (srcImporter != null)
+            {
+                if (srcImporter.generateSecondaryUV)  { srcImporter.generateSecondaryUV = false; needsReimport = true; }
+                if (srcImporter.weldVertices)          { srcImporter.weldVertices = false;        needsReimport = true; }
+                if (srcImporter.meshCompression != ModelImporterMeshCompression.Off)
+                    { srcImporter.meshCompression = ModelImporterMeshCompression.Off; needsReimport = true; }
+                if (srcImporter.meshOptimizationFlags != 0)
+                    { srcImporter.meshOptimizationFlags = 0; needsReimport = true; }
+                if (!srcImporter.isReadable)
+                    { srcImporter.isReadable = true; needsReimport = true; }
+                if (needsReimport)
+                {
+                    Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
+                    srcImporter.SaveAndReimport();
+                }
+            }
+
+            // ── Phase 2: Build export hierarchy ──
+            var fbxAsset = AssetDatabase.LoadMainAssetAtPath(sourceFbxPath) as GameObject;
+            if (fbxAsset == null)
+            {
+                UvtLog.Error($"[FBX Export] Cannot load FBX asset at '{sourceFbxPath}'.");
+                return;
+            }
+
+            var tempRoot = UnityEngine.Object.Instantiate(fbxAsset);
+            tempRoot.name = fbxAsset.name;
+
+            int updated = 0;
+            Dictionary<string, string> renameMap = null;
+            try
+            {
+                updated = CopyVertexDataToClone(tempRoot);
+                if (updated == 0)
+                {
+                    UvtLog.Warn("[FBX Export] No vertex data found to export.");
+                    return;
+                }
+
+                renameMap = NormalizeExportHierarchy(tempRoot);
+                PrepareCollisionMaterials(tempRoot);
+                TrimMaterialArrays(tempRoot);
+
+                // ── Phase 3: Export FBX ──
+                string fullPath = System.IO.Path.GetFullPath(sourceFbxPath);
+                string metaBak = System.IO.Path.Combine(
+                    System.IO.Path.GetTempPath(),
+                    System.IO.Path.GetFileName(fullPath) + ".meta.bak");
+                if (System.IO.File.Exists(fullPath + ".meta"))
+                    System.IO.File.Copy(fullPath + ".meta", metaBak, true);
+
+                var exportOptions = new UnityEditor.Formats.Fbx.Exporter.ExportModelOptions
+                    { ExportFormat = UnityEditor.Formats.Fbx.Exporter.ExportFormat.Binary };
+                UnityEditor.Formats.Fbx.Exporter.ModelExporter.ExportObjects(
+                    sourceFbxPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
+
+                UvtLog.Info($"[FBX Export] Vertex data ({updated} updates) -> {sourceFbxPath}");
+
+                if (System.IO.File.Exists(metaBak))
+                {
+                    System.IO.File.Copy(metaBak, fullPath + ".meta", true);
+                    System.IO.File.Delete(metaBak);
+                }
+            }
+            catch (Exception ex)
+            {
+                UvtLog.Error("[FBX Export] Vertex color export failed: " + ex);
+                return;
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(tempRoot);
+            }
+
+            // ── Phase 4: Reimport (single refresh) ──
+            AssetDatabase.Refresh();
+            if (ctx.LodGroup != null)
+            {
+                RelinkSceneMeshReferences(sourceFbxPath,
+                    renameMap != null && renameMap.Count > 0 ? renameMap : null, ctx.LodGroup);
+                ctx.Refresh(ctx.LodGroup);
+            }
+
+            // ── Phase 5: Restore working copies (must be last) ──
+            RestoreWorkingCopiesToScene();
+#else
+            UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
+#endif
+        }
+
+        string ResolveFbxPath()
+        {
+            string path = ctx.SourceFbxPath;
+            if (!string.IsNullOrEmpty(path)) return path;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (e.fbxMesh == null) continue;
+                string p = AssetDatabase.GetAssetPath(e.fbxMesh);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase))
+                    return p;
+            }
+            return null;
+        }
+
+        int CopyVertexDataToClone(GameObject tempRoot)
+        {
+            int aoUvIdx = -1;
+            var aoChannel = VertexAOTool.LastAppliedTargetChannel;
+            if (aoChannel.HasValue)
+            {
+                int ch = (int)aoChannel.Value;
+                if (ch > (int)AOTargetChannel.VertexColorA)
+                    aoUvIdx = (ch - (int)AOTargetChannel.UV0_X) / 2;
+            }
+
+            int updated = 0;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (!e.include) continue;
+                Mesh sceneMesh = e.originalMesh ?? e.fbxMesh;
+                if (sceneMesh == null) continue;
+
+                foreach (var cloneMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+                {
+                    if (cloneMf == null || cloneMf.sharedMesh == null) continue;
+                    if (cloneMf.sharedMesh.name != sceneMesh.name) continue;
+
+                    var cloneMesh = UnityEngine.Object.Instantiate(cloneMf.sharedMesh);
+                    cloneMesh.name = cloneMf.sharedMesh.name;
+
+                    if (sceneMesh.colors32 != null && sceneMesh.colors32.Length == cloneMesh.vertexCount)
+                    {
+                        cloneMesh.colors32 = sceneMesh.colors32;
+                        updated++;
+                    }
+                    else if (sceneMesh.colors != null && sceneMesh.colors.Length == cloneMesh.vertexCount)
+                    {
+                        cloneMesh.colors = sceneMesh.colors;
+                        updated++;
+                    }
+
+                    if (aoUvIdx >= 0 && sceneMesh.vertexCount == cloneMesh.vertexCount)
+                    {
+                        var uvs = new List<Vector2>();
+                        sceneMesh.GetUVs(aoUvIdx, uvs);
+                        if (uvs.Count == cloneMesh.vertexCount)
+                        {
+                            cloneMesh.SetUVs(aoUvIdx, uvs);
+                            updated++;
+                        }
+                    }
+
+                    cloneMf.sharedMesh = cloneMesh;
+                    break;
+                }
+            }
+            return updated;
+        }
+
+        void PrepareCollisionMaterials(GameObject tempRoot)
+        {
+            Material colFallbackMat = null;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (e.renderer != null && e.renderer.sharedMaterial != null &&
+                    !CheckerTexturePreview.IsPreviewShader(e.renderer.sharedMaterial.shader.name))
+                { colFallbackMat = e.renderer.sharedMaterial; break; }
+            }
+            foreach (var colMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (colMf == null || colMf.sharedMesh == null) continue;
+                if (!MeshHygieneUtility.IsCollisionNodeName(colMf.gameObject.name)) continue;
+                var colMr = colMf.GetComponent<MeshRenderer>();
+                if (colFallbackMat != null)
+                {
+                    if (colMr == null) colMr = colMf.gameObject.AddComponent<MeshRenderer>();
+                    colMr.sharedMaterials = new[] { colFallbackMat };
+                }
+                else if (colMr != null)
+                    UnityEngine.Object.DestroyImmediate(colMr);
+            }
+        }
+
+        void TrimMaterialArrays(GameObject tempRoot)
+        {
+            foreach (var mr in tempRoot.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                if (mr == null) continue;
+                var mf = mr.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+                var mats = mr.sharedMaterials;
+                if (mats.Length > mf.sharedMesh.subMeshCount)
+                {
+                    var trimmed = new Material[mf.sharedMesh.subMeshCount];
+                    System.Array.Copy(mats, trimmed, trimmed.Length);
+                    mr.sharedMaterials = trimmed;
+                }
+            }
+        }
+
+        void RestoreWorkingCopiesToScene()
+        {
+            if (ctx?.MeshEntries == null) return;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (!e.include || e.meshFilter == null) continue;
+                if (e.originalMesh != null && e.meshFilter.sharedMesh != e.originalMesh)
+                    e.meshFilter.sharedMesh = e.originalMesh;
+            }
+        }
+
         void ExportFbx(bool overwriteSource)
         {
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
-            if (ctx.LodGroup == null) { UvtLog.Error("[FBX Export] No LODGroup loaded."); return; }
+            if (ctx?.MeshEntries == null || ctx.MeshEntries.Count == 0)
+            {
+                UvtLog.Error("[FBX Export] No meshes loaded.");
+                return;
+            }
 
             // Restore any active preview (checker, AO, shell colors) before export
             // so that original materials are captured, not preview materials.
@@ -1186,12 +1654,20 @@ namespace LightmapUvTool
 
             bool allGroupsSucceeded = true;
             var overwrittenFbxPaths = new HashSet<string>();
+            var transientReplayEntriesByPath = new Dictionary<string, List<MeshUv2Entry>>();
+            // Collected node renames from NormalizeExportHierarchy, per FBX path.
+            // Used after reimport to re-link scene mesh references.
+            var meshRenamesByFbx = new Dictionary<string, Dictionary<string, string>>();
             foreach (var kv in fbxGroups)
             {
                 string sourceFbxPath = kv.Key;
                 var entries = kv.Value;
                 string exportPath;
                 bool groupSucceeded = false;
+                bool persistentSidecarMode = PostprocessorDefineManager.IsEnabled();
+                string tempDir = System.IO.Path.GetTempPath();
+                string fbxBakName = System.IO.Path.GetFileName(
+                    System.IO.Path.GetFullPath(sourceFbxPath));
                 if (overwriteSource)
                 {
                     if (!EditorUtility.DisplayDialog("Overwrite Source FBX",
@@ -1206,9 +1682,9 @@ namespace LightmapUvTool
                     string fullMeta = fullSource + ".meta";
                     try
                     {
-                        System.IO.File.Copy(fullSource, fullSource + ".bak", true);
+                        System.IO.File.Copy(fullSource, System.IO.Path.Combine(tempDir, fbxBakName + ".bak"), true);
                         if (System.IO.File.Exists(fullMeta))
-                            System.IO.File.Copy(fullMeta, fullSource + ".meta.bak", true);
+                            System.IO.File.Copy(fullMeta, System.IO.Path.Combine(tempDir, fbxBakName + ".meta.bak"), true);
                     }
                     catch (Exception ex) { UvtLog.Error("[FBX Export] Backup failed: " + ex.Message); allGroupsSucceeded = false; continue; }
                 }
@@ -1269,9 +1745,12 @@ namespace LightmapUvTool
                         if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
                         {
                             PreserveUvChannels(exportMesh, entry.originalMesh);
-                            // AO often writes into UV2 components. Ensure UV2 from the
-                            // working/original mesh wins so overwrite export persists AO.
-                            OverwriteUvChannel(exportMesh, entry.originalMesh, 1);
+                            // Only overwrite UV1 from originalMesh when there is no
+                            // repack/transfer result — otherwise the repacked lightmap
+                            // UV in channel 1 takes priority over the pre-pipeline data.
+                            // (Preserves AO only when the pipeline didn't overwrite it.)
+                            if (entry.repackedMesh == null && entry.transferredMesh == null)
+                                OverwriteUvChannel(exportMesh, entry.originalMesh, 1);
                         }
                         // AO often writes into UV2 components. Source meshes may not
                         // have UV2 at all, so pick the best available donor.
@@ -1342,7 +1821,9 @@ namespace LightmapUvTool
                         if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
                         {
                             PreserveUvChannels(exportMesh, entry.originalMesh);
-                            OverwriteUvChannel(exportMesh, entry.originalMesh, 1);
+                            if (entry.repackedMesh == null && entry.transferredMesh == null)
+                                OverwriteUvChannel(exportMesh, entry.originalMesh, 1);
+                        }
                         if (TryGetAppliedAoUvTarget(out int aoUvChannel, out int aoUvComponent))
                         {
                             var uv2Donor = SelectUv2Donor(entry, resultMesh, aoUvChannel);
@@ -1364,85 +1845,111 @@ namespace LightmapUvTool
                     }
 
                     // ── Remove stale children from cloned FBX ──
+                    // For full LOD workflows we prune renderable leftovers that no longer
+                    // belong to the export set. For standalone/partial FBX overwrite we
+                    // must preserve untouched siblings and only replace the selected mesh.
                     // Keep collision nodes, MeshCollider-backed nodes, structural
                     // containers, and renderable children that still map to the
                     // export mesh set. Remove only stale renderable leftovers.
                     // Must run BEFORE NormalizeExportHierarchy (which renames LOD0).
-                    var validMeshNames = new HashSet<string>();
-                    foreach (var (entry, resultMesh) in entries)
+                    if (!(ctx != null && ctx.StandaloneMesh))
                     {
-                        string meshName = ResolveExportMeshName(entry, resultMesh);
-                        validMeshNames.Add(meshName);
+                        var validMeshNames = new HashSet<string>();
+                        foreach (var (entry, resultMesh) in entries)
+                        {
+                            string meshName = ResolveExportMeshName(entry, resultMesh);
+                            validMeshNames.Add(meshName);
+                        }
+
+                        // Protect meshes referenced by MeshCollider components.
+                        // Some projects keep collision nodes without strict _COL naming,
+                        // and there can be multiple colliders in the hierarchy.
+                        var colliderMeshNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        var colliderRootNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var mc in tempRoot.GetComponentsInChildren<MeshCollider>(true))
+                        {
+                            if (mc == null) continue;
+                            colliderRootNames.Add(mc.gameObject.name);
+                            if (mc.sharedMesh != null && !string.IsNullOrEmpty(mc.sharedMesh.name))
+                                colliderMeshNames.Add(mc.sharedMesh.name);
+                        }
+
+                        for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
+                        {
+                            var ch = tempRoot.transform.GetChild(ci);
+                            // Preserve existing collision nodes from source FBX even when
+                            // they are not part of mesh transfer entries.
+                            if (MeshHygieneUtility.IsCollisionNodeName(ch.name))
+                                continue;
+                            if (colliderRootNames.Contains(ch.name))
+                                continue;
+                            var chMf = ch.GetComponent<MeshFilter>();
+                            if (chMf != null && chMf.sharedMesh != null &&
+                                colliderMeshNames.Contains(chMf.sharedMesh.name))
+                                continue;
+                            var chSmr = ch.GetComponent<SkinnedMeshRenderer>();
+                            bool hasRenderableMesh =
+                                (chMf != null && chMf.sharedMesh != null) ||
+                                (chSmr != null && chSmr.sharedMesh != null);
+                            // Keep structural/container nodes (no direct mesh on node).
+                            // Removing them flattens FBX hierarchy and can break prefabs.
+                            if (!hasRenderableMesh)
+                                continue;
+                            string childMeshName = null;
+                            if (chMf != null && chMf.sharedMesh != null)
+                                childMeshName = chMf.sharedMesh.name;
+                            else if (chSmr != null && chSmr.sharedMesh != null)
+                                childMeshName = chSmr.sharedMesh.name;
+
+                            // Keep nodes when either the node name OR its bound mesh name
+                            // is part of the export set. Some DCC/Unity imports keep node
+                            // names different from mesh names (especially for root LOD0),
+                            // and pruning by node name alone can drop valid LOD content.
+                            bool keepByNodeName = validMeshNames.Contains(ch.name);
+                            bool keepByMeshName = !string.IsNullOrEmpty(childMeshName) &&
+                                                  validMeshNames.Contains(childMeshName);
+                            if (!keepByNodeName && !keepByMeshName)
+                            {
+                                UvtLog.Verbose($"[FBX Export] Pruning stale child '{ch.name}'");
+                                UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                            }
+                        }
                     }
-
-                    // Protect meshes referenced by MeshCollider components.
-                    // Some projects keep collision nodes without strict _COL naming,
-                    // and there can be multiple colliders in the hierarchy.
-                    var colliderMeshNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    var colliderRootNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var mc in tempRoot.GetComponentsInChildren<MeshCollider>(true))
+                    else
                     {
-                        if (mc == null) continue;
-                        colliderRootNames.Add(mc.gameObject.name);
-                        if (mc.sharedMesh != null && !string.IsNullOrEmpty(mc.sharedMesh.name))
-                            colliderMeshNames.Add(mc.sharedMesh.name);
-                    }
-
-                    for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
-                    {
-                        var ch = tempRoot.transform.GetChild(ci);
-                        // Preserve existing collision nodes from source FBX even when
-                        // they are not part of mesh transfer entries.
-                        if (MeshHygieneUtility.IsCollisionNodeName(ch.name))
-                            continue;
-                        if (colliderRootNames.Contains(ch.name))
-                            continue;
-                        var chMf = ch.GetComponent<MeshFilter>();
-                        if (chMf != null && chMf.sharedMesh != null &&
-                            colliderMeshNames.Contains(chMf.sharedMesh.name))
-                            continue;
-                        var chSmr = ch.GetComponent<SkinnedMeshRenderer>();
-                        bool hasRenderableMesh =
-                            (chMf != null && chMf.sharedMesh != null) ||
-                            (chSmr != null && chSmr.sharedMesh != null);
-                        // Keep structural/container nodes (no direct mesh on node).
-                        // Removing them flattens FBX hierarchy and can break prefabs.
-                        if (!hasRenderableMesh)
-                            continue;
-                        string childMeshName = null;
-                        if (chMf != null && chMf.sharedMesh != null)
-                            childMeshName = chMf.sharedMesh.name;
-                        else if (chSmr != null && chSmr.sharedMesh != null)
-                            childMeshName = chSmr.sharedMesh.name;
-
-                        // Keep nodes when either the node name OR its bound mesh name
-                        // is part of the export set. Some DCC/Unity imports keep node
-                        // names different from mesh names (especially for root LOD0),
-                        // and pruning by node name alone can drop valid LOD content.
-                        bool keepByNodeName = validMeshNames.Contains(ch.name);
-                        bool keepByMeshName = !string.IsNullOrEmpty(childMeshName) &&
-                                              validMeshNames.Contains(childMeshName);
-                        if (!keepByNodeName && !keepByMeshName)
-                            UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                        UvtLog.Verbose("[FBX Export] Standalone overwrite: preserving untouched sibling meshes in source FBX.");
                     }
 
                     // ── Normalize FBX hierarchy ──
                     // Ensure root is a clean pivot (identity transform, no mesh)
                     // and LOD0 child named same as root gets _LOD0 suffix.
-                    NormalizeExportHierarchy(tempRoot);
+                    // Returns a map of oldNodeName → newNodeName for mesh re-linking.
+                    var nodeRenameMap = NormalizeExportHierarchy(tempRoot);
+                    if (nodeRenameMap.Count > 0)
+                        meshRenamesByFbx[sourceFbxPath] = nodeRenameMap;
 
-                    // Add collision meshes from sidecar (if any)
+                    // Add collision meshes from sidecar (if any).
+                    // When sidecar provides collision data, remove existing _COL
+                    // children first to avoid duplicates.
                     var collisionData = CollisionMeshTool.GetCollisionMeshesFromSidecar(sourceFbxPath);
+                    if (collisionData.Count > 0)
+                    {
+                        for (int ci = tempRoot.transform.childCount - 1; ci >= 0; ci--)
+                        {
+                            var ch = tempRoot.transform.GetChild(ci);
+                            if (MeshHygieneUtility.IsCollisionNodeName(ch.name))
+                                UnityEngine.Object.DestroyImmediate(ch.gameObject);
+                        }
+                    }
                     int collisionMeshCount = 0;
                     foreach (var (colMeshName, colMeshes, isConvex) in collisionData)
                     {
                         if (colMeshes.Count == 1 && !isConvex)
                         {
-                            // Simplified: single _COL child
+                            // Simplified: single _COL child (no MeshRenderer — avoids stale material)
                             var colChild = new GameObject(colMeshName + "_COL");
                             colChild.transform.SetParent(tempRoot.transform, false);
                             colChild.AddComponent<MeshFilter>().sharedMesh = colMeshes[0];
-                            colChild.AddComponent<MeshRenderer>();
                             collisionMeshCount++;
                         }
                         else
@@ -1455,18 +1962,49 @@ namespace LightmapUvTool
                                 var hullChild = new GameObject($"{colMeshName}_COL_Hull{hi}");
                                 hullChild.transform.SetParent(container.transform, false);
                                 hullChild.AddComponent<MeshFilter>().sharedMesh = colMeshes[hi];
-                                hullChild.AddComponent<MeshRenderer>();
                                 collisionMeshCount++;
                             }
                         }
                     }
 
+                    if (collisionMeshCount > 0)
+                        UvtLog.Verbose($"[FBX Export] Added {collisionMeshCount} collision mesh(es) from sidecar");
+
                     // Strip _COL meshes to bare minimum: vertices + triangles +
                     // averaged normals + tangents. No UVs, colors, or other channels.
+                    // Assign a real material from LOD0 render mesh to prevent FBX
+                    // Exporter from writing a default "Lit" material on collision nodes.
+                    Material colFallbackMat = null;
+                    foreach (var (entry, _) in entries)
+                    {
+                        if (entry.renderer != null && entry.renderer.sharedMaterial != null &&
+                            !CheckerTexturePreview.IsPreviewShader(entry.renderer.sharedMaterial.shader.name))
+                        {
+                            colFallbackMat = entry.renderer.sharedMaterial;
+                            break;
+                        }
+                    }
+
                     foreach (var colMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
                     {
                         if (colMf == null || colMf.sharedMesh == null) continue;
                         if (!MeshHygieneUtility.IsCollisionNodeName(colMf.gameObject.name)) continue;
+
+                        // Assign LOD0 material to collision renderer so FBX Exporter
+                        // doesn't create a stale "Lit" default. If no render material
+                        // is available, destroy the renderer as fallback.
+                        var colMr = colMf.GetComponent<MeshRenderer>();
+                        if (colFallbackMat != null)
+                        {
+                            if (colMr == null)
+                                colMr = colMf.gameObject.AddComponent<MeshRenderer>();
+                            colMr.sharedMaterials = new[] { colFallbackMat };
+                        }
+                        else if (colMr != null)
+                        {
+                            UnityEngine.Object.DestroyImmediate(colMr);
+                        }
+
                         var srcCol = colMf.sharedMesh;
                         if (srcCol.isReadable)
                         {
@@ -1510,6 +2048,8 @@ namespace LightmapUvTool
                         var mats = mr.sharedMaterials;
                         if (mats.Length > mesh.subMeshCount)
                         {
+                            UvtLog.Verbose($"[FBX Export] Trimming materials on '{mr.gameObject.name}': " +
+                                $"{mats.Length} → {mesh.subMeshCount}");
                             var trimmed = new Material[mesh.subMeshCount];
                             System.Array.Copy(mats, trimmed, trimmed.Length);
                             mr.sharedMaterials = trimmed;
@@ -1521,26 +2061,19 @@ namespace LightmapUvTool
                     int totalExported = entries.Count + collisionMeshCount;
                     UvtLog.Info("[FBX Export] Exported (binary) " + totalExported + " mesh(es) -> " + exportPath);
                     groupSucceeded = true;
-                    // Restore original .meta and clean up .bak files
+                    // Restore original .meta from temp backup
                     if (overwriteSource)
                     {
                         string fullPath = System.IO.Path.GetFullPath(sourceFbxPath);
-                        string metaBak = fullPath + ".meta.bak";
+                        string metaBak = System.IO.Path.Combine(tempDir, fbxBakName + ".meta.bak");
                         if (System.IO.File.Exists(metaBak))
                         {
                             System.IO.File.Copy(metaBak, fullPath + ".meta", true);
                             System.IO.File.Delete(metaBak);
                         }
-                        string fbxBak = fullPath + ".bak";
+                        string fbxBak = System.IO.Path.Combine(tempDir, fbxBakName + ".bak");
                         if (System.IO.File.Exists(fbxBak))
                             System.IO.File.Delete(fbxBak);
-                        // Delete auto-created .bak.meta files
-                        string fbxBakMeta = fbxBak + ".meta";
-                        if (System.IO.File.Exists(fbxBakMeta))
-                            System.IO.File.Delete(fbxBakMeta);
-                        string metaBakMeta = metaBak + ".meta";
-                        if (System.IO.File.Exists(metaBakMeta))
-                            System.IO.File.Delete(metaBakMeta);
                         overwrittenFbxPaths.Add(sourceFbxPath);
                     }
                 }
@@ -1561,12 +2094,24 @@ namespace LightmapUvTool
 
                 // Save sidecar entries so our postprocessor (order=10000) can
                 // re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
-                // Only when Sidecar UV2 Mode is enabled — otherwise the postprocessor
-                // is compiled out and sidecar application won't run.
-                if (overwriteSource && PostprocessorDefineManager.IsEnabled())
+                // If Sidecar UV2 Mode is off, mark the path for one-shot transient
+                // replay and cleanup after the current import finishes.
+                if (overwriteSource)
                 {
-                    SaveSidecarForExport(sourceFbxPath, entries);
+                    var sidecarEntries = BuildSidecarEntriesForExport(entries);
+                    if (persistentSidecarMode)
+                    {
+                        SaveSidecarForExport(sourceFbxPath, sidecarEntries);
+                    }
+                    else
+                    {
+                        transientReplayEntriesByPath[sourceFbxPath] = sidecarEntries;
+                        ArmTransientReplayForOverwrite(sourceFbxPath, transientReplayEntriesByPath);
+                    }
+
                     Uv2AssetPostprocessor.managedImportPaths.Add(sourceFbxPath);
+                    if (!persistentSidecarMode)
+                        Uv2AssetPostprocessor.transientReplayPaths.Add(sourceFbxPath);
                 }
 
                 // Always disable generateSecondaryUV after overwriting FBX with
@@ -1595,8 +2140,23 @@ namespace LightmapUvTool
 
             AssetDatabase.Refresh();
 
+            // Re-link scene mesh references after FBX reimport.
+            // Unity recreates sub-asset meshes on reimport; old MeshFilter
+            // references go Missing even when names didn't change.
+            // Always re-link for every overwritten FBX.
+            if (overwriteSource && allGroupsSucceeded && ctx?.LodGroup != null)
+            {
+                foreach (string fbxPath in overwrittenFbxPaths)
+                {
+                    Dictionary<string, string> renameMap = null;
+                    meshRenamesByFbx.TryGetValue(fbxPath, out renameMap);
+                    RelinkSceneMeshReferences(fbxPath, renameMap, ctx.LodGroup);
+                }
+            }
+
             // Remove stale material remaps created by FBX importer defaults on
-            // collision-only nodes. These should not survive an overwrite export.
+            // collision-only nodes. This clears unwanted "Lit"/"No Name" entries
+            // that should not survive an overwrite export.
             if (overwriteSource && allGroupsSucceeded)
             {
                 foreach (string fbxPath in overwrittenFbxPaths)
@@ -1613,20 +2173,56 @@ namespace LightmapUvTool
                     }
                     if (toRemove.Count > 0)
                     {
+                        if (transientReplayEntriesByPath.Count > 0)
+                            ArmTransientReplayForOverwrite(fbxPath, transientReplayEntriesByPath);
                         foreach (var key in toRemove)
                             imp.RemoveRemap(key);
                         imp.SaveAndReimport();
                     }
                 }
             }
+
+            if (allGroupsSucceeded)
+                SwitchToPostApplyView();
 #endif
+        }
+
+        static void ArmTransientReplayForOverwrite(
+            string assetPath,
+            Dictionary<string, List<MeshUv2Entry>> transientReplayEntriesByPath)
+        {
+            if (string.IsNullOrEmpty(assetPath) || transientReplayEntriesByPath == null)
+                return;
+
+            if (!transientReplayEntriesByPath.TryGetValue(assetPath, out var entries) ||
+                entries == null || entries.Count == 0)
+                return;
+
+            Uv2AssetPostprocessor.SetTransientReplayEntries(assetPath, entries);
+            Uv2AssetPostprocessor.managedImportPaths.Add(assetPath);
+            Uv2AssetPostprocessor.transientReplayPaths.Add(assetPath);
+        }
+
+        List<MeshUv2Entry> BuildSidecarEntriesForExport(List<(MeshEntry entry, Mesh resultMesh)> entries)
+        {
+            var sidecarEntries = new List<MeshUv2Entry>();
+            foreach (var (e, resultMesh) in entries)
+            {
+                if (resultMesh == null) continue;
+                if (!TryBuildSidecarEntry(e, resultMesh, out var sidecarEntry))
+                    continue;
+
+                sidecarEntries.Add(sidecarEntry);
+            }
+
+            return sidecarEntries;
         }
 
         /// <summary>
         /// Build and save sidecar UV2 entries from export data so the postprocessor
         /// can re-apply UV2 after third-party postprocessors (e.g. Bakery auto-unwrap).
         /// </summary>
-        void SaveSidecarForExport(string fbxPath, List<(MeshEntry entry, Mesh resultMesh)> entries)
+        void SaveSidecarForExport(string fbxPath, List<MeshUv2Entry> sidecarEntries)
         {
             string sidecarPath = Uv2DataAsset.GetSidecarPath(fbxPath);
             var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
@@ -1637,38 +2233,9 @@ namespace LightmapUvTool
             }
 
             int saved = 0;
-            foreach (var (e, resultMesh) in entries)
+            foreach (var sidecarEntry in sidecarEntries)
             {
-                if (resultMesh == null) continue;
-                var uv2List = new List<Vector2>();
-                resultMesh.GetUVs(1, uv2List);
-                if (uv2List.Count == 0) continue;
-
-                var positions = resultMesh.vertices;
-                var uv0List = new List<Vector2>();
-                (e.originalMesh ?? resultMesh).GetUVs(0, uv0List);
-
-                string meshName = e.fbxMesh != null ? e.fbxMesh.name : e.originalMesh.name;
-                MeshFingerprint fp = e.fbxMesh != null ? MeshFingerprint.Compute(e.fbxMesh) : null;
-
-                data.Set(new MeshUv2Entry
-                {
-                    meshName = meshName,
-                    uv2 = uv2List.ToArray(),
-                    welded = e.wasWelded,
-                    edgeWelded = e.wasEdgeWelded,
-                    vertPositions = positions,
-                    vertUv0 = uv0List.ToArray(),
-                    schemaVersion = Uv2DataAsset.CurrentSchemaVersion,
-                    toolVersion = Uv2DataAsset.ToolVersionStr,
-                    sourceFingerprint = fp,
-                    targetUvChannel = 1,
-                    stepMeshopt = e.wasWelded,
-                    stepEdgeWeld = e.wasEdgeWelded,
-                    stepSymmetrySplit = e.wasSymmetrySplit,
-                    stepRepack = (e.lodIndex == ctx.SourceLodIndex),
-                    stepTransfer = (e.lodIndex != ctx.SourceLodIndex),
-                });
+                data.Set(sidecarEntry);
                 saved++;
             }
 
@@ -1733,7 +2300,7 @@ namespace LightmapUvTool
             return best;
         }
 
-        static void CopyRendererSettings(Renderer src, Renderer dst)
+        internal static void CopyRendererSettings(Renderer src, Renderer dst)
         {
             if (src == null || dst == null) return;
 
@@ -1743,9 +2310,7 @@ namespace LightmapUvTool
             {
                 var m = srcMats[i];
                 string shaderName = m != null && m.shader != null ? m.shader.name : null;
-                if (!string.IsNullOrEmpty(shaderName) &&
-                    (shaderName.Equals("Hidden/Internal-Colored", StringComparison.OrdinalIgnoreCase) ||
-                     shaderName.StartsWith("Hidden/LightmapUvTool/", StringComparison.OrdinalIgnoreCase)))
+                if (CheckerTexturePreview.IsPreviewShader(shaderName))
                 {
                     hasPreviewMat = true;
                     break;
@@ -1874,8 +2439,13 @@ namespace LightmapUvTool
         /// - Collision node transforms baked into vertices (pivot at origin).
         /// Does NOT move meshes off the root — preserves original FBX structure.
         /// </summary>
-        static void NormalizeExportHierarchy(GameObject root)
+        /// <summary>
+        /// Returns a dictionary of oldNodeName → newNodeName for nodes that were renamed.
+        /// Used to re-link scene mesh references after FBX reimport.
+        /// </summary>
+        static Dictionary<string, string> NormalizeExportHierarchy(GameObject root)
         {
+            var renameMap = new Dictionary<string, string>();
             string baseName = root.name;
             string sanitizedBaseName = MeshHygieneUtility.SanitizeName(baseName);
             if (string.IsNullOrEmpty(sanitizedBaseName))
@@ -1891,7 +2461,10 @@ namespace LightmapUvTool
             {
                 if (child.name == baseName || child.name == sanitizedBaseName)
                 {
+                    string oldName = child.name;
                     child.name = sanitizedBaseName + "_LOD0";
+                    if (oldName != child.name)
+                        renameMap[oldName] = child.name;
                     break;
                 }
             }
@@ -1938,57 +2511,226 @@ namespace LightmapUvTool
                 for (int i = 0; i < directLodChildren.Count; i++)
                 {
                     string normalizedName = sanitizedBaseName + "_LOD" + i;
-                    if (directLodChildren[i].transform.name != normalizedName)
+                    string oldName = directLodChildren[i].transform.name;
+                    if (oldName != normalizedName)
+                    {
                         directLodChildren[i].transform.name = normalizedName;
+                        renameMap[oldName] = normalizedName;
+                    }
                 }
             }
 
-            // Collision nodes: bake transform offset into vertices, then reset to identity.
-            // This keeps the mesh in place but puts the pivot at 0,0,0.
-            foreach (var colMf in root.GetComponentsInChildren<MeshFilter>(true))
+            // Bake non-identity transforms into mesh vertices for ALL children,
+            // then reset to identity. This normalizes scale (common problem:
+            // FBX imported at 0.01 with compensating 100x scale on node) and
+            // ensures exported FBX has clean 1,1,1 scale on every node.
+            foreach (var childMf in root.GetComponentsInChildren<MeshFilter>(true))
             {
-                if (colMf == null || colMf.sharedMesh == null) continue;
-                if (!MeshHygieneUtility.IsCollisionNodeName(colMf.gameObject.name))
-                    continue;
+                if (childMf == null || childMf.sharedMesh == null) continue;
+                // Skip root itself (already reset above)
+                if (childMf.transform == root.transform) continue;
 
-                var t = colMf.transform;
+                var t = childMf.transform;
                 if (t.localPosition == Vector3.zero &&
                     t.localRotation == Quaternion.identity &&
                     t.localScale == Vector3.one)
                     continue; // already at identity
 
-                // Bake local transform into mesh vertices
-                var mesh = colMf.sharedMesh;
+                var mesh = childMf.sharedMesh;
                 if (!mesh.isReadable) continue;
-                var localMatrix = Matrix4x4.TRS(t.localPosition, t.localRotation, t.localScale);
-                var verts = mesh.vertices;
-                var normals = mesh.normals;
-                for (int i = 0; i < verts.Length; i++)
-                {
-                    verts[i] = localMatrix.MultiplyPoint3x4(verts[i]);
-                    if (i < normals.Length)
-                        normals[i] = localMatrix.MultiplyVector(normals[i]).normalized;
-                }
-                mesh.SetVertices(verts);
-                if (normals.Length > 0)
-                    mesh.SetNormals(normals);
-                var tangents = mesh.tangents;
-                if (tangents.Length > 0)
-                {
-                    for (int i = 0; i < tangents.Length; i++)
-                    {
-                        Vector3 tVec = localMatrix.MultiplyVector(new Vector3(tangents[i].x, tangents[i].y, tangents[i].z)).normalized;
-                        tangents[i] = new Vector4(tVec.x, tVec.y, tVec.z, tangents[i].w);
-                    }
-                    mesh.tangents = tangents;
-                }
-                mesh.RecalculateBounds();
+
+                BakeTransformIntoMesh(mesh, t);
 
                 // Reset transform to identity
                 t.localPosition = Vector3.zero;
                 t.localRotation = Quaternion.identity;
                 t.localScale = Vector3.one;
             }
+
+            return renameMap;
+        }
+
+        /// <summary>
+        /// Bake a Transform's local position/rotation/scale into mesh vertex data.
+        /// After calling, the transform can be safely reset to identity without
+        /// changing the visual result. Handles vertices, normals, and tangents.
+        /// </summary>
+        static void BakeTransformIntoMesh(Mesh mesh, Transform t)
+        {
+            if (mesh == null || !mesh.isReadable) return;
+
+            var localMatrix = Matrix4x4.TRS(t.localPosition, t.localRotation, t.localScale);
+            var verts = mesh.vertices;
+            var normals = mesh.normals;
+
+            for (int i = 0; i < verts.Length; i++)
+            {
+                verts[i] = localMatrix.MultiplyPoint3x4(verts[i]);
+                if (normals != null && i < normals.Length)
+                    normals[i] = localMatrix.MultiplyVector(normals[i]).normalized;
+            }
+            mesh.SetVertices(verts);
+            if (normals != null && normals.Length > 0)
+                mesh.SetNormals(normals);
+
+            var tangents = mesh.tangents;
+            if (tangents != null && tangents.Length > 0)
+            {
+                for (int i = 0; i < tangents.Length; i++)
+                {
+                    Vector3 tVec = localMatrix.MultiplyVector(
+                        new Vector3(tangents[i].x, tangents[i].y, tangents[i].z)).normalized;
+                    tangents[i] = new Vector4(tVec.x, tVec.y, tVec.z, tangents[i].w);
+                }
+                mesh.tangents = tangents;
+            }
+            mesh.RecalculateBounds();
+        }
+
+        /// <summary>
+        /// After FBX reimport, re-link scene MeshFilter/MeshCollider/SkinnedMeshRenderer
+        /// references to the fresh sub-asset meshes. Unity recreates sub-assets on reimport
+        /// so old references go Missing even when names didn't change.
+        /// <paramref name="renameMap"/> is optional — provides oldName→newName for renamed nodes.
+        /// </summary>
+        static void RelinkSceneMeshReferences(
+            string fbxPath,
+            Dictionary<string, string> renameMap,
+            LODGroup lodGroup)
+        {
+            if (lodGroup == null) return;
+
+            // Load all mesh sub-assets from the reimported FBX keyed by name
+            var subAssets = AssetDatabase.LoadAllAssetsAtPath(fbxPath);
+            var meshByName = new Dictionary<string, Mesh>(StringComparer.OrdinalIgnoreCase);
+            foreach (var asset in subAssets)
+            {
+                var mesh = asset as Mesh;
+                if (mesh != null && !meshByName.ContainsKey(mesh.name))
+                    meshByName[mesh.name] = mesh;
+            }
+
+            if (meshByName.Count == 0) return;
+
+            int relinked = 0;
+            var root = lodGroup.transform;
+
+            // ── Re-link MeshFilter references ──
+            foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (mf == null) continue;
+
+                if (mf.sharedMesh != null)
+                {
+                    // Mesh reference exists — try to refresh to new sub-asset by name
+                    string meshName = mf.sharedMesh.name;
+
+                    // Check if this mesh was renamed
+                    if (renameMap != null && renameMap.TryGetValue(meshName, out string newName))
+                        meshName = newName;
+
+                    if (meshByName.TryGetValue(meshName, out var freshMesh) && mf.sharedMesh != freshMesh)
+                    {
+                        Undo.RecordObject(mf, "Relink Mesh");
+                        mf.sharedMesh = freshMesh;
+                        relinked++;
+                    }
+                }
+                else
+                {
+                    // Missing mesh — try to find by GameObject name
+                    string goName = mf.gameObject.name;
+
+                    // Direct match
+                    if (meshByName.TryGetValue(goName, out var match))
+                    {
+                        Undo.RecordObject(mf, "Relink Mesh");
+                        mf.sharedMesh = match;
+                        relinked++;
+                        continue;
+                    }
+
+                    // Try renamed name
+                    if (renameMap != null)
+                    {
+                        foreach (var kvp in renameMap)
+                        {
+                            if (goName == kvp.Key && meshByName.TryGetValue(kvp.Value, out var renamedMesh))
+                            {
+                                Undo.RecordObject(mf, "Relink Mesh");
+                                mf.sharedMesh = renamedMesh;
+                                relinked++;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Fallback: fuzzy match by stripping LOD suffix from GO name
+                    if (mf.sharedMesh == null)
+                    {
+                        foreach (var kvp in meshByName)
+                        {
+                            if (goName.Contains(kvp.Key) || kvp.Key.Contains(goName))
+                            {
+                                Undo.RecordObject(mf, "Relink Mesh");
+                                mf.sharedMesh = kvp.Value;
+                                relinked++;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Re-link MeshCollider references ──
+            foreach (var mc in root.GetComponentsInChildren<MeshCollider>(true))
+            {
+                if (mc == null) continue;
+
+                if (mc.sharedMesh != null)
+                {
+                    string meshName = mc.sharedMesh.name;
+                    if (renameMap != null && renameMap.TryGetValue(meshName, out string newName))
+                        meshName = newName;
+
+                    if (meshByName.TryGetValue(meshName, out var freshMesh) && mc.sharedMesh != freshMesh)
+                    {
+                        Undo.RecordObject(mc, "Relink Collider Mesh");
+                        mc.sharedMesh = freshMesh;
+                        relinked++;
+                    }
+                }
+                else
+                {
+                    // Missing collider mesh — try by GO name
+                    if (meshByName.TryGetValue(mc.gameObject.name, out var match))
+                    {
+                        Undo.RecordObject(mc, "Relink Collider Mesh");
+                        mc.sharedMesh = match;
+                        relinked++;
+                    }
+                }
+            }
+
+            // ── Rename scene GameObjects to match new FBX node names ──
+            if (renameMap != null)
+            {
+                foreach (var kvp in renameMap)
+                {
+                    foreach (Transform child in root)
+                    {
+                        if (child.name == kvp.Key)
+                        {
+                            Undo.RecordObject(child.gameObject, "Rename to match FBX");
+                            child.name = kvp.Value;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (relinked > 0)
+                UvtLog.Info($"[FBX Export] Relinked {relinked} mesh reference(s) after reimport.");
         }
 
         void GenerateLods()
@@ -2238,9 +2980,41 @@ namespace LightmapUvTool
             requestRepaint?.Invoke();
         }
 
+        void RestoreFbxFromGitMain()
+        {
+            var fbxPaths = new HashSet<string>();
+            foreach (var e in ctx.MeshEntries)
+            {
+                Mesh m = e.fbxMesh ?? e.originalMesh;
+                if (m == null) continue;
+                string p = AssetDatabase.GetAssetPath(m);
+                if (!string.IsNullOrEmpty(p) && p.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase))
+                    fbxPaths.Add(p);
+            }
+
+            if (fbxPaths.Count == 0)
+            {
+                UvtLog.Warn("[Backup] No FBX paths found in mesh entries");
+                return;
+            }
+
+            foreach (string fbx in fbxPaths)
+                UvToolHub.BackupFbxFromGitMain(fbx);
+        }
+
         void SwitchToPostApplyView()
         {
-            ctx.Refresh(ctx.LodGroup);
+            if (ctx.LodGroup != null)
+            {
+                ctx.Refresh(ctx.LodGroup);
+            }
+            else if (ctx.StandaloneMesh)
+            {
+                var standaloneRenderer = ctx.MeshEntries
+                    .FirstOrDefault(e => e?.renderer is MeshRenderer)?.renderer as MeshRenderer;
+                if (standaloneRenderer != null)
+                    ctx.RefreshStandalone(standaloneRenderer);
+            }
             OnRefresh();
             canvas.FillAlpha = 0.15f;
             canvas.ActiveFillModeIndex = 0; // Shells
@@ -2382,9 +3156,14 @@ namespace LightmapUvTool
 
         public void OnSceneGUI(SceneView sv)
         {
-            if (!canvas.SpotMode || sv == null)
+            if (sv == null) return;
+
+            if (Event.current.type == EventType.Repaint)
+                DrawSelectedShellOverlay3D();
+
+            if (!canvas.SpotMode)
             {
-                if (canvas.HoverHitValid) canvas.ClearHoverState();
+                if (canvas.HoverHitValid) canvas.ClearHoverState(clearSelection: false);
                 return;
             }
 
@@ -2430,9 +3209,6 @@ namespace LightmapUvTool
             }
 
             if (e.type != EventType.Repaint) return;
-
-            // Draw selected shell overlay in 3D
-            DrawSelectedShellOverlay3D();
 
             // Draw spot projection on all meshes
             Vector2 projUv;
@@ -2646,24 +3422,15 @@ namespace LightmapUvTool
 
             var verts = mesh.vertices;
             var tris = mesh.triangles;
-            var tr = uvHit.meshEntry.renderer.transform;
+            var renderer = uvHit.meshEntry.renderer;
+            var tr = renderer.transform;
+            var rendererBounds = renderer.bounds;
 
-            int i0 = uvHit.faceIndex * 3;
-            if (i0 + 2 >= tris.Length) return;
-            int vi0 = tris[i0], vi1 = tris[i0 + 1], vi2 = tris[i0 + 2];
-            if (vi0 >= verts.Length || vi1 >= verts.Length || vi2 >= verts.Length) return;
-
-            var bary = uvHit.barycentric;
-            var localPos = verts[vi0] * bary.x + verts[vi1] * bary.y + verts[vi2] * bary.z;
-            var worldPos = tr.TransformPoint(localPos);
-
-            var localEdge1 = verts[vi1] - verts[vi0];
-            var localEdge2 = verts[vi2] - verts[vi0];
-            var faceNormal = tr.TransformDirection(Vector3.Cross(localEdge1, localEdge2).normalized).normalized;
-            if (faceNormal.sqrMagnitude < 0.5f) faceNormal = Vector3.up;
+            Vector3 worldPos = rendererBounds.center;
+            Vector3 faceNormal = tr.up.sqrMagnitude > 0.001f ? tr.up : Vector3.up;
+            float idealDist = Mathf.Max(rendererBounds.extents.magnitude * 1.5f, 0.3f);
 
             // Shell bbox for ideal camera distance
-            float idealDist = 1f;
             var cache = canvas.GetPreviewShellCache(ctx, mesh, ctx.PreviewUvChannel);
             if (cache?.shellById != null && cache.shellById.TryGetValue(uvHit.shellId, out var shell))
             {
@@ -2682,13 +3449,43 @@ namespace LightmapUvTool
                         else sb.Encapsulate(wp);
                     }
                 }
-                if (!first) idealDist = Mathf.Max(sb.extents.magnitude * 1.5f, 0.3f);
+                if (!first)
+                {
+                    worldPos = sb.center;
+                    idealDist = Mathf.Max(sb.extents.magnitude * 1.5f, 0.3f);
+                }
+            }
+
+            if (uvHit.faceIndex >= 0)
+            {
+                int i0 = uvHit.faceIndex * 3;
+                if (i0 + 2 < tris.Length)
+                {
+                    int vi0 = tris[i0], vi1 = tris[i0 + 1], vi2 = tris[i0 + 2];
+                    if (vi0 >= 0 && vi1 >= 0 && vi2 >= 0 &&
+                        vi0 < verts.Length && vi1 < verts.Length && vi2 < verts.Length)
+                    {
+                        var bary = uvHit.barycentric;
+                        var localPos = verts[vi0] * bary.x + verts[vi1] * bary.y + verts[vi2] * bary.z;
+                        worldPos = tr.TransformPoint(localPos);
+
+                        var localEdge1 = verts[vi1] - verts[vi0];
+                        var localEdge2 = verts[vi2] - verts[vi0];
+                        var triNormal = Vector3.Cross(localEdge1, localEdge2);
+                        if (triNormal.sqrMagnitude > 1e-8f)
+                        {
+                            faceNormal = tr.TransformDirection(triNormal.normalized).normalized;
+                            if (faceNormal.sqrMagnitude < 0.5f)
+                                faceNormal = tr.up.sqrMagnitude > 0.001f ? tr.up : Vector3.up;
+                        }
+                    }
+                }
             }
 
             var sv = SceneView.lastActiveSceneView;
             if (sv == null) return;
-            sv.pivot = worldPos + faceNormal * idealDist;
-            sv.size = 0.01f;
+            sv.pivot = worldPos;
+            sv.size = idealDist;
             sv.rotation = Quaternion.LookRotation(-faceNormal);
             sv.Repaint();
         }

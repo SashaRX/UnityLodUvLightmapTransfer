@@ -12,10 +12,8 @@ namespace LightmapUvTool
 {
     public class Uv2AssetPostprocessor : AssetPostprocessor
     {
-#if LIGHTMAP_UV_TOOL_POSTPROCESSOR
         // Run well after Bakery and other postprocessors (default order = 0).
         public override int GetPostprocessOrder() => 10000;
-#endif
 
         /// <summary>
         /// Paths to bypass during the next reimport. When ApplyUv2ToFbx needs the
@@ -41,6 +39,29 @@ namespace LightmapUvTool
         /// </summary>
         internal static readonly HashSet<string> managedImportPaths = new HashSet<string>();
 
+        /// <summary>
+        /// Paths that should replay sidecar UV data only for the current import.
+        /// After OnPostprocessModel runs, UV entries are cleaned up again if
+        /// persistent sidecar mode is disabled.
+        /// </summary>
+        internal static readonly HashSet<string> transientReplayPaths = new HashSet<string>();
+        internal static readonly Dictionary<string, List<MeshUv2Entry>> transientReplayEntries =
+            new Dictionary<string, List<MeshUv2Entry>>();
+
+        internal static void SetTransientReplayEntries(string assetPath, List<MeshUv2Entry> entries)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+                return;
+
+            if (entries == null || entries.Count == 0)
+            {
+                transientReplayEntries.Remove(assetPath);
+                return;
+            }
+
+            transientReplayEntries[assetPath] = new List<MeshUv2Entry>(entries);
+        }
+
         struct ApplyStats
         {
             public int fbxVerts;              // vertex count from fresh FBX import
@@ -61,18 +82,18 @@ namespace LightmapUvTool
         /// so the CleanupTool Import Settings fixer can apply the same enforcement to any
         /// tool-managed FBX without having to pre-register it.
         /// </summary>
-        internal static void PrepareImportSettings(string assetPath, bool force = false)
+        internal static bool PrepareImportSettings(string assetPath, bool force = false)
         {
-            if (bypassPaths.Contains(assetPath)) return;
+            if (bypassPaths.Contains(assetPath)) return false;
 
             var modelImporter = AssetImporter.GetAtPath(assetPath) as ModelImporter;
-            if (modelImporter == null) return;
+            if (modelImporter == null) return false;
 
             if (!force)
             {
                 bool isFbxOverwrite = fbxOverwritePaths.Contains(assetPath);
                 bool isManaged = managedImportPaths.Contains(assetPath);
-                if (!isFbxOverwrite && !isManaged) return;
+                if (!isFbxOverwrite && !isManaged) return false;
             }
 
             bool changed = false;
@@ -102,13 +123,14 @@ namespace LightmapUvTool
                 changed = true;
             }
             if (changed)
+            {
                 modelImporter.SaveAndReimport();
+                return true;
+            }
+
+            return false;
         }
 
-// OnPostprocessModel is gated behind LIGHTMAP_UV_TOOL_POSTPROCESSOR to prevent
-// Unity from triggering mass reimport of all models when the package is installed.
-// The define is added automatically when the user first applies UV2 via sidecar.
-#if LIGHTMAP_UV_TOOL_POSTPROCESSOR
         void OnPostprocessModel(GameObject root)
         {
             string modelPath = assetPath;
@@ -128,14 +150,42 @@ namespace LightmapUvTool
                 return;
             }
 
+            bool persistentMode = PostprocessorDefineManager.IsEnabled();
+            bool isManaged = managedImportPaths.Contains(modelPath);
+            bool transientReplay = transientReplayPaths.Remove(modelPath);
+            transientReplayEntries.TryGetValue(modelPath, out var transientEntries);
+            if (transientReplay)
+                transientReplayEntries.Remove(modelPath);
+
+            if (!persistentMode && !isManaged && !transientReplay)
+                return;
+
             string sidecarPath = Uv2DataAsset.GetSidecarPath(modelPath);
 
-            // Load sidecar without triggering import loop
-            var data = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
-            if (data == null) return;
+            // Load persistent sidecar only when needed. Temporary UV replay data lives in memory.
+            var persistentData = AssetDatabase.LoadAssetAtPath<Uv2DataAsset>(sidecarPath);
+            if (persistentData == null && transientEntries == null)
+            {
+                managedImportPaths.Remove(modelPath);
+                return;
+            }
+
+            Uv2DataAsset data;
+            bool usingTransientEntries = transientReplay && transientEntries != null;
+            if (usingTransientEntries)
+            {
+                data = ScriptableObject.CreateInstance<Uv2DataAsset>();
+                data.entries = transientEntries;
+                if (persistentData != null && persistentData.collisionEntries != null)
+                    data.collisionEntries = persistentData.collisionEntries;
+            }
+            else
+            {
+                data = persistentData;
+            }
 
             // Collision stripping only runs when explicitly requested via managedImportPaths
-            if (managedImportPaths.Contains(modelPath) &&
+            if (isManaged &&
                 data.collisionEntries != null && data.collisionEntries.Count > 0)
             {
                 foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
@@ -159,7 +209,8 @@ namespace LightmapUvTool
             // Consume managed registration (collision stripping above may have used it).
             managedImportPaths.Remove(modelPath);
 
-            if (data.entries == null || data.entries.Count == 0) return;
+            if (data.entries == null || data.entries.Count == 0)
+                return;
 
             // Always apply UV2 from sidecar if entries exist — ensures persistence
             // across Unity restarts even when third-party postprocessors (e.g. Bakery
@@ -217,6 +268,12 @@ namespace LightmapUvTool
                             $"{totalFbxVerts}→{totalFinalVerts} verts (−{saved}, −{pct:F1}%) | " +
                             $"replay={replayCount} legacy={legacyCount} remap={remapCount} " +
                             $"stale={staleCount} fallback={totalFallback}");
+
+                if (usingTransientEntries)
+                {
+                    UvtLog.Info($"[UV2 Postprocess] '{modelPath}': transient replay consumed; no sidecar asset changes were written.");
+                    return;
+                }
 
                 // ── POST-IMPORT VALIDATION ──
                 // Check mesh data AFTER Unity's import pipeline fully completes.
@@ -285,8 +342,8 @@ namespace LightmapUvTool
                     }
                 };
             }
+
         }
-#endif // LIGHTMAP_UV_TOOL_POSTPROCESSOR
 
         static bool IsManagedCollisionObjectName(string objectName, Uv2DataAsset data)
         {
@@ -372,8 +429,7 @@ namespace LightmapUvTool
                         stats.finalVerts = mesh.vertexCount;
                         stats.remapped = false;
                         stats.replayUsed = true;
-                        // UV2 count now matches — assign directly
-                        mesh.SetUVs(1, entry.uv2);
+                        ApplyStoredUvChannelsDirect(mesh, entry);
                         UvtLog.Verbose($"[UV2 Postprocess] '{mesh.name}': replay path includes " +
                                        $"meshopt={entry.stepMeshopt}, edgeWeld={entry.stepEdgeWeld}, symmetrySplit={symmetryStep}");
                         return true;
@@ -439,13 +495,50 @@ namespace LightmapUvTool
 
             bool didRemap;
             int nearestFallback, nearestAnyReuse, unmatched;
-            var uv2 = RemapUv2IfNeeded(entry, mesh, out didRemap, out nearestFallback, out nearestAnyReuse, out unmatched);
+            int primaryTargetUvChannel = entry.targetUvChannel >= 0 ? entry.targetUvChannel : 1;
+            string primaryLabel = $"channel {primaryTargetUvChannel}";
+            var uv2 = RemapUvSetIfNeeded(entry, entry.uv2, mesh, primaryLabel, out didRemap, out nearestFallback, out nearestAnyReuse, out unmatched);
             stats.remapped = didRemap;
             stats.nearestFallbackCount = nearestFallback;
             stats.nearestAnyReuseCount = nearestAnyReuse;
             stats.unmatchedVerts = unmatched;
-            mesh.SetUVs(1, uv2);
+            mesh.SetUVs(primaryTargetUvChannel, uv2);
+            if (entry.auxiliaryUv != null && entry.auxiliaryTargetUvChannel >= 0)
+            {
+                bool auxDidRemap;
+                int auxNearestFallback, auxNearestAnyReuse, auxUnmatched;
+                var auxiliaryUv = RemapUvSetIfNeeded(
+                    entry,
+                    entry.auxiliaryUv,
+                    mesh,
+                    $"channel {entry.auxiliaryTargetUvChannel}",
+                    out auxDidRemap,
+                    out auxNearestFallback,
+                    out auxNearestAnyReuse,
+                    out auxUnmatched);
+                if (auxiliaryUv != null && auxiliaryUv.Length == mesh.vertexCount)
+                    mesh.SetUVs(entry.auxiliaryTargetUvChannel, auxiliaryUv);
+            }
             return true;
+        }
+
+        static void ApplyStoredUvChannelsDirect(Mesh mesh, MeshUv2Entry entry)
+        {
+            if (mesh == null || entry?.uv2 == null) return;
+
+            int primaryTargetUvChannel = entry.targetUvChannel >= 0 ? entry.targetUvChannel : 1;
+            if (entry.uv2.Length == mesh.vertexCount)
+                mesh.SetUVs(primaryTargetUvChannel, entry.uv2);
+
+            ApplyAuxiliaryUvChannel(mesh, entry);
+        }
+
+        static void ApplyAuxiliaryUvChannel(Mesh mesh, MeshUv2Entry entry)
+        {
+            if (mesh == null || entry?.auxiliaryUv == null) return;
+            if (entry.auxiliaryTargetUvChannel < 0) return;
+            if (entry.auxiliaryUv.Length != mesh.vertexCount) return;
+            mesh.SetUVs(entry.auxiliaryTargetUvChannel, entry.auxiliaryUv);
         }
 
         static bool ResolveSymmetrySplitStep(MeshUv2Entry entry)
@@ -1112,9 +1205,15 @@ namespace LightmapUvTool
         /// workflow and the postprocessor (different starting vertex count/order from FBX reimport).
         /// This remaps UV2 by matching vertex positions so the correct UV2 reaches each vertex.
         /// </summary>
-        static Vector2[] RemapUv2IfNeeded(MeshUv2Entry entry, Mesh mesh, out bool didRemap,
-                                           out int nearestFallbackCount, out int nearestAnyReuseCount,
-                                           out int unmatchedCount)
+        static Vector2[] RemapUvSetIfNeeded(
+            MeshUv2Entry entry,
+            Vector2[] sourceUv,
+            Mesh mesh,
+            string channelLabel,
+            out bool didRemap,
+            out int nearestFallbackCount,
+            out int nearestAnyReuseCount,
+            out int unmatchedCount)
         {
             didRemap = false;
             nearestFallbackCount = 0;
@@ -1122,8 +1221,9 @@ namespace LightmapUvTool
             unmatchedCount = 0;
 
             // No position data stored — backward compat, use UV2 as-is
-            if (entry.vertPositions == null || entry.vertPositions.Length != entry.uv2.Length)
-                return entry.uv2;
+            if (sourceUv == null) return null;
+            if (entry.vertPositions == null || entry.vertPositions.Length != sourceUv.Length)
+                return sourceUv;
 
             var meshPos = mesh.vertices;
             int count = meshPos.Length;
@@ -1136,7 +1236,7 @@ namespace LightmapUvTool
             var meshUv0 = new List<Vector2>();
             mesh.GetUVs(0, meshUv0);
             bool hasUv0 = entry.vertUv0 != null &&
-                          entry.vertUv0.Length == entry.uv2.Length &&
+                          entry.vertUv0.Length == sourceUv.Length &&
                           meshUv0.Count == count;
 
             // Build position → candidate sidecar indices lookup
@@ -1153,7 +1253,7 @@ namespace LightmapUvTool
             }
 
             var result = new Vector2[count];
-            var used = new bool[entry.uv2.Length];
+            var used = new bool[sourceUv.Length];
             var meshMatched = new bool[count];
             int matched = 0;
 
@@ -1168,7 +1268,7 @@ namespace LightmapUvTool
 
                 if (candidates.Count == 1)
                 {
-                    result[i] = entry.uv2[candidates[0]];
+                    result[i] = sourceUv[candidates[0]];
                     used[candidates[0]] = true;
                     meshMatched[i] = true;
                     matched++;
@@ -1190,7 +1290,7 @@ namespace LightmapUvTool
                     }
                     if (bestIdx >= 0)
                     {
-                        result[i] = entry.uv2[bestIdx];
+                        result[i] = sourceUv[bestIdx];
                         used[bestIdx] = true;
                         meshMatched[i] = true;
                         matched++;
@@ -1203,7 +1303,7 @@ namespace LightmapUvTool
                     {
                         if (!used[ci])
                         {
-                            result[i] = entry.uv2[ci];
+                            result[i] = sourceUv[ci];
                             used[ci] = true;
                             meshMatched[i] = true;
                             matched++;
@@ -1224,7 +1324,7 @@ namespace LightmapUvTool
                         unmatchedMesh.Add(i);
 
                 // Collect unused sidecar indices
-                var unusedSidecar = new List<int>(entry.uv2.Length - matched);
+                var unusedSidecar = new List<int>(sourceUv.Length - matched);
                 for (int i = 0; i < used.Length; i++)
                     if (!used[i]) unusedSidecar.Add(i);
 
@@ -1250,7 +1350,7 @@ namespace LightmapUvTool
 
                     if (bestIdx >= 0 && bestDist < 1e-4f)
                     {
-                        result[mi] = entry.uv2[bestIdx];
+                        result[mi] = sourceUv[bestIdx];
                         used[bestIdx] = true;
                         unusedSidecar.RemoveAt(bestListIdx);
                         matched++;
@@ -1272,7 +1372,7 @@ namespace LightmapUvTool
                     }
                     if (bestIdx >= 0)
                     {
-                        result[mi] = entry.uv2[bestIdx];
+                        result[mi] = sourceUv[bestIdx];
                         matched++;
                         fallbackMatched++;
                         nearestAnyReuseCount++;
@@ -1280,12 +1380,12 @@ namespace LightmapUvTool
                 }
 
                 if (nearestFallbackCount > 0)
-                    UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': {nearestFallbackCount} vertices matched by nearest-unused fallback");
+                    UvtLog.Info($"[UV2 Postprocess] '{mesh.name}': {nearestFallbackCount} {channelLabel} vertices matched by nearest-unused fallback");
 
                 if (nearestAnyReuseCount > 0)
                 {
                     string severity = nearestAnyReuseCount > 5 ? "Sidecar may be invalid." : "Acceptable.";
-                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {nearestAnyReuseCount} vertices used nearest-ANY fallback (reuse). {severity}");
+                    UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {nearestAnyReuseCount} {channelLabel} vertices used nearest-ANY fallback (reuse). {severity}");
                 }
             }
 
@@ -1293,8 +1393,8 @@ namespace LightmapUvTool
             unmatchedCount = count - matched;
 
             if (matched < count)
-                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': position remap {matched}/{count} " +
-                                 $"(unmatched vertices will have zero UV2)");
+                UvtLog.Warn($"[UV2 Postprocess] '{mesh.name}': {channelLabel} position remap {matched}/{count} " +
+                                 "(unmatched vertices will keep zero)");
 
             return result;
         }
