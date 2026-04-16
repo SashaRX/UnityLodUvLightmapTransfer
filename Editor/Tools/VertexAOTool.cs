@@ -34,8 +34,8 @@ namespace LightmapUvTool
         static readonly string[] uvCompNames     = { "X", "Y" };
         static readonly string[] occluderModeLabels = { "Self Only", "Same Root + Nearby" };
 
-        int channelType = MeshLabPreferences.DefaultAoChannelType;
-        int channelComp = MeshLabPreferences.DefaultAoChannelComp;
+        int channelType = MeshLabProjectSettings.Instance.aoChannelType;
+        int channelComp = MeshLabProjectSettings.Instance.aoChannelComp;
 
         int sampleCountIndex = 2;   // 256
         int resolutionIndex  = 1;   // 512
