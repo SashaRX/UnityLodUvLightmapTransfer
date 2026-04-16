@@ -67,7 +67,9 @@ namespace LightmapUvTool
         {
             if (string.IsNullOrEmpty(nodeName)) return false;
             return collisionSuffixRegex.IsMatch(nodeName) ||
-                   nodeName.EndsWith("_Collider", StringComparison.OrdinalIgnoreCase);
+                   nodeName.EndsWith("_Col", StringComparison.OrdinalIgnoreCase) ||
+                   nodeName.EndsWith("_Collider", StringComparison.OrdinalIgnoreCase) ||
+                   nodeName.EndsWith("_Collision", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -135,8 +137,10 @@ namespace LightmapUvTool
         static bool IsLooseCollisionName(string name)
         {
             if (string.IsNullOrEmpty(name)) return false;
-            return name.Contains("_COL") ||
-                   name.EndsWith("_Collider", StringComparison.OrdinalIgnoreCase);
+            return name.IndexOf("_COL", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   name.EndsWith("_Col", StringComparison.OrdinalIgnoreCase) ||
+                   name.EndsWith("_Collider", StringComparison.OrdinalIgnoreCase) ||
+                   name.EndsWith("_Collision", StringComparison.OrdinalIgnoreCase);
         }
 
         // ── Mesh stats ──
@@ -153,6 +157,80 @@ namespace LightmapUvTool
             for (int i = 0; i < subCount; i++)
                 count += mesh.GetIndexCount(i);
             return (int)(count / 3L);
+        }
+
+        /// <summary>
+        /// Extract a single submesh from a mesh, returning a new mesh with only
+        /// the referenced vertices and a single submesh. Returns null on failure.
+        /// </summary>
+        internal static Mesh ExtractSubmesh(Mesh source, int[] tris)
+        {
+            if (source == null || tris == null || tris.Length == 0) return null;
+
+            // Find used vertices
+            var usedSet = new HashSet<int>();
+            foreach (int t in tris) usedSet.Add(t);
+            var usedList = new List<int>(usedSet);
+            usedList.Sort();
+
+            var remap = new Dictionary<int, int>();
+            for (int i = 0; i < usedList.Count; i++)
+                remap[usedList[i]] = i;
+
+            int newCount = usedList.Count;
+
+            var srcVerts = source.vertices;
+            var srcNormals = source.normals;
+            var srcTangents = source.tangents;
+            var srcColors = source.colors32;
+
+            var newVerts = new Vector3[newCount];
+            for (int i = 0; i < newCount; i++)
+                newVerts[i] = srcVerts[usedList[i]];
+
+            var newMesh = new Mesh();
+            newMesh.SetVertices(newVerts);
+
+            if (srcNormals != null && srcNormals.Length == source.vertexCount)
+            {
+                var n = new Vector3[newCount];
+                for (int i = 0; i < newCount; i++) n[i] = srcNormals[usedList[i]];
+                newMesh.SetNormals(n);
+            }
+
+            if (srcTangents != null && srcTangents.Length == source.vertexCount)
+            {
+                var t = new Vector4[newCount];
+                for (int i = 0; i < newCount; i++) t[i] = srcTangents[usedList[i]];
+                newMesh.tangents = t;
+            }
+
+            if (srcColors != null && srcColors.Length == source.vertexCount)
+            {
+                var c = new Color32[newCount];
+                for (int i = 0; i < newCount; i++) c[i] = srcColors[usedList[i]];
+                newMesh.colors32 = c;
+            }
+
+            // Copy UV channels
+            for (int ch = 0; ch < 8; ch++)
+            {
+                var uvList = new List<Vector2>();
+                source.GetUVs(ch, uvList);
+                if (uvList.Count != source.vertexCount) continue;
+                var newUv = new Vector2[newCount];
+                for (int i = 0; i < newCount; i++) newUv[i] = uvList[usedList[i]];
+                newMesh.SetUVs(ch, newUv);
+            }
+
+            // Remap triangles
+            var newTris = new int[tris.Length];
+            for (int i = 0; i < tris.Length; i++)
+                newTris[i] = remap[tris[i]];
+            newMesh.SetTriangles(newTris, 0);
+            newMesh.RecalculateBounds();
+
+            return newMesh;
         }
 
         /// <summary>
@@ -304,7 +382,64 @@ namespace LightmapUvTool
             return removed;
         }
 
+        /// <summary>
+        /// Returns a per-face boolean mask where true = degenerate triangle.
+        /// Face index is global across all submeshes (submesh 0 faces first, then submesh 1, etc.).
+        /// Returns null for unreadable meshes.
+        /// </summary>
+        internal static bool[] GetDegenerateTriangleMask(Mesh mesh, float epsilon = 1e-12f)
+        {
+            if (mesh == null || !mesh.isReadable) return null;
+            var verts = mesh.vertices;
+            int totalFaces = 0;
+            int subCount = mesh.subMeshCount;
+            for (int s = 0; s < subCount; s++)
+                totalFaces += mesh.GetTriangles(s).Length / 3;
+
+            var mask = new bool[totalFaces];
+            int fi = 0;
+            for (int s = 0; s < subCount; s++)
+            {
+                var tris = mesh.GetTriangles(s);
+                for (int t = 0; t + 2 < tris.Length; t += 3, fi++)
+                {
+                    int i0 = tris[t], i1 = tris[t + 1], i2 = tris[t + 2];
+                    if (i0 == i1 || i0 == i2 || i1 == i2) { mask[fi] = true; continue; }
+                    if (i0 < 0 || i0 >= verts.Length ||
+                        i1 < 0 || i1 >= verts.Length ||
+                        i2 < 0 || i2 >= verts.Length) { mask[fi] = true; continue; }
+                    var a = verts[i0];
+                    var b = verts[i1];
+                    var c = verts[i2];
+                    if (Vector3.Cross(b - a, c - a).sqrMagnitude < epsilon) mask[fi] = true;
+                }
+            }
+            return mask;
+        }
+
         // ── Unused vertex detection / compaction ──
+
+        /// <summary>
+        /// Returns a per-vertex boolean mask where true = vertex not referenced by any triangle.
+        /// Returns null for unreadable meshes.
+        /// </summary>
+        internal static bool[] GetUnusedVertexMask(Mesh mesh)
+        {
+            if (mesh == null || !mesh.isReadable) return null;
+            var used = new bool[mesh.vertexCount];
+            int subCount = mesh.subMeshCount;
+            for (int s = 0; s < subCount; s++)
+            {
+                var tris = mesh.GetTriangles(s);
+                for (int t = 0; t < tris.Length; t++)
+                    if (tris[t] >= 0 && tris[t] < used.Length) used[tris[t]] = true;
+            }
+            // Invert: true = unused
+            var mask = new bool[mesh.vertexCount];
+            for (int i = 0; i < mask.Length; i++)
+                mask[i] = !used[i];
+            return mask;
+        }
 
         /// <summary>
         /// Returns the number of vertices not referenced by any submesh triangle.

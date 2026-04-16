@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
 using UnityEngine;
 using UnityEditor;
 
@@ -12,10 +13,22 @@ namespace LightmapUvTool
 {
     public class UvToolHub : EditorWindow
     {
+        const string WindowTitle = nameof(UvToolHub);
+        const string WindowBrand = "Mesh Lab";
+
         // ── Tool registry ──
         List<IUvTool> tools;
         int activeToolIndex;
         IUvTool ActiveTool => tools != null && activeToolIndex >= 0 && activeToolIndex < tools.Count ? tools[activeToolIndex] : null;
+
+        /// <summary>Find a registered tool by type. Returns null if not found.</summary>
+        public T FindTool<T>() where T : class, IUvTool
+        {
+            if (tools == null) return null;
+            foreach (var t in tools)
+                if (t is T result) return result;
+            return null;
+        }
 
         // ── Shared components ──
         UvToolContext ctx;
@@ -37,6 +50,7 @@ namespace LightmapUvTool
         string selectedFbxPath;
         string selectedResetLabel;
         string pendingToolId;
+        string windowDebugTag;
 
         [MenuItem("Tools/Mesh Lab")]
         static void Open()
@@ -46,7 +60,7 @@ namespace LightmapUvTool
 
         static void OpenWithTool(string toolId)
         {
-            var w = GetWindow<UvToolHub>("Mesh Lab v" + Uv2DataAsset.ToolVersionStr);
+            var w = GetWindow<UvToolHub>(WindowTitle);
             w.minSize = new Vector2(800, 500);
             w.pendingToolId = toolId;
             if (w.tools != null && w.tools.Count > 0)
@@ -56,7 +70,11 @@ namespace LightmapUvTool
         void OnEnable()
         {
             wantsMouseMove = true;
-            titleContent = new GUIContent("Mesh Lab v" + Uv2DataAsset.ToolVersionStr);
+            windowDebugTag = BuildWindowDebugTag();
+            // Keep the actual dock/window title stable and aligned with the
+            // EditorWindow type name. Unity can log "Invalid editor window"
+            // on maximize/minimize for custom windows with a different title.
+            titleContent = new GUIContent(WindowTitle, BuildWindowBrandText());
 
             // Safety: if the window was closed while a preview was active (e.g., checker
             // materials on renderers), the static IsActive flag persists across editor
@@ -356,12 +374,50 @@ namespace LightmapUvTool
 
             GUILayout.FlexibleSpace();
 
+            EditorGUILayout.LabelField(BuildWindowBrandText(),
+                EditorStyles.miniLabel, GUILayout.Width(220));
+            GUILayout.Space(6);
+
             // ── Log level ──
             EditorGUILayout.LabelField("Log:", EditorStyles.miniLabel, GUILayout.Width(24));
             var lvl = (UvtLog.Level)EditorGUILayout.EnumPopup(UvtLog.Current, EditorStyles.toolbarPopup, GUILayout.Width(64));
             if (lvl != UvtLog.Current) UvtLog.Current = lvl;
 
             EditorGUILayout.EndHorizontal();
+        }
+
+        string BuildWindowBrandText()
+        {
+            string text = WindowBrand + " v" + Uv2DataAsset.ToolVersionStr;
+            if (!string.IsNullOrEmpty(windowDebugTag))
+                text += " [" + windowDebugTag + "]";
+            return text;
+        }
+
+        static string BuildWindowDebugTag()
+        {
+            try
+            {
+                var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(UvToolHub).Assembly);
+                string resolvedPath = package?.resolvedPath;
+                if (string.IsNullOrEmpty(resolvedPath))
+                    return null;
+
+                string leaf = Path.GetFileName(resolvedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                int atIndex = leaf.LastIndexOf('@');
+                if (atIndex >= 0 && atIndex < leaf.Length - 1)
+                {
+                    string revision = leaf.Substring(atIndex + 1);
+                    if (!string.IsNullOrEmpty(revision))
+                        return revision.Length > 8 ? revision.Substring(0, 8) : revision;
+                }
+
+                return package?.version;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // ════════════════════════════════════════════════════════════
@@ -738,14 +794,34 @@ namespace LightmapUvTool
                 NukeAllSidecars();
             GUI.backgroundColor = bgNuke;
 
-            if (ctx.LodGroup == null) return;
+            bool hasMeshEntries = ctx != null && ctx.MeshEntries != null && ctx.MeshEntries.Count > 0;
+            bool hasFbxWorkflow = ctx != null && !string.IsNullOrEmpty(ctx.SourceFbxPath);
+            if (!hasMeshEntries) return;
             EditorGUILayout.Space(2);
             var r = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
             EditorGUI.DrawRect(r, new Color(.3f, .3f, .3f));
             EditorGUILayout.Space(2);
 
+            if (GUILayout.Button("Save Mesh Assets", EditorStyles.miniButton))
+            {
+                foreach (var tool in tools)
+                    if (tool is LightmapTransferTool ltt) { ltt.SaveAllPublic(); break; }
+            }
+
+            if (!hasFbxWorkflow) return;
+
+            EditorGUILayout.Space(4);
+
             var bg = GUI.backgroundColor;
+            bool sidecarEnabled = PostprocessorDefineManager.IsEnabled();
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (!sidecarEnabled)
+            {
+                EditorGUILayout.HelpBox(
+                    "Sidecar UV2 Mode is OFF. FBX overwrite/apply will use temporary sidecar replay for this import only, then UV sidecar entries will be removed again.",
+                    MessageType.Info);
+            }
+
             EditorGUILayout.BeginHorizontal();
             GUI.backgroundColor = new Color(.95f, .6f, .2f);
             if (GUILayout.Button("Overwrite FBX", GUILayout.Height(24)))
@@ -766,42 +842,122 @@ namespace LightmapUvTool
 #endif
             EditorGUILayout.Space(4);
             // ── Sidecar UV2 mode ──
-            bool sidecarEnabled = PostprocessorDefineManager.IsEnabled();
             EditorGUI.BeginChangeCheck();
             sidecarEnabled = EditorGUILayout.ToggleLeft("Sidecar UV2 Mode", sidecarEnabled);
             if (EditorGUI.EndChangeCheck())
-            {
-                if (sidecarEnabled)
-                {
-                    if (EditorUtility.DisplayDialog("Enable Sidecar Mode",
-                        "Adds LIGHTMAP_UV_TOOL_POSTPROCESSOR define.\n\n" +
-                        "Unity will recompile and reimport all models (one-time).\n" +
-                        "Required for non-destructive UV2 via sidecar.",
-                        "Enable", "Cancel"))
-                        PostprocessorDefineManager.SetEnabled(true);
-                }
-                else
-                {
-                    PostprocessorDefineManager.SetEnabled(false);
-                }
-            }
+                PostprocessorDefineManager.SetEnabled(sidecarEnabled);
 
-            if (sidecarEnabled)
-            {
-                if (GUILayout.Button("Apply UV2 (sidecar)", EditorStyles.miniButton))
-                {
-                    foreach (var tool in tools)
-                        if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
-                }
-            }
+            if (!sidecarEnabled)
+                EditorGUILayout.LabelField("Persistent replay is OFF; one-shot FBX/apply replay still works.", EditorStyles.miniLabel);
 
-            EditorGUILayout.Space(1);
-            if (GUILayout.Button("Save Mesh Assets", EditorStyles.miniButton))
+            if (GUILayout.Button("Apply UV2 (sidecar)", EditorStyles.miniButton))
             {
                 foreach (var tool in tools)
-                    if (tool is LightmapTransferTool ltt) { ltt.SaveAllPublic(); break; }
+                    if (tool is LightmapTransferTool ltt) { ltt.ApplyUv2Public(); break; }
             }
 
+            // Backup current FBX from git main branch
+            if (!string.IsNullOrEmpty(ctx.SourceFbxPath)
+                && GUILayout.Button("Backup from main", EditorStyles.miniButton))
+            {
+                BackupFbxFromGitMain(ctx.SourceFbxPath);
+            }
+
+        }
+
+        internal static void BackupFbxFromGitMain(string assetPath)
+        {
+            try
+            {
+                string repoRoot = System.IO.Path.GetDirectoryName(Application.dataPath);
+                string fullPath = System.IO.Path.GetFullPath(assetPath);
+                string relativePath = assetPath.Replace('\\', '/');
+
+                string dir = System.IO.Path.GetDirectoryName(fullPath);
+                string name = System.IO.Path.GetFileNameWithoutExtension(fullPath);
+                string ext = System.IO.Path.GetExtension(fullPath);
+                string backupPath = System.IO.Path.Combine(dir, name + "_main" + ext);
+                string backupAssetPath = (System.IO.Path.GetDirectoryName(assetPath) + "/" + name + "_main" + ext)
+                    .Replace('\\', '/');
+                string tempBackupPath = backupPath + ".tmp";
+
+                if (!RunGit(repoRoot, $"cat-file -e \"main:{relativePath}\"", out _, out string existsErr))
+                {
+                    UvtLog.Error($"[Backup] '{relativePath}' does not exist on branch 'main'. {existsErr.Trim()}");
+                    return;
+                }
+
+                using (var proc = StartGitBinary(repoRoot, $"cat-file --filters \"main:{relativePath}\""))
+                {
+                    var stderrBuf = new System.Text.StringBuilder();
+                    proc.ErrorDataReceived += (s, e) => { if (e.Data != null) stderrBuf.AppendLine(e.Data); };
+                    proc.BeginErrorReadLine();
+                    using (var fs = new System.IO.FileStream(tempBackupPath,
+                        System.IO.FileMode.Create, System.IO.FileAccess.Write))
+                    {
+                        proc.StandardOutput.BaseStream.CopyTo(fs);
+                    }
+                    proc.WaitForExit();
+                    string err = stderrBuf.ToString();
+
+                    if (proc.ExitCode != 0)
+                    {
+                        UvtLog.Error($"[Backup] Failed to extract '{relativePath}' from main: {err.Trim()}");
+                        if (System.IO.File.Exists(tempBackupPath))
+                            System.IO.File.Delete(tempBackupPath);
+                        return;
+                    }
+                }
+
+                var tempInfo = new System.IO.FileInfo(tempBackupPath);
+                if (!tempInfo.Exists || tempInfo.Length == 0)
+                {
+                    if (System.IO.File.Exists(tempBackupPath))
+                        System.IO.File.Delete(tempBackupPath);
+                    UvtLog.Error($"[Backup] Extracted '{relativePath}' from main, but the result is empty.");
+                    return;
+                }
+
+                if (System.IO.File.Exists(backupPath))
+                    System.IO.File.Delete(backupPath);
+                System.IO.File.Move(tempBackupPath, backupPath);
+
+                AssetDatabase.Refresh();
+                UvtLog.Info($"[Backup] Saved main branch version → {backupAssetPath}");
+            }
+            catch (System.Exception ex)
+            {
+                UvtLog.Error($"[Backup] Failed: {ex.Message}");
+            }
+        }
+
+        internal static System.Diagnostics.Process StartGitBinary(string workingDirectory, string arguments)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = arguments,
+                WorkingDirectory = workingDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            return System.Diagnostics.Process.Start(psi);
+        }
+
+        internal static bool RunGit(string workingDirectory, string arguments, out string stdout, out string stderr)
+        {
+            using (var proc = StartGitBinary(workingDirectory, arguments))
+            {
+                var stderrBuf = new System.Text.StringBuilder();
+                proc.ErrorDataReceived += (s, e) => { if (e.Data != null) stderrBuf.AppendLine(e.Data); };
+                proc.BeginErrorReadLine();
+                stdout = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                stderr = stderrBuf.ToString();
+                return proc.ExitCode == 0;
+            }
         }
 
         static void NukeAllSidecars()
@@ -837,12 +993,13 @@ namespace LightmapUvTool
                     deleted++;
             }
 
-            // Offer to disable sidecar mode if active
+            // Offer to disable persistent sidecar mode if active
             if (PostprocessorDefineManager.IsEnabled())
             {
                 if (EditorUtility.DisplayDialog("Disable Sidecar Mode?",
                     "Sidecar UV2 Mode is currently enabled.\n" +
-                    "Disable it to prevent the postprocessor from running on reimport?",
+                    "Disable it to stop persistent UV replay on future reimports?\n" +
+                    "One-shot replay during overwrite/apply will still work.",
                     "Disable", "Keep Enabled"))
                     PostprocessorDefineManager.SetEnabled(false);
             }

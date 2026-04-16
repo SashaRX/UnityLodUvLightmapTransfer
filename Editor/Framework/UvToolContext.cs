@@ -86,7 +86,7 @@ namespace LightmapUvTool
             if (string.IsNullOrEmpty(name)) return name;
             return System.Text.RegularExpressions.Regex.Replace(
                 name,
-                @"[_\-\s]+(LOD\d+|COL\w*|Collision)$",
+                @"(?:[_\-\s]+(?:LOD\d+|COL(?:_Hull\d+)?|Collider|Collision))+$",
                 "",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         }
@@ -163,8 +163,9 @@ namespace LightmapUvTool
                 }
             }
 
-            // Resolve source FBX path (survives mesh modifications like merge/split)
-            if (string.IsNullOrEmpty(SourceFbxPath) || !System.IO.File.Exists(SourceFbxPath))
+            // Resolve source FBX path for the CURRENT selection.
+            // Do not keep a previously valid path here: otherwise standalone/LOD
+            // workflows can keep exporting/backing up the last selected FBX.
             {
                 SourceFbxPath = null;
                 foreach (var e in MeshEntries)
@@ -231,8 +232,8 @@ namespace LightmapUvTool
             PreviewLod = 0;
             SourceLodIndex = 0;
 
-            // Resolve source FBX path
-            if (string.IsNullOrEmpty(SourceFbxPath) || !System.IO.File.Exists(SourceFbxPath))
+            // Resolve source FBX path for the CURRENT standalone renderer.
+            // Do not reuse a previously valid FBX path from another selection.
             {
                 SourceFbxPath = null;
                 string p = UnityEditor.AssetDatabase.GetAssetPath(fbm);

@@ -19,6 +19,14 @@ namespace LightmapUvTool
             VertexAOSettings settings,
             Action<Dictionary<Mesh, float[]>> onComplete,
             Action<string> onError)
+            => StartGPUBake(meshes, null, settings, onComplete, onError);
+
+        internal static GpuAOBakeJob StartGPUBake(
+            List<(Mesh mesh, Matrix4x4 transform)> targets,
+            List<(Mesh mesh, Matrix4x4 transform)> occluders,
+            VertexAOSettings settings,
+            Action<Dictionary<Mesh, float[]>> onComplete,
+            Action<string> onError)
         {
             var computeShader = FindComputeShader("VertexAORayTrace");
             if (computeShader == null)
@@ -30,7 +38,7 @@ namespace LightmapUvTool
             GpuAOBakeJob job;
             try
             {
-                job = new GpuAOBakeJob(computeShader, meshes, settings, onComplete, onError);
+                job = new GpuAOBakeJob(computeShader, targets, occluders, settings, onComplete, onError);
             }
             catch (Exception ex)
             {
@@ -114,7 +122,8 @@ namespace LightmapUvTool
 
             public GpuAOBakeJob(
                 ComputeShader computeShader,
-                List<(Mesh mesh, Matrix4x4 transform)> meshes,
+                List<(Mesh mesh, Matrix4x4 transform)> targets,
+                List<(Mesh mesh, Matrix4x4 transform)> occluders,
                 VertexAOSettings settings,
                 Action<Dictionary<Mesh, float[]>> onComplete,
                 Action<string> onError)
@@ -124,28 +133,25 @@ namespace LightmapUvTool
                 this.onComplete = onComplete;
                 this.onError = onError;
 
-                Prepare(meshes);
+                Prepare(targets, occluders);
             }
 
-            void Prepare(List<(Mesh mesh, Matrix4x4 transform)> meshes)
+            void Prepare(
+                List<(Mesh mesh, Matrix4x4 transform)> targets,
+                List<(Mesh mesh, Matrix4x4 transform)> occluders)
             {
+                if (targets == null || targets.Count == 0)
+                    throw new Exception("GPU bake requires at least one target mesh.");
+
                 bool isThickness = settings.bakeType == AOBakeType.Thickness;
 
                 // Build combined BVH from all meshes
                 var allVerts = new List<Vector3>();
                 var allTris = new List<int>();
-                foreach (var (mesh, xform) in meshes)
-                {
-                    var readable = EnsureReadable(mesh);
-                    if (readable != mesh) readableCopies.Add(readable);
-                    int baseVert = allVerts.Count;
-                    var verts = readable.vertices;
-                    for (int i = 0; i < verts.Length; i++)
-                        allVerts.Add(xform.MultiplyPoint3x4(verts[i]));
-                    var tris = readable.triangles;
-                    for (int i = 0; i < tris.Length; i++)
-                        allTris.Add(tris[i] + baseVert);
-                }
+                AppendGeometryBuffers(targets, allVerts, allTris, readableCopies);
+                AppendGeometryBuffers(occluders, allVerts, allTris, readableCopies);
+                if (allVerts.Count == 0 || allTris.Count == 0)
+                    throw new Exception("GPU bake did not receive any readable geometry.");
 
                 var bvh = new TriangleBvh(allVerts.ToArray(), allTris.ToArray());
                 bvh.GetGPUData(out var gpuNodes, out var gpuTriIndices, out var gpuVerts, out var gpuTris);
@@ -171,8 +177,8 @@ namespace LightmapUvTool
                     faceNormals[f] = Vector3.Cross(b - a, c - a).normalized;
                 }
 
-                Bounds combinedBounds = ComputeCombinedBounds(meshes);
-                float extent = combinedBounds.extents.magnitude;
+                Bounds combinedBounds = ComputeCombinedBounds(targets);
+                float extent = Mathf.Max(combinedBounds.extents.magnitude, 0.0001f);
                 float normalOffset = 0.001f * extent;
                 float minHitDist = 0.003f * extent;
                 float maxDist = settings.maxRadius > 0 ? settings.maxRadius : float.MaxValue;
@@ -196,10 +202,10 @@ namespace LightmapUvTool
                 dirBuf.SetData(directions);
 
                 // Per-mesh vertex buffers
-                slots = new MeshSlot[meshes.Count];
-                for (int i = 0; i < meshes.Count; i++)
+                slots = new MeshSlot[targets.Count];
+                for (int i = 0; i < targets.Count; i++)
                 {
-                    var (mesh, xform) = meshes[i];
+                    var (mesh, xform) = targets[i];
                     var readable = EnsureReadable(mesh);
                     if (readable != mesh && !readableCopies.Contains(readable))
                         readableCopies.Add(readable);

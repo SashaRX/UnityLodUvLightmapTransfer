@@ -64,6 +64,9 @@ namespace LightmapUvTool
             if (ShellColorModelPreview.IsActive)
                 ShellColorModelPreview.Restore();
 
+            // Model Builder preview is per-tool instance — static guard.
+            ModelBuilderPreview.RestoreIfActive();
+
             // Lightmap preview is per-window instance — find open Mesh Lab windows and restore.
             var hubs = Resources.FindObjectsOfTypeAll<UvToolHub>();
             foreach (var h in hubs)
@@ -73,6 +76,22 @@ namespace LightmapUvTool
 
     public static class CheckerTexturePreview
     {
+        // ── Shader name constants for preview material detection ──
+        internal const string ToolShaderPrefix = "Hidden/LightmapUvTool/";
+        internal const string VertexColorShader = "Hidden/Internal-Colored";
+
+        /// <summary>
+        /// Returns true if the shader name belongs to a preview material
+        /// (tool overlays or vertex-color previews) that should not be
+        /// serialized into scenes, prefabs, or FBX exports.
+        /// </summary>
+        internal static bool IsPreviewShader(string shaderName)
+        {
+            if (string.IsNullOrEmpty(shaderName)) return false;
+            return shaderName.Equals(VertexColorShader, System.StringComparison.OrdinalIgnoreCase)
+                || shaderName.StartsWith(ToolShaderPrefix, System.StringComparison.OrdinalIgnoreCase);
+        }
+
         // ── Generated assets ──
         static Texture2D checkerTex;
         static Material  checkerMat;
