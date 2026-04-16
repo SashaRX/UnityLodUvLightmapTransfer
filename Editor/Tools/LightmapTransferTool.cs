@@ -1876,16 +1876,17 @@ namespace LightmapUvTool
 
             AssetDatabase.Refresh();
 
-            // Re-link scene mesh references after FBX reimport when
-            // NormalizeExportHierarchy renamed nodes (e.g. sanitizing names,
-            // adding _LOD0 suffix). Without this, MeshFilter/MeshCollider
-            // references go Missing because sub-asset names changed.
+            // Re-link scene mesh references after FBX reimport.
+            // Unity recreates sub-asset meshes on reimport; old MeshFilter
+            // references go Missing even when names didn't change.
+            // Always re-link for every overwritten FBX.
             if (overwriteSource && allGroupsSucceeded && ctx?.LodGroup != null)
             {
-                foreach (var kvp in meshRenamesByFbx)
+                foreach (string fbxPath in overwrittenFbxPaths)
                 {
-                    if (kvp.Value.Count > 0)
-                        RelinkSceneMeshReferences(kvp.Key, kvp.Value, ctx.LodGroup);
+                    Dictionary<string, string> renameMap = null;
+                    meshRenamesByFbx.TryGetValue(fbxPath, out renameMap);
+                    RelinkSceneMeshReferences(fbxPath, renameMap, ctx.LodGroup);
                 }
             }
 
@@ -2323,101 +2324,149 @@ namespace LightmapUvTool
         }
 
         /// <summary>
-        /// After FBX reimport, mesh sub-assets may have been renamed by
-        /// NormalizeExportHierarchy. Re-link scene MeshFilter/MeshCollider
-        /// references that now point to Missing (Mesh) to the new sub-assets.
+        /// After FBX reimport, re-link scene MeshFilter/MeshCollider/SkinnedMeshRenderer
+        /// references to the fresh sub-asset meshes. Unity recreates sub-assets on reimport
+        /// so old references go Missing even when names didn't change.
+        /// <paramref name="renameMap"/> is optional — provides oldName→newName for renamed nodes.
         /// </summary>
         static void RelinkSceneMeshReferences(
             string fbxPath,
             Dictionary<string, string> renameMap,
             LODGroup lodGroup)
         {
-            if (renameMap == null || renameMap.Count == 0) return;
             if (lodGroup == null) return;
 
-            // Load all mesh sub-assets from the reimported FBX
+            // Load all mesh sub-assets from the reimported FBX keyed by name
             var subAssets = AssetDatabase.LoadAllAssetsAtPath(fbxPath);
-            var meshByName = new Dictionary<string, Mesh>();
+            var meshByName = new Dictionary<string, Mesh>(StringComparer.OrdinalIgnoreCase);
             foreach (var asset in subAssets)
             {
                 var mesh = asset as Mesh;
-                if (mesh != null)
+                if (mesh != null && !meshByName.ContainsKey(mesh.name))
                     meshByName[mesh.name] = mesh;
             }
 
-            // Build oldName → new Mesh lookup
-            var oldToNewMesh = new Dictionary<string, Mesh>();
-            foreach (var kvp in renameMap)
-            {
-                if (meshByName.TryGetValue(kvp.Value, out var newMesh))
-                    oldToNewMesh[kvp.Key] = newMesh;
-            }
+            if (meshByName.Count == 0) return;
 
-            if (oldToNewMesh.Count == 0) return;
-
-            // Walk scene objects under the LODGroup and fix broken references
+            int relinked = 0;
             var root = lodGroup.transform;
+
+            // ── Re-link MeshFilter references ──
             foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
             {
                 if (mf == null) continue;
-                // Missing mesh shows as null but was previously assigned
-                if (mf.sharedMesh == null)
+
+                if (mf.sharedMesh != null)
                 {
-                    // Try to match by GameObject name (which still has old naming)
-                    foreach (var kvp in oldToNewMesh)
+                    // Mesh reference exists — try to refresh to new sub-asset by name
+                    string meshName = mf.sharedMesh.name;
+
+                    // Check if this mesh was renamed
+                    if (renameMap != null && renameMap.TryGetValue(meshName, out string newName))
+                        meshName = newName;
+
+                    if (meshByName.TryGetValue(meshName, out var freshMesh) && mf.sharedMesh != freshMesh)
                     {
-                        if (mf.gameObject.name == kvp.Key ||
-                            mf.gameObject.name.Contains(kvp.Key))
+                        Undo.RecordObject(mf, "Relink Mesh");
+                        mf.sharedMesh = freshMesh;
+                        relinked++;
+                    }
+                }
+                else
+                {
+                    // Missing mesh — try to find by GameObject name
+                    string goName = mf.gameObject.name;
+
+                    // Direct match
+                    if (meshByName.TryGetValue(goName, out var match))
+                    {
+                        Undo.RecordObject(mf, "Relink Mesh");
+                        mf.sharedMesh = match;
+                        relinked++;
+                        continue;
+                    }
+
+                    // Try renamed name
+                    if (renameMap != null)
+                    {
+                        foreach (var kvp in renameMap)
                         {
-                            Undo.RecordObject(mf, "Relink Mesh");
-                            mf.sharedMesh = kvp.Value;
-                            UvtLog.Info($"[FBX Export] Relinked mesh on '{mf.gameObject.name}' -> '{kvp.Value.name}'");
+                            if (goName == kvp.Key && meshByName.TryGetValue(kvp.Value, out var renamedMesh))
+                            {
+                                Undo.RecordObject(mf, "Relink Mesh");
+                                mf.sharedMesh = renamedMesh;
+                                relinked++;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Fallback: fuzzy match by stripping LOD suffix from GO name
+                    if (mf.sharedMesh == null)
+                    {
+                        foreach (var kvp in meshByName)
+                        {
+                            if (goName.Contains(kvp.Key) || kvp.Key.Contains(goName))
+                            {
+                                Undo.RecordObject(mf, "Relink Mesh");
+                                mf.sharedMesh = kvp.Value;
+                                relinked++;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Re-link MeshCollider references ──
+            foreach (var mc in root.GetComponentsInChildren<MeshCollider>(true))
+            {
+                if (mc == null) continue;
+
+                if (mc.sharedMesh != null)
+                {
+                    string meshName = mc.sharedMesh.name;
+                    if (renameMap != null && renameMap.TryGetValue(meshName, out string newName))
+                        meshName = newName;
+
+                    if (meshByName.TryGetValue(meshName, out var freshMesh) && mc.sharedMesh != freshMesh)
+                    {
+                        Undo.RecordObject(mc, "Relink Collider Mesh");
+                        mc.sharedMesh = freshMesh;
+                        relinked++;
+                    }
+                }
+                else
+                {
+                    // Missing collider mesh — try by GO name
+                    if (meshByName.TryGetValue(mc.gameObject.name, out var match))
+                    {
+                        Undo.RecordObject(mc, "Relink Collider Mesh");
+                        mc.sharedMesh = match;
+                        relinked++;
+                    }
+                }
+            }
+
+            // ── Rename scene GameObjects to match new FBX node names ──
+            if (renameMap != null)
+            {
+                foreach (var kvp in renameMap)
+                {
+                    foreach (Transform child in root)
+                    {
+                        if (child.name == kvp.Key)
+                        {
+                            Undo.RecordObject(child.gameObject, "Rename to match FBX");
+                            child.name = kvp.Value;
                             break;
                         }
                     }
                 }
-                else if (mf.sharedMesh != null)
-                {
-                    // Mesh exists but might be stale (pointing to old sub-asset)
-                    string meshName = mf.sharedMesh.name;
-                    if (oldToNewMesh.TryGetValue(meshName, out var replacement) &&
-                        mf.sharedMesh != replacement)
-                    {
-                        Undo.RecordObject(mf, "Relink Mesh");
-                        mf.sharedMesh = replacement;
-                        UvtLog.Info($"[FBX Export] Relinked mesh '{meshName}' -> '{replacement.name}' on '{mf.gameObject.name}'");
-                    }
-                }
             }
 
-            // Also fix MeshCollider references
-            foreach (var mc in root.GetComponentsInChildren<MeshCollider>(true))
-            {
-                if (mc == null || mc.sharedMesh == null) continue;
-                string meshName = mc.sharedMesh.name;
-                if (oldToNewMesh.TryGetValue(meshName, out var replacement) &&
-                    mc.sharedMesh != replacement)
-                {
-                    Undo.RecordObject(mc, "Relink Collider Mesh");
-                    mc.sharedMesh = replacement;
-                    UvtLog.Info($"[FBX Export] Relinked collider mesh '{meshName}' -> '{replacement.name}'");
-                }
-            }
-
-            // Rename scene GameObjects to match new FBX node names
-            foreach (var kvp in renameMap)
-            {
-                foreach (Transform child in root)
-                {
-                    if (child.name == kvp.Key)
-                    {
-                        Undo.RecordObject(child.gameObject, "Rename to match FBX");
-                        child.name = kvp.Value;
-                        UvtLog.Info($"[FBX Export] Renamed scene object '{kvp.Key}' -> '{kvp.Value}'");
-                        break;
-                    }
-                }
-            }
+            if (relinked > 0)
+                UvtLog.Info($"[FBX Export] Relinked {relinked} mesh reference(s) after reimport.");
         }
 
         void GenerateLods()
