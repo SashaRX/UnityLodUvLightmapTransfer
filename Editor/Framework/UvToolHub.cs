@@ -21,6 +21,15 @@ namespace LightmapUvTool
         int activeToolIndex;
         IUvTool ActiveTool => tools != null && activeToolIndex >= 0 && activeToolIndex < tools.Count ? tools[activeToolIndex] : null;
 
+        /// <summary>Find a registered tool by type. Returns null if not found.</summary>
+        public T FindTool<T>() where T : class, IUvTool
+        {
+            if (tools == null) return null;
+            foreach (var t in tools)
+                if (t is T result) return result;
+            return null;
+        }
+
         // ── Shared components ──
         UvToolContext ctx;
         UvCanvasView canvas;
