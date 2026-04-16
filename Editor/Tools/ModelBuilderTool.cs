@@ -1573,7 +1573,7 @@ namespace LightmapUvTool
             GUI.backgroundColor = new Color(0.4f, 0.7f, 0.95f);
             if (GUILayout.Button("Overwrite FBX", GUILayout.Height(24)))
             {
-                var hub = UnityEditor.Resources.FindObjectsOfTypeAll<UvToolHub>();
+                var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
                 if (hub.Length > 0)
                 {
                     var transferTool = hub[0].FindTool<LightmapTransferTool>();
@@ -1588,7 +1588,7 @@ namespace LightmapUvTool
             GUI.backgroundColor = new Color(0.3f, 0.85f, 0.4f);
             if (GUILayout.Button("Export New FBX", GUILayout.Height(24)))
             {
-                var hub = UnityEditor.Resources.FindObjectsOfTypeAll<UvToolHub>();
+                var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
                 if (hub.Length > 0)
                 {
                     var transferTool = hub[0].FindTool<LightmapTransferTool>();
@@ -1606,7 +1606,7 @@ namespace LightmapUvTool
             GUI.backgroundColor = new Color(0.7f, 0.4f, 0.95f);
             if (GUILayout.Button("Overwrite FBX (Vertex Colors Only)", GUILayout.Height(22)))
             {
-                var hub = UnityEditor.Resources.FindObjectsOfTypeAll<UvToolHub>();
+                var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
                 if (hub.Length > 0)
                 {
                     var transferTool = hub[0].FindTool<LightmapTransferTool>();
