@@ -100,6 +100,8 @@ namespace LightmapUvTool
 
             // ── 4. Classify each edge ──
             var report = new EdgeReport();
+            // Collect updates to avoid modifying dictionary during iteration.
+            var updates = new List<KeyValuePair<long, EdgeInfo>>();
 
             foreach (var kv in edges)
             {
@@ -165,9 +167,13 @@ namespace LightmapUvTool
                     }
                 }
 
-                edges[kv.Key] = info;
+                updates.Add(new KeyValuePair<long, EdgeInfo>(kv.Key, info));
                 report.totalEdges++;
             }
+
+            // Apply collected updates outside the iteration
+            foreach (var upd in updates)
+                edges[upd.Key] = upd.Value;
 
             return report;
         }

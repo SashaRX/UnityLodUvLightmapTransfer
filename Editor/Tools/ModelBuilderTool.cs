@@ -128,6 +128,7 @@ namespace LightmapUvTool
             DrawLodManagementSection();
             DrawCollisionSection();
             DrawSplitMergeSection();
+            DrawExportSection();
             DrawMeshInfo();
 
             if (edgeReports != null)
@@ -454,25 +455,68 @@ namespace LightmapUvTool
                 Undo.DestroyObjectImmediate(rootMf);
             }
 
-            // Sort LOD children by polycount, rename _LOD0, _LOD1, etc.
+            // Normalize LOD child names.
+            // Strategy: group by polycount to detect LOD tiers, then ensure each
+            // child has a valid _LOD{N} suffix. Preserve existing descriptive names
+            // (e.g. material names from split) — only fix the LOD suffix.
             var colSet = new HashSet<GameObject>(MeshHygieneUtility.FindCollisionObjects(root));
-            var lodCandidates = new List<(Transform t, int polyCount)>();
+            var meshChildren = new List<(Transform t, int polyCount)>();
             foreach (Transform child in root)
             {
                 if (colSet.Contains(child.gameObject)) continue;
                 var mf = child.GetComponent<MeshFilter>();
                 if (mf == null || mf.sharedMesh == null) continue;
-                lodCandidates.Add((child, MeshHygieneUtility.GetTriangleCount(mf.sharedMesh)));
+                meshChildren.Add((child, MeshHygieneUtility.GetTriangleCount(mf.sharedMesh)));
             }
-            lodCandidates.Sort((a, b) => b.polyCount.CompareTo(a.polyCount));
 
-            for (int i = 0; i < lodCandidates.Count; i++)
+            if (meshChildren.Count > 0)
             {
-                string newName = baseName + "_LOD" + i;
-                if (lodCandidates[i].t.name != newName)
+                // Group into LOD tiers by polycount (descending).
+                // Children with same or similar polycount are in the same LOD tier.
+                meshChildren.Sort((a, b) => b.polyCount.CompareTo(a.polyCount));
+
+                // If children already have valid _LOD{N} suffixes, just ensure suffix is correct
+                bool hasExistingLodNames = false;
+                foreach (var (t, _) in meshChildren)
                 {
-                    Undo.RecordObject(lodCandidates[i].t.gameObject, "Rename LOD");
-                    lodCandidates[i].t.name = newName;
+                    if (System.Text.RegularExpressions.Regex.IsMatch(
+                        t.name, @"_LOD\d+$",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                    {
+                        hasExistingLodNames = true;
+                        break;
+                    }
+                }
+
+                if (hasExistingLodNames)
+                {
+                    // Multi-mesh LODs: preserve names, only fix missing LOD suffix.
+                    // Don't renumber — existing suffixes reflect the intended LOD level.
+                    foreach (var (t, _) in meshChildren)
+                    {
+                        if (!System.Text.RegularExpressions.Regex.IsMatch(
+                            t.name, @"_LOD\d+$",
+                            System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        {
+                            // No LOD suffix — add _LOD0 as default
+                            Undo.RecordObject(t.gameObject, "Add LOD Suffix");
+                            t.name = t.name + "_LOD0";
+                        }
+                    }
+                }
+                else
+                {
+                    // Simple case: no existing LOD names. Single mesh per LOD tier.
+                    // Rename sequentially: baseName_LOD0, baseName_LOD1, etc.
+                    for (int i = 0; i < meshChildren.Count; i++)
+                    {
+                        string newName = baseName + "_LOD" + i;
+                        if (meshChildren[i].t.name != newName)
+                        {
+                            Undo.RecordObject(meshChildren[i].t.gameObject, "Rename LOD");
+                            meshChildren[i].t.name = newName;
+                        }
+                    }
                 }
             }
 
@@ -634,22 +678,21 @@ namespace LightmapUvTool
             if (lodChildren.Count == 0) return;
 
             Undo.RecordObject(ctx.LodGroup, "Rebuild LODGroup");
-            int maxLod = 0;
-            foreach (var k in lodChildren.Keys)
-                if (k > maxLod) maxLod = k;
-            maxLod++;
 
-            var newLods = new LOD[maxLod];
-            for (int i = 0; i < maxLod; i++)
+            // Build contiguous LOD array from sorted keys.
+            // Transitions must be strictly descending for Unity's SetLODs.
+            int lodCount = lodChildren.Count;
+            var newLods = new LOD[lodCount];
+            int idx = 0;
+            foreach (var kvp in lodChildren)
             {
-                Renderer[] renderers;
-                if (lodChildren.TryGetValue(i, out var list))
-                    renderers = list.ToArray();
+                float screenHeight;
+                if (lodCount == 1)
+                    screenHeight = 0.01f;
                 else
-                    renderers = new Renderer[0];
-
-                float screenHeight = i == 0 ? 0.5f : (1f / (i + 1));
-                newLods[i] = new LOD(screenHeight, renderers);
+                    screenHeight = 1f - ((float)idx / (lodCount - 1)) * 0.99f; // 1.0 → 0.01
+                newLods[idx] = new LOD(screenHeight, kvp.Value.ToArray());
+                idx++;
             }
             ctx.LodGroup.SetLODs(newLods);
             ctx.LodGroup.RecalculateBounds();
@@ -1389,6 +1432,68 @@ namespace LightmapUvTool
             preview?.Restore();
             previewMode = PreviewMode.None;
             requestRepaint?.Invoke();
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // Export section
+        // ═══════════════════════════════════════════════════════════
+
+        void DrawExportSection()
+        {
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("Export", EditorStyles.boldLabel);
+
+            var bgc = GUI.backgroundColor;
+            EditorGUILayout.BeginHorizontal();
+
+            // Overwrite FBX (full — through UV2 Transfer)
+            GUI.backgroundColor = new Color(0.4f, 0.7f, 0.95f);
+            if (GUILayout.Button("Overwrite FBX", GUILayout.Height(24)))
+            {
+                var hub = UnityEditor.Resources.FindObjectsOfTypeAll<UvToolHub>();
+                if (hub.Length > 0)
+                {
+                    var transferTool = hub[0].FindTool<LightmapTransferTool>();
+                    if (transferTool != null)
+                        transferTool.ExportFbxPublic(true);
+                    else
+                        UvtLog.Error("[Model Builder] LightmapTransferTool not found.");
+                }
+            }
+
+            // Export New FBX
+            GUI.backgroundColor = new Color(0.3f, 0.85f, 0.4f);
+            if (GUILayout.Button("Export New FBX", GUILayout.Height(24)))
+            {
+                var hub = UnityEditor.Resources.FindObjectsOfTypeAll<UvToolHub>();
+                if (hub.Length > 0)
+                {
+                    var transferTool = hub[0].FindTool<LightmapTransferTool>();
+                    if (transferTool != null)
+                        transferTool.ExportFbxPublic(false);
+                    else
+                        UvtLog.Error("[Model Builder] LightmapTransferTool not found.");
+                }
+            }
+
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+
+            // Vertex Colors only export
+            GUI.backgroundColor = new Color(0.7f, 0.4f, 0.95f);
+            if (GUILayout.Button("Overwrite FBX (Vertex Colors Only)", GUILayout.Height(22)))
+            {
+                var hub = UnityEditor.Resources.FindObjectsOfTypeAll<UvToolHub>();
+                if (hub.Length > 0)
+                {
+                    var transferTool = hub[0].FindTool<LightmapTransferTool>();
+                    if (transferTool != null)
+                        transferTool.ExportVertexColorsToFbx();
+                    else
+                        UvtLog.Error("[Model Builder] LightmapTransferTool not found.");
+                }
+            }
+            GUI.backgroundColor = bgc;
         }
 
         // ═══════════════════════════════════════════════════════════
