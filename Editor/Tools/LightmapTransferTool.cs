@@ -1545,20 +1545,6 @@ namespace LightmapUvTool
 
                 AssetDatabase.Refresh();
 
-                // Restore working copy meshes to scene renderers.
-                // FBX reimport resets prefab instance MeshFilters to
-                // reimported sub-assets, losing the in-memory working copy
-                // that holds AO and other tool modifications.
-                if (ctx?.MeshEntries != null)
-                {
-                    foreach (var e in ctx.MeshEntries)
-                    {
-                        if (!e.include || e.meshFilter == null) continue;
-                        if (e.originalMesh != null && e.meshFilter.sharedMesh != e.originalMesh)
-                            e.meshFilter.sharedMesh = e.originalMesh;
-                    }
-                }
-
                 // Re-link scene mesh references
                 if (ctx.LodGroup != null)
                     RelinkSceneMeshReferences(sourceFbxPath, renameMap.Count > 0 ? renameMap : null, ctx.LodGroup);
@@ -1581,6 +1567,20 @@ namespace LightmapUvTool
             }
 
             if (ctx.LodGroup != null) ctx.Refresh(ctx.LodGroup);
+
+            // Restore working copy meshes to scene renderers AFTER all
+            // reimports are done. Each SaveAndReimport/Refresh resets
+            // prefab instance MeshFilters to reimported FBX sub-assets,
+            // losing the in-memory working copy that holds AO data.
+            if (ctx?.MeshEntries != null)
+            {
+                foreach (var e in ctx.MeshEntries)
+                {
+                    if (!e.include || e.meshFilter == null) continue;
+                    if (e.originalMesh != null && e.meshFilter.sharedMesh != e.originalMesh)
+                        e.meshFilter.sharedMesh = e.originalMesh;
+                }
+            }
 #else
             UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
 #endif
