@@ -11,7 +11,8 @@ namespace LightmapUvTool
         // ── CPU Fallback ──
 
         static Dictionary<Mesh, float[]> BakeMultiMeshCPU(
-            List<(Mesh mesh, Matrix4x4 transform)> meshes,
+            List<(Mesh mesh, Matrix4x4 transform)> targets,
+            List<(Mesh mesh, Matrix4x4 transform)> occluders,
             VertexAOSettings settings)
         {
             UvtLog.Info("[Vertex AO] Using CPU mode (BVH ray tracing).");
@@ -21,18 +22,10 @@ namespace LightmapUvTool
             var allVerts = new List<Vector3>();
             var allTris = new List<int>();
             var cpuCopies = new List<Mesh>();
-            foreach (var (mesh, xform) in meshes)
-            {
-                var readable = EnsureReadable(mesh);
-                if (readable != mesh) cpuCopies.Add(readable);
-                int baseVert = allVerts.Count;
-                var verts = readable.vertices;
-                for (int i = 0; i < verts.Length; i++)
-                    allVerts.Add(xform.MultiplyPoint3x4(verts[i]));
-                var tris = readable.triangles;
-                for (int i = 0; i < tris.Length; i++)
-                    allTris.Add(tris[i] + baseVert);
-            }
+            AppendGeometryBuffers(targets, allVerts, allTris, cpuCopies);
+            AppendGeometryBuffers(occluders, allVerts, allTris, cpuCopies);
+            if (allVerts.Count == 0 || allTris.Count == 0)
+                return result;
 
             var allVertsArr = allVerts.ToArray();
             var allTrisArr = allTris.ToArray();
@@ -54,8 +47,8 @@ namespace LightmapUvTool
                 }
             }
 
-            Bounds combinedBounds = ComputeCombinedBounds(meshes);
-            float extent = combinedBounds.extents.magnitude;
+            Bounds combinedBounds = ComputeCombinedBounds(targets);
+            float extent = Mathf.Max(combinedBounds.extents.magnitude, 0.0001f);
             float normalOffset = 0.001f * extent;
             float minHitDist   = 0.003f * extent; // skip self-intersection on sharp edges
             float groundY = settings.groundPlane
@@ -63,10 +56,10 @@ namespace LightmapUvTool
                 : float.NegativeInfinity;
 
             int totalVerts = 0;
-            foreach (var (mesh, _) in meshes) totalVerts += mesh.vertexCount;
+            foreach (var (mesh, _) in targets) totalVerts += mesh.vertexCount;
             int processed = 0;
 
-            foreach (var (mesh, xform) in meshes)
+            foreach (var (mesh, xform) in targets)
             {
                 var readable = EnsureReadable(mesh);
                 var verts = readable.vertices;

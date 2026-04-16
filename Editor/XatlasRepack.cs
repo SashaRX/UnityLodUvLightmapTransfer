@@ -181,6 +181,8 @@ namespace LightmapUvTool
                         float smaller = Mathf.Min(areaI, areaJ);
                         if (smaller <= 0f || overlapArea / smaller < 0.01f) continue;
 
+                        float overlapRatio = overlapArea / smaller;
+
                         // Choose shift axis: prefer the direction with less displacement
                         float shiftU = (mx[i].x - mn[j].x) + padU;
                         float shiftV = (mx[i].y - mn[j].y) + padV;
@@ -188,6 +190,8 @@ namespace LightmapUvTool
                         if (shiftV <= 0f) shiftV = padV;
 
                         var shell = shells[group[j]];
+                        string axisName;
+                        float shiftMag;
                         if (shiftU <= shiftV)
                         {
                             foreach (int vi in shell.vertexIndices)
@@ -195,6 +199,8 @@ namespace LightmapUvTool
                                     uv2[vi] = new Vector2(uv2[vi].x + shiftU, uv2[vi].y);
                             mn[j] = new Vector2(mn[j].x + shiftU, mn[j].y);
                             mx[j] = new Vector2(mx[j].x + shiftU, mx[j].y);
+                            axisName = "U";
+                            shiftMag = shiftU;
                         }
                         else
                         {
@@ -203,7 +209,11 @@ namespace LightmapUvTool
                                     uv2[vi] = new Vector2(uv2[vi].x, uv2[vi].y + shiftV);
                             mn[j] = new Vector2(mn[j].x, mn[j].y + shiftV);
                             mx[j] = new Vector2(mx[j].x, mx[j].y + shiftV);
+                            axisName = "V";
+                            shiftMag = shiftV;
                         }
+                        UvtLog.Verbose($"[xatlas] Overlap fix: shell {group[i]}↔{group[j]} " +
+                            $"ratio={overlapRatio:F3} shift={axisName}+{shiftMag:F4}");
                         shifted++;
                     }
                 }
@@ -216,6 +226,92 @@ namespace LightmapUvTool
                 UvtLog.Info($"[xatlas] Post-repack: fixed {shifted} overlapping UV2 shell(s)");
 
             return shifted;
+        }
+
+        /// <summary>
+        /// Post-repack safety net: find shell pairs with nearly identical UV2 centroids
+        /// (true SymSplit duplicates packed at the same position) and fix their overlap.
+        /// Unlike the old global pass that checked ALL N² pairs (causing false positives
+        /// on dense atlases), this only checks pairs within centroid proximity threshold.
+        /// </summary>
+        internal static int FixNearDuplicateUv2Shells(
+            Vector2[] uv2, List<UvShell> shells,
+            uint padding, uint atlasWidth, uint atlasHeight,
+            bool skipRescale = false)
+        {
+            if (shells.Count < 2) return 0;
+
+            float atlasDim = Mathf.Max(atlasWidth, atlasHeight);
+            if (atlasDim <= 0f) return 0;
+
+            // Centroid proximity threshold: 4 pixels in UV space.
+            // True SymSplit duplicates are packed at essentially identical positions.
+            float centroidThreshold = 4f / atlasDim;
+            float centroidThresholdSq = centroidThreshold * centroidThreshold;
+
+            // Compute UV2 centroid for each shell
+            int sc = shells.Count;
+            var centroids = new Vector2[sc];
+            for (int i = 0; i < sc; i++)
+            {
+                Vector2 sum = Vector2.zero;
+                int cnt = 0;
+                foreach (int vi in shells[i].vertexIndices)
+                {
+                    if ((uint)vi < (uint)uv2.Length)
+                    {
+                        sum += uv2[vi];
+                        cnt++;
+                    }
+                }
+                centroids[i] = cnt > 0 ? sum / cnt : Vector2.zero;
+            }
+
+            // Build overlap groups using union-find so transitive chains
+            // (A near B, B near C) are merged into one group.
+            var parent = new int[sc];
+            for (int i = 0; i < sc; i++) parent[i] = i;
+
+            int FindRoot(int x)
+            {
+                while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+                return x;
+            }
+
+            for (int i = 0; i < sc; i++)
+            for (int j = i + 1; j < sc; j++)
+            {
+                float dx = centroids[i].x - centroids[j].x;
+                float dy = centroids[i].y - centroids[j].y;
+                if (dx * dx + dy * dy < centroidThresholdSq)
+                {
+                    int ri = FindRoot(i), rj = FindRoot(j);
+                    if (ri != rj) parent[ri] = rj;
+                }
+            }
+
+            // Collect groups with more than one member
+            var groupMap = new Dictionary<int, List<int>>();
+            for (int i = 0; i < sc; i++)
+            {
+                int root = FindRoot(i);
+                if (!groupMap.TryGetValue(root, out var g))
+                {
+                    g = new List<int>();
+                    groupMap[root] = g;
+                }
+                g.Add(i);
+            }
+
+            var nearPairs = new List<List<int>>();
+            foreach (var g in groupMap.Values)
+                if (g.Count > 1)
+                    nearPairs.Add(g);
+
+            if (nearPairs.Count == 0) return 0;
+
+            return FixOverlappingUv2Shells(uv2, shells, nearPairs,
+                padding, atlasWidth, atlasHeight, skipRescale);
         }
 
         /// <summary>
@@ -233,9 +329,173 @@ namespace LightmapUvTool
             if (maxU > 1f || maxV > 1f)
             {
                 float scale = 1f / Mathf.Max(maxU, maxV);
+                UvtLog.Verbose($"[xatlas] Rescale UV2 to unit: maxU={maxU:F4} maxV={maxV:F4} scale={scale:F4}");
                 for (int i = 0; i < uv2.Length; i++)
                     uv2[i] *= scale;
             }
+        }
+
+        /// <summary>
+        /// Phase 2 overlap fix: relocate overlapping UV2 shells to free atlas space.
+        /// Uses an occupancy grid to find unoccupied rectangles for displaced shells.
+        /// Falls back to axis-shift if no free space is found.
+        /// Returns number of shells relocated.
+        /// </summary>
+        internal static int RelocateToFreeSpace(
+            Vector2[] uv2, List<UvShell> shells,
+            uint padding, uint atlasWidth, uint atlasHeight)
+        {
+            if (shells.Count < 2) return 0;
+
+            float padU = atlasWidth  > 0 ? (float)padding / atlasWidth  : 0f;
+            float padV = atlasHeight > 0 ? (float)padding / atlasHeight : 0f;
+
+            // Compute UV2 AABB per shell
+            int n = shells.Count;
+            var mn = new Vector2[n];
+            var mx = new Vector2[n];
+            for (int i = 0; i < n; i++)
+            {
+                mn[i] = new Vector2(float.MaxValue, float.MaxValue);
+                mx[i] = new Vector2(float.MinValue, float.MinValue);
+                foreach (int vi in shells[i].vertexIndices)
+                {
+                    if ((uint)vi < (uint)uv2.Length)
+                    {
+                        mn[i] = Vector2.Min(mn[i], uv2[vi]);
+                        mx[i] = Vector2.Max(mx[i], uv2[vi]);
+                    }
+                }
+            }
+
+            // Detect overlapping pairs
+            var overlapping = new HashSet<int>();
+            for (int i = 0; i < n; i++)
+            {
+                for (int j = i + 1; j < n; j++)
+                {
+                    float oMinX = Mathf.Max(mn[i].x, mn[j].x);
+                    float oMinY = Mathf.Max(mn[i].y, mn[j].y);
+                    float oMaxX = Mathf.Min(mx[i].x, mx[j].x);
+                    float oMaxY = Mathf.Min(mx[i].y, mx[j].y);
+                    if (oMaxX <= oMinX || oMaxY <= oMinY) continue;
+
+                    float overlapArea = (oMaxX - oMinX) * (oMaxY - oMinY);
+                    float areaI = (mx[i].x - mn[i].x) * (mx[i].y - mn[i].y);
+                    float areaJ = (mx[j].x - mn[j].x) * (mx[j].y - mn[j].y);
+                    float smaller = Mathf.Min(areaI, areaJ);
+                    if (smaller <= 0f || overlapArea / smaller < 0.01f) continue;
+
+                    overlapping.Add(i);
+                    overlapping.Add(j);
+                }
+            }
+
+            if (overlapping.Count == 0) return 0;
+
+            // Build occupancy grid from non-overlapping shells
+            const int kGridRes = 128;
+            int[,] grid = new int[kGridRes, kGridRes]; // 0 = free, 1 = occupied
+
+            for (int i = 0; i < n; i++)
+            {
+                if (overlapping.Contains(i)) continue;
+                int gMinX = Mathf.Clamp(Mathf.FloorToInt(mn[i].x * kGridRes), 0, kGridRes - 1);
+                int gMinY = Mathf.Clamp(Mathf.FloorToInt(mn[i].y * kGridRes), 0, kGridRes - 1);
+                int gMaxX = Mathf.Clamp(Mathf.CeilToInt(mx[i].x * kGridRes), 0, kGridRes - 1);
+                int gMaxY = Mathf.Clamp(Mathf.CeilToInt(mx[i].y * kGridRes), 0, kGridRes - 1);
+                for (int gy = gMinY; gy <= gMaxY; gy++)
+                    for (int gx = gMinX; gx <= gMaxX; gx++)
+                        grid[gx, gy] = 1;
+            }
+
+            // Build summed area table for O(1) rectangle occupancy queries.
+            // sat[x,y] = sum of grid[0..x-1, 0..y-1].
+            int[,] sat = new int[kGridRes + 1, kGridRes + 1];
+            for (int y = 0; y < kGridRes; y++)
+                for (int x = 0; x < kGridRes; x++)
+                    sat[x + 1, y + 1] = grid[x, y] + sat[x, y + 1] + sat[x + 1, y] - sat[x, y];
+
+            // Sort overlapping shells by area (largest first) for better packing
+            var toRelocate = new List<int>(overlapping);
+            toRelocate.Sort((a, b) =>
+            {
+                float areaA = (mx[a].x - mn[a].x) * (mx[a].y - mn[a].y);
+                float areaB = (mx[b].x - mn[b].x) * (mx[b].y - mn[b].y);
+                return areaB.CompareTo(areaA);
+            });
+
+            int relocated = 0;
+            foreach (int si in toRelocate)
+            {
+                float w = mx[si].x - mn[si].x + padU * 2f;
+                float h = mx[si].y - mn[si].y + padV * 2f;
+                int gw = Mathf.Max(1, Mathf.CeilToInt(w * kGridRes));
+                int gh = Mathf.Max(1, Mathf.CeilToInt(h * kGridRes));
+
+                // Scan for free rectangle using summed area table (O(1) per query)
+                bool placed = false;
+                for (int gy = 0; gy <= kGridRes - gh && !placed; gy++)
+                {
+                    for (int gx = 0; gx <= kGridRes - gw && !placed; gx++)
+                    {
+                        int sum = sat[gx + gw, gy + gh] - sat[gx, gy + gh]
+                                - sat[gx + gw, gy]      + sat[gx, gy];
+                        if (sum != 0) continue;
+
+                        // Place shell here
+                        float newMinX = (float)gx / kGridRes + padU;
+                        float newMinY = (float)gy / kGridRes + padV;
+                        float offX = newMinX - mn[si].x;
+                        float offY = newMinY - mn[si].y;
+
+                        foreach (int vi in shells[si].vertexIndices)
+                            if ((uint)vi < (uint)uv2.Length)
+                                uv2[vi] = new Vector2(uv2[vi].x + offX, uv2[vi].y + offY);
+
+                        // Mark occupied in grid and rebuild SAT incrementally
+                        for (int dy = 0; dy < gh; dy++)
+                            for (int dx = 0; dx < gw; dx++)
+                                grid[gx + dx, gy + dy] = 1;
+                        for (int y = gy; y < kGridRes; y++)
+                            for (int x = gx; x < kGridRes; x++)
+                                sat[x + 1, y + 1] = grid[x, y] + sat[x, y + 1] + sat[x + 1, y] - sat[x, y];
+
+                        mn[si] = new Vector2(mn[si].x + offX, mn[si].y + offY);
+                        mx[si] = new Vector2(mx[si].x + offX, mx[si].y + offY);
+
+                        UvtLog.Verbose($"[xatlas] Free-space relocate: shell {si} → " +
+                            $"({newMinX:F3},{newMinY:F3}) offset=({offX:F4},{offY:F4})");
+                        placed = true;
+                        relocated++;
+                    }
+                }
+
+                if (!placed)
+                {
+                    UvtLog.Verbose($"[xatlas] Free-space fallback: shell {si} — no free space, " +
+                        $"using axis shift");
+                    // Mark this shell's current position as occupied anyway
+                    int fgMinX = Mathf.Clamp(Mathf.FloorToInt(mn[si].x * kGridRes), 0, kGridRes - 1);
+                    int fgMinY = Mathf.Clamp(Mathf.FloorToInt(mn[si].y * kGridRes), 0, kGridRes - 1);
+                    int fgMaxX = Mathf.Clamp(Mathf.CeilToInt(mx[si].x * kGridRes), 0, kGridRes - 1);
+                    int fgMaxY = Mathf.Clamp(Mathf.CeilToInt(mx[si].y * kGridRes), 0, kGridRes - 1);
+                    for (int fy = fgMinY; fy <= fgMaxY; fy++)
+                        for (int fx = fgMinX; fx <= fgMaxX; fx++)
+                            grid[fx, fy] = 1;
+                    for (int y = fgMinY; y < kGridRes; y++)
+                        for (int x = fgMinX; x < kGridRes; x++)
+                            sat[x + 1, y + 1] = grid[x, y] + sat[x, y + 1] + sat[x + 1, y] - sat[x, y];
+                }
+            }
+
+            if (relocated > 0)
+            {
+                RescaleUv2ToUnit(uv2);
+                UvtLog.Info($"[xatlas] Free-space relocator: placed {relocated}/{toRelocate.Count} overlapping shells");
+            }
+
+            return relocated;
         }
 
         /// <summary>
@@ -293,6 +553,9 @@ namespace LightmapUvTool
 
             result.shellCount = shells.Count;
             result.overlapGroupCount = overlapGroups.Count;
+            int overlapPairCount = UvShellExtractor.CountAabbOverlaps(shells);
+            UvtLog.Verbose($"[xatlas] Pre-repack: {shells.Count} shells, " +
+                $"{overlapGroups.Count} overlap groups, {overlapPairCount} overlapping pairs");
 
             // UV0 winding normalized by ExecWeldUv0.
             result.flippedShells = 0;
@@ -381,15 +644,17 @@ namespace LightmapUvTool
                 FixOverlappingUv2Shells(uv2, shells, overlapGroups,
                     opts.padding, result.atlasWidth, result.atlasHeight, skipRescale: true);
 
-                // Phase 2: global safety net — check ALL shell pairs for UV2 bbox overlap.
-                // Catches SymSplit halves whose UV0 bboxes diverged after splitting.
+                // Phase 2: centroid-proximity safety net — find shells packed at
+                // nearly identical UV2 positions (true SymSplit near-duplicates).
+                // Only checks pairs within 4px centroid distance, avoiding the
+                // false positives of the old global N² pass on dense atlases.
+                FixNearDuplicateUv2Shells(uv2, shells,
+                    opts.padding, result.atlasWidth, result.atlasHeight);
+
+                // Phase 3: free-space relocator for any remaining overlaps.
                 if (shells.Count > 1)
-                {
-                    var allGroup = new List<List<int>> { new List<int>(shells.Count) };
-                    for (int i = 0; i < shells.Count; i++) allGroup[0].Add(i);
-                    FixOverlappingUv2Shells(uv2, shells, allGroup,
+                    RelocateToFreeSpace(uv2, shells,
                         opts.padding, result.atlasWidth, result.atlasHeight);
-                }
 
                 // ── Post-process: fix orphan vertices ──
                 int orphanVerts, orphanTris, snapped;
@@ -473,6 +738,9 @@ namespace LightmapUvTool
 
                 results[m].shellCount        = shells.Count;
                 results[m].overlapGroupCount  = overlapGroups.Count;
+                int overlapPairs = UvShellExtractor.CountAabbOverlaps(shells);
+                UvtLog.Verbose($"[xatlas] Pre-repack mesh {m}: {shells.Count} shells, " +
+                    $"{overlapGroups.Count} overlap groups, {overlapPairs} overlapping pairs");
 
             }
 
@@ -585,14 +853,14 @@ namespace LightmapUvTool
                     totalShifted += FixOverlappingUv2Shells(uv2, allShells[m], allOverlap[m],
                         opts.padding, atlasW, atlasH, skipRescale: true);
 
-                    // Global safety net: check ALL shell pairs for UV2 overlap
+                    // Centroid-proximity safety net for near-duplicate SymSplit shells
+                    totalShifted += FixNearDuplicateUv2Shells(uv2, allShells[m],
+                        opts.padding, atlasW, atlasH, skipRescale: true);
+
+                    // Free-space relocator for any remaining overlaps
                     if (allShells[m].Count > 1)
-                    {
-                        var allGroup = new List<List<int>> { new List<int>(allShells[m].Count) };
-                        for (int si = 0; si < allShells[m].Count; si++) allGroup[0].Add(si);
-                        totalShifted += FixOverlappingUv2Shells(uv2, allShells[m], allGroup,
-                            opts.padding, atlasW, atlasH, skipRescale: true);
-                    }
+                        totalShifted += RelocateToFreeSpace(uv2, allShells[m],
+                            opts.padding, atlasW, atlasH);
 
                     // Fix orphan vertices
                     int orphanVerts, orphanTris, snapped;

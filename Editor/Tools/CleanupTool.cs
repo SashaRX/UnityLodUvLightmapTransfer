@@ -46,7 +46,7 @@ namespace LightmapUvTool
 
         struct MaterialIssue
         {
-            public enum Kind { HiddenShader, MismatchedMaterial, ExtraSlot, ImporterRemap, DuplicateSlot }
+            public enum Kind { HiddenShader, MismatchedMaterial, ExtraSlot, ImporterRemap, DuplicateSlot, NullSlot }
             public Kind kind;
             public Renderer renderer;
             public int submeshIndex;
@@ -408,11 +408,33 @@ namespace LightmapUvTool
                 var mesh = e.meshFilter.sharedMesh;
                 if (mesh == null) continue;
 
+                // Check null material slots (empty slots within valid submesh range)
+                for (int i = 0; i < mats.Length && i < mesh.subMeshCount; i++)
+                {
+                    if (mats[i] == null)
+                    {
+                        string key = e.meshGroupKey ?? e.renderer.name;
+                        Material suggested = null;
+                        if (lod0Mats.TryGetValue(key, out var l0Null) && i < l0Null.Length)
+                            suggested = l0Null[i];
+
+                        materialIssues.Add(new MaterialIssue
+                        {
+                            kind = MaterialIssue.Kind.NullSlot,
+                            renderer = e.renderer,
+                            submeshIndex = i,
+                            current = null,
+                            suggested = suggested,
+                            description = $"{e.renderer.name}: material slot [{i}] is empty (null)"
+                        });
+                    }
+                }
+
                 // Check hidden shaders
                 for (int i = 0; i < mats.Length; i++)
                 {
                     if (mats[i] == null) continue;
-                    if (mats[i].shader.name.StartsWith("Hidden/LightmapUvTool/"))
+                    if (mats[i].shader.name.StartsWith(CheckerTexturePreview.ToolShaderPrefix))
                     {
                         string key = e.meshGroupKey ?? e.renderer.name;
                         Material suggested = null;
@@ -442,7 +464,7 @@ namespace LightmapUvTool
                         {
                             if (mats[i] == l0[i]) continue;
                             // Skip if already flagged as hidden shader
-                            if (mats[i] != null && mats[i].shader.name.StartsWith("Hidden/LightmapUvTool/"))
+                            if (mats[i] != null && mats[i].shader.name.StartsWith(CheckerTexturePreview.ToolShaderPrefix))
                                 continue;
                             materialIssues.Add(new MaterialIssue
                             {
@@ -517,7 +539,7 @@ namespace LightmapUvTool
                 if (e.lodIndex != 0 || e.renderer == null) continue;
                 foreach (var mat in e.renderer.sharedMaterials)
                 {
-                    if (mat != null && !mat.shader.name.StartsWith("Hidden/LightmapUvTool/"))
+                    if (mat != null && !mat.shader.name.StartsWith(CheckerTexturePreview.ToolShaderPrefix))
                         correctMats[mat.name] = mat;
                 }
             }
@@ -567,7 +589,7 @@ namespace LightmapUvTool
                     if (mat == null) continue;
 
                     bool isHidden = mat.name.StartsWith("Hidden_LightmapUvTool")
-                                 || mat.shader.name.StartsWith("Hidden/LightmapUvTool/");
+                                 || mat.shader.name.StartsWith(CheckerTexturePreview.ToolShaderPrefix);
                     bool isDefault = mat.name == "Lit" || mat.name == "No Name"
                                   || (mat.name == "Standard" && mat.shader.name == "Standard");
 
@@ -633,6 +655,7 @@ namespace LightmapUvTool
 
                 switch (issue.kind)
                 {
+                    case MaterialIssue.Kind.NullSlot:
                     case MaterialIssue.Kind.HiddenShader:
                     case MaterialIssue.Kind.MismatchedMaterial:
                         if (issue.suggested != null && issue.submeshIndex < mats.Length)
@@ -1280,7 +1303,11 @@ namespace LightmapUvTool
 
             // Check if root has MeshFilter (should be empty pivot)
             var rootMf = root.GetComponent<MeshFilter>();
-            if (rootMf != null && rootMf.sharedMesh != null)
+            var rootSmr = root.GetComponent<SkinnedMeshRenderer>();
+            bool rootHasRenderableMesh =
+                (rootMf != null && rootMf.sharedMesh != null) ||
+                (rootSmr != null && rootSmr.sharedMesh != null);
+            if (rootHasRenderableMesh && !IsRootRendererUsedAsLod0(root.gameObject, lods))
             {
                 sceneIssues.Add(new SceneIssue
                 {
@@ -1411,6 +1438,11 @@ namespace LightmapUvTool
             {
                 if (issue.kind != SceneIssue.Kind.RootHasMesh) continue;
                 if (issue.gameObject == null || ctx.LodGroup == null) continue;
+                if (IsRootRendererUsedAsLod0(issue.gameObject, ctx.LodGroup.GetLODs()))
+                {
+                    UvtLog.Info($"Skipped root mesh move for '{issue.gameObject.name}': root renderer is already used as LOD0.");
+                    continue;
+                }
 
                 MoveRootMeshToChild(issue.gameObject);
                 movedRoots.Add(issue.gameObject);
@@ -2037,6 +2069,14 @@ namespace LightmapUvTool
         {
             if (splitCandidates == null || splitCandidates.Count == 0) return;
 
+            // Restore any active checker/shell preview BEFORE reading sharedMaterials.
+            // Otherwise mats[] below would be [checkerMat, ...] and the new split
+            // children would inherit the preview material permanently — the original
+            // renderer they were backed up against is destroyed below, so the normal
+            // preview-restore path can't rescue them.
+            if (CheckerTexturePreview.IsActive) CheckerTexturePreview.Restore();
+            if (ShellColorModelPreview.IsActive) ShellColorModelPreview.Restore();
+
             using var _undo = MeshHygieneUtility.BeginUndoGroup("Cleanup: Split by Material");
             int split = 0;
 
@@ -2054,6 +2094,28 @@ namespace LightmapUvTool
                 var parent = e.renderer.transform.parent;
                 var srcTransform = e.renderer.transform;
                 var newRenderers = new List<Renderer>();
+
+                // Compute source name + trailing LOD suffix once per renderer; each
+                // submesh child reuses these to build `{srcName}_{matName}{lodSuffix}`,
+                // keeping `_LOD{N}` at the END for ExtractGroupKey compatibility.
+                string srcName = e.renderer.name;
+                string lodSuffix = "";
+                var lodMatch = System.Text.RegularExpressions.Regex.Match(
+                    srcName, @"([_\-\s]+LOD\d+)$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (lodMatch.Success)
+                {
+                    lodSuffix = lodMatch.Value;
+                    srcName = srcName.Substring(0, srcName.Length - lodSuffix.Length);
+                }
+
+                // Warn if material count doesn't line up with submeshes — slots beyond
+                // the shorter of the two would be silently unassigned otherwise.
+                if (mats.Length != subCount)
+                    UvtLog.Warn($"Split '{e.renderer.name}': material count ({mats.Length}) != submesh count ({subCount}) — " +
+                                (mats.Length < subCount
+                                    ? "some submeshes will have no material."
+                                    : "extra material slots will be dropped."));
 
                 for (int s = 0; s < subCount; s++)
                 {
@@ -2097,9 +2159,17 @@ namespace LightmapUvTool
                     for (int t = 0; t < subTris.Length; t++)
                         newTris[t] = oldToNew[subTris[t]];
 
+                    // Build the child name ONCE and reuse for both mesh asset and
+                    // GameObject so the FBX export (which names export children after
+                    // entry.fbxMesh.name) matches the scene hierarchy exactly.
+                    string matName = s < mats.Length && mats[s] != null ? mats[s].name : $"mat{s}";
+                    if (s < mats.Length && mats[s] == null)
+                        UvtLog.Warn($"Split '{e.renderer.name}': material slot [{s}] is null — child '{srcName}_mat{s}{lodSuffix}' will have no material.");
+                    string childName = $"{srcName}_{matName}{lodSuffix}";
+
                     // Build new mesh
                     var newMesh = new Mesh();
-                    newMesh.name = $"{srcMesh.name}_sub{s}";
+                    newMesh.name = childName;
                     newMesh.SetVertices(newPos);
                     if (newNorm != null) newMesh.normals = newNorm;
                     if (newTan != null) newMesh.tangents = newTan;
@@ -2131,20 +2201,8 @@ namespace LightmapUvTool
                     newMesh.SetTriangles(newTris, 0);
                     newMesh.RecalculateBounds();
 
-                    // Create new GameObject
-                    string matName = s < mats.Length && mats[s] != null ? mats[s].name : $"mat{s}";
-                    // Preserve trailing LOD suffix for ExtractGroupKey compatibility
-                    string srcName = e.renderer.name;
-                    string lodSuffix = "";
-                    var lodMatch = System.Text.RegularExpressions.Regex.Match(
-                        srcName, @"([_\-\s]+LOD\d+)$",
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                    if (lodMatch.Success)
-                    {
-                        lodSuffix = lodMatch.Value;
-                        srcName = srcName.Substring(0, srcName.Length - lodSuffix.Length);
-                    }
-                    var go = new GameObject($"{srcName}_{matName}{lodSuffix}");
+                    // Create new GameObject (name already computed above as childName)
+                    var go = new GameObject(childName);
                     Undo.RegisterCreatedObjectUndo(go, "Split by Material");
                     go.transform.SetParent(parent, false);
                     go.transform.localPosition = srcTransform.localPosition;
@@ -2945,6 +3003,8 @@ namespace LightmapUvTool
         {
             string baseName = UvToolContext.ExtractGroupKey(root.name);
             if (string.IsNullOrEmpty(baseName)) baseName = root.name;
+            baseName = MeshHygieneUtility.SanitizeName(baseName);
+            if (string.IsNullOrEmpty(baseName)) baseName = "Unnamed";
 
             var rootMf = root.GetComponent<MeshFilter>();
             var rootMr = root.GetComponent<MeshRenderer>();
@@ -2970,7 +3030,7 @@ namespace LightmapUvTool
                     dstMr.scaleInLightmap = srcMr.scaleInLightmap;
                 }
                 GameObjectUtility.SetStaticEditorFlags(lod0Child,
-                    GameObjectUtility.GetStaticEditorFlags(root));
+                    GameObjectUtility.GetStaticEditorFlags(root.gameObject));
                 Undo.DestroyObjectImmediate(rootMr);
             }
             // MeshCollider stays on the node (root) — the convention is
@@ -2984,21 +3044,35 @@ namespace LightmapUvTool
             {
                 if (colSet.Contains(child.gameObject)) continue;
                 var mf = child.GetComponent<MeshFilter>();
-                if (mf == null || mf.sharedMesh == null) continue;
-                lodCandidates.Add((child, MeshHygieneUtility.GetTriangleCount(mf.sharedMesh)));
+                var smr = child.GetComponent<SkinnedMeshRenderer>();
+                var mesh = mf != null ? mf.sharedMesh : (smr != null ? smr.sharedMesh : null);
+                if (mesh == null) continue;
+                lodCandidates.Add((child, MeshHygieneUtility.GetTriangleCount(mesh)));
             }
 
             // Sort by polycount descending (LOD0 = highest)
             lodCandidates.Sort((a, b) => b.polyCount.CompareTo(a.polyCount));
 
             // Rename to _LOD0, _LOD1, etc.
+            // Use a temporary naming pass first to avoid collisions when
+            // children already contain one of the target names.
             for (int i = 0; i < lodCandidates.Count; i++)
             {
-                string newName = baseName + "_LOD" + i;
-                if (lodCandidates[i].t.name != newName)
+                string tmpName = "__UVTMP_LOD_" + i + "_" + Guid.NewGuid().ToString("N");
+                if (lodCandidates[i].t.name != tmpName)
                 {
                     Undo.RecordObject(lodCandidates[i].t.gameObject, "Rename LOD");
-                    lodCandidates[i].t.name = newName;
+                    lodCandidates[i].t.name = tmpName;
+                }
+            }
+
+            for (int i = 0; i < lodCandidates.Count; i++)
+            {
+                string finalName = baseName + "_LOD" + i;
+                if (lodCandidates[i].t.name != finalName)
+                {
+                    Undo.RecordObject(lodCandidates[i].t.gameObject, "Rename LOD");
+                    lodCandidates[i].t.name = finalName;
                 }
             }
 
@@ -3037,6 +3111,24 @@ namespace LightmapUvTool
         // ═══════════════════════════════════════════════════════════════
         // Helpers
         // ═══════════════════════════════════════════════════════════════
+
+        static bool IsRootRendererUsedAsLod0(GameObject root, LOD[] lods)
+        {
+            if (root == null || lods == null || lods.Length == 0) return false;
+
+            var rootRenderer = root.GetComponent<Renderer>();
+            if (rootRenderer == null) return false;
+
+            var lod0Renderers = lods[0].renderers;
+            if (lod0Renderers == null || lod0Renderers.Length == 0) return false;
+
+            for (int i = 0; i < lod0Renderers.Length; i++)
+            {
+                if (lod0Renderers[i] == rootRenderer)
+                    return true;
+            }
+            return false;
+        }
 
         void DrawScanFixButtons(Action scan, Action fix, System.Collections.IList issues)
         {

@@ -23,6 +23,12 @@ namespace LightmapUvTool
         Thickness
     }
 
+    public enum VertexAOOccluderMode
+    {
+        SelfOnly,
+        SameRootNearby
+    }
+
     [Serializable]
     public class VertexAOSettings
     {
@@ -37,6 +43,9 @@ namespace LightmapUvTool
         public bool useGPU        = true;
         public bool cosineWeighted = true;
         public AOBakeType bakeType = AOBakeType.AmbientOcclusion;
+        public VertexAOOccluderMode occluderMode = VertexAOOccluderMode.SameRootNearby;
+        public float occluderRadiusMultiplier = 2.0f;
+        public bool includeCollisionOccluders = false;
     }
 
     public static partial class VertexAOBaker
@@ -49,11 +58,21 @@ namespace LightmapUvTool
         public static Dictionary<Mesh, float[]> BakeMultiMesh(
             List<(Mesh mesh, Matrix4x4 transform)> meshes,
             VertexAOSettings settings)
+            => BakeMultiMesh(meshes, null, settings);
+
+        /// <summary>
+        /// Synchronous CPU bake for target meshes with additional occluder-only geometry.
+        /// For GPU path, use StartGPUBake() instead.
+        /// </summary>
+        public static Dictionary<Mesh, float[]> BakeMultiMesh(
+            List<(Mesh mesh, Matrix4x4 transform)> targets,
+            List<(Mesh mesh, Matrix4x4 transform)> occluders,
+            VertexAOSettings settings)
         {
-            if (meshes == null || meshes.Count == 0)
+            if (targets == null || targets.Count == 0)
                 return new Dictionary<Mesh, float[]>();
 
-            return BakeMultiMeshCPU(meshes, settings);
+            return BakeMultiMeshCPU(targets, occluders, settings);
         }
 
         /// <summary>
@@ -64,6 +83,18 @@ namespace LightmapUvTool
             Dictionary<Mesh, float[]> rawAO,
             List<(Mesh mesh, Matrix4x4 transform)> meshes,
             VertexAOSettings settings)
+            => ApplyFaceAreaCorrection(rawAO, meshes, null, settings);
+
+        /// <summary>
+        /// Apply face-area correction using the same occlusion context as the bake:
+        /// target meshes receive the correction, while the BVH includes both targets
+        /// and occluder-only geometry.
+        /// </summary>
+        public static Dictionary<Mesh, float[]> ApplyFaceAreaCorrection(
+            Dictionary<Mesh, float[]> rawAO,
+            List<(Mesh mesh, Matrix4x4 transform)> targets,
+            List<(Mesh mesh, Matrix4x4 transform)> occluders,
+            VertexAOSettings settings)
         {
             if (rawAO == null || rawAO.Count == 0)
                 return rawAO;
@@ -72,23 +103,16 @@ namespace LightmapUvTool
             var allVerts = new List<Vector3>();
             var allTris = new List<int>();
             var copies = new List<Mesh>();
-            foreach (var (mesh, xform) in meshes)
-            {
-                var readable = EnsureReadable(mesh);
-                if (readable != mesh) copies.Add(readable);
-                int baseVert = allVerts.Count;
-                var verts = readable.vertices;
-                for (int i = 0; i < verts.Length; i++)
-                    allVerts.Add(xform.MultiplyPoint3x4(verts[i]));
-                var tris = readable.triangles;
-                for (int i = 0; i < tris.Length; i++)
-                    allTris.Add(tris[i] + baseVert);
-            }
+            AppendGeometryBuffers(targets, allVerts, allTris, copies);
+            AppendGeometryBuffers(occluders, allVerts, allTris, copies);
+            if (allVerts.Count == 0 || allTris.Count == 0)
+                return rawAO;
+
             var bvh = new TriangleBvh(allVerts.ToArray(), allTris.ToArray());
             var directions = GenerateSphereDirections(settings.sampleCount);
 
-            Bounds combinedBounds = ComputeCombinedBounds(meshes);
-            float extent = combinedBounds.extents.magnitude;
+            Bounds combinedBounds = ComputeCombinedBounds(targets);
+            float extent = Mathf.Max(combinedBounds.extents.magnitude, 0.0001f);
             float normalOffset = 0.001f * extent;
             float maxDist = settings.maxRadius > 0 ? settings.maxRadius : float.MaxValue;
             float groundY = settings.groundPlane
@@ -96,7 +120,7 @@ namespace LightmapUvTool
                 : float.NegativeInfinity;
 
             var result = new Dictionary<Mesh, float[]>();
-            foreach (var (mesh, xform) in meshes)
+            foreach (var (mesh, xform) in targets)
             {
                 if (!rawAO.ContainsKey(mesh))
                     continue;
@@ -366,6 +390,32 @@ namespace LightmapUvTool
                 }
             }
             return bounds;
+        }
+
+        static void AppendGeometryBuffers(
+            List<(Mesh mesh, Matrix4x4 transform)> meshes,
+            List<Vector3> allVerts,
+            List<int> allTris,
+            List<Mesh> readableCopies)
+        {
+            if (meshes == null) return;
+
+            foreach (var (mesh, xform) in meshes)
+            {
+                if (mesh == null) continue;
+                var readable = EnsureReadable(mesh);
+                if (readable != mesh && !readableCopies.Contains(readable))
+                    readableCopies.Add(readable);
+
+                int baseVert = allVerts.Count;
+                var verts = readable.vertices;
+                for (int i = 0; i < verts.Length; i++)
+                    allVerts.Add(xform.MultiplyPoint3x4(verts[i]));
+
+                var tris = readable.triangles;
+                for (int i = 0; i < tris.Length; i++)
+                    allTris.Add(tris[i] + baseVert);
+            }
         }
 
         static Mesh CreateGroundQuad(Bounds bounds, float offset)

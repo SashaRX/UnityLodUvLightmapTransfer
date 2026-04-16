@@ -137,6 +137,10 @@ namespace LightmapUvTool
         // ── Applied pipeline steps ──
         /// <summary>Which UV channel was written (default 1 = UV2).</summary>
         public int targetUvChannel;
+        /// <summary>Optional extra UV channel saved alongside the primary transfer channel.</summary>
+        public Vector2[] auxiliaryUv;
+        /// <summary>Target UV channel for <see cref="auxiliaryUv"/>; -1 when absent.</summary>
+        public int auxiliaryTargetUvChannel = -1;
         /// <summary>Whether MeshOptimizer dedup was applied.</summary>
         public bool stepMeshopt;
         /// <summary>Whether UvEdgeWeld was applied.</summary>
@@ -194,6 +198,7 @@ namespace LightmapUvTool
         public int shellPaddingPx = 2;
         public int borderPaddingPx = 0;
         public bool repackPerMesh;
+        public int symmetrySplitThresholdMode; // SymmetrySplitShells.ThresholdMode
         public int sourceLodIndex;
 
         // Pipeline
@@ -228,9 +233,29 @@ namespace LightmapUvTool
     }
 
     [CreateAssetMenu(menuName = "LightmapUvTool/UV2 Data (internal)", fileName = "uv2data")]
-    public class Uv2DataAsset : ScriptableObject
+    public class Uv2DataAsset : ScriptableObject, ISerializationCallbackReceiver
     {
-        public const int CurrentSchemaVersion = 2;
+        public const int CurrentSchemaVersion = 3;
+
+        public void OnBeforeSerialize() { }
+
+        public void OnAfterDeserialize()
+        {
+            // Migrate entries from schema v2 (or earlier) to v3.
+            // Unity deserializes missing int fields as 0 (default), not the
+            // field initializer value (-1). Without this fixup an old entry
+            // would have auxiliaryTargetUvChannel == 0, which means "UV0" and
+            // could cause UV0 to be overwritten with null auxiliary data.
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                if (e.schemaVersion < 3)
+                {
+                    if (e.auxiliaryUv == null)
+                        e.auxiliaryTargetUvChannel = -1;
+                }
+            }
+        }
         public static string ToolVersionStr
         {
             get
@@ -315,6 +340,8 @@ namespace LightmapUvTool
                 e.toolVersion = toolVersion;
                 e.sourceFingerprint = sourceFingerprint;
                 e.targetUvChannel = targetUvChannel;
+                e.auxiliaryUv = null;
+                e.auxiliaryTargetUvChannel = -1;
                 e.stepMeshopt = stepMeshopt;
                 e.stepEdgeWeld = stepEdgeWeld;
                 e.stepRepack = stepRepack;
@@ -330,6 +357,7 @@ namespace LightmapUvTool
                     optimizedTriangles = optimizedTriangles, submeshTriangleCounts = submeshTriangleCounts,
                     schemaVersion = schemaVersion, toolVersion = toolVersion,
                     sourceFingerprint = sourceFingerprint, targetUvChannel = targetUvChannel,
+                    auxiliaryUv = null, auxiliaryTargetUvChannel = -1,
                     stepMeshopt = stepMeshopt, stepEdgeWeld = stepEdgeWeld,
                     stepSymmetrySplit = stepSymmetrySplit || symmetrySplit,
                     stepRepack = stepRepack, stepTransfer = stepTransfer,
@@ -374,6 +402,8 @@ namespace LightmapUvTool
             dst.toolVersion = src.toolVersion;
             dst.sourceFingerprint = src.sourceFingerprint;
             dst.targetUvChannel = src.targetUvChannel;
+            dst.auxiliaryUv = src.auxiliaryUv;
+            dst.auxiliaryTargetUvChannel = src.auxiliaryTargetUvChannel;
             dst.stepMeshopt = src.stepMeshopt;
             dst.stepEdgeWeld = src.stepEdgeWeld;
             dst.stepSymmetrySplit = src.stepSymmetrySplit;
