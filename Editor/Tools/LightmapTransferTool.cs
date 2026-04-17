@@ -1368,6 +1368,41 @@ namespace SashaRX.UnityMeshLab
                 "Overwrite", "Cancel"))
                 return;
 
+            ExportVertexColorsToFbxCore(sourceFbxPath, ctx.MeshEntries);
+#else
+            UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
+#endif
+        }
+
+        // Hierarchy-mode entry point: export a specific FBX using a filtered
+        // entry list. Caller (VertexAOTool) owns user confirmation.
+        public void ExportVertexColorsToFbx(string sourceFbxPath, IEnumerable<MeshEntry> entries)
+        {
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (string.IsNullOrEmpty(sourceFbxPath))
+            {
+                UvtLog.Error("[FBX Export] Missing source FBX path.");
+                return;
+            }
+            var list = entries?.ToList();
+            if (list == null || list.Count == 0)
+            {
+                UvtLog.Warn($"[FBX Export] No entries for '{sourceFbxPath}'.");
+                return;
+            }
+
+            RestoreAllPreviews();
+            ExportVertexColorsToFbxCore(sourceFbxPath, list);
+#else
+            UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
+#endif
+        }
+
+        void ExportVertexColorsToFbxCore(string sourceFbxPath, IEnumerable<MeshEntry> entries)
+        {
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (string.IsNullOrEmpty(sourceFbxPath) || entries == null) return;
+
             // Determine AO target to scope importer setting changes.
             // - aoUvIdx == -1: AO in vertex color → no importer changes needed
             // - aoUvIdx >= 0:  AO in UV channel  → lock weld/compression/optimization
@@ -1425,7 +1460,7 @@ namespace SashaRX.UnityMeshLab
             Dictionary<string, string> renameMap = null;
             try
             {
-                updated = CopyVertexDataToClone(tempRoot);
+                updated = CopyVertexDataToClone(tempRoot, entries);
                 if (updated == 0)
                 {
                     UvtLog.Warn("[FBX Export] No vertex data found to export.");
@@ -1511,7 +1546,7 @@ namespace SashaRX.UnityMeshLab
             return null;
         }
 
-        int CopyVertexDataToClone(GameObject tempRoot)
+        int CopyVertexDataToClone(GameObject tempRoot, IEnumerable<MeshEntry> entries)
         {
             int aoUvIdx = -1;
             var aoChannel = VertexAOTool.LastAppliedTargetChannel;
@@ -1523,7 +1558,7 @@ namespace SashaRX.UnityMeshLab
             }
 
             int updated = 0;
-            foreach (var e in ctx.MeshEntries)
+            foreach (var e in entries)
             {
                 if (!e.include) continue;
                 Mesh sceneMesh = e.originalMesh ?? e.fbxMesh;

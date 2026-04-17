@@ -85,6 +85,10 @@ namespace SashaRX.UnityMeshLab
         GameObject lastHierarchySelection;
         bool lastHierarchyMode;
         bool hierarchyEntriesBuilt;
+        bool hierarchyEntriesFoldout = true;
+        Vector2 hierarchyEntriesScroll;
+        bool fbxOverwriteFoldout = true;
+        Dictionary<string, bool> fbxOverwriteMap = new Dictionary<string, bool>();
 
         // ── Results ──
         Dictionary<Mesh, float[]> bakedRawAO;       // raw vertex AO (no face-area fix)
@@ -128,6 +132,10 @@ namespace SashaRX.UnityMeshLab
             public int renderableOccluderCount;
             public int colliderOccluderCount;
             public bool usedSidecarCollisionFallback;
+            // Optional: renderers already folded into occluderMeshes manually
+            // (rebake-selected adds hierarchy siblings). CollectAdditionalOccluders
+            // skips them to avoid double-add.
+            public HashSet<int> preAddedOccluderRendererIds;
         }
 
         public void OnActivate(UvToolContext ctx, UvCanvasView canvas)
@@ -147,6 +155,7 @@ namespace SashaRX.UnityMeshLab
             lastHierarchySelection = null;
             lastHierarchyMode = false;
             hierarchyEntriesBuilt = false;
+            fbxOverwriteMap.Clear();
         }
 
         public void OnRefresh()
@@ -205,6 +214,30 @@ namespace SashaRX.UnityMeshLab
                     meshGroupKey = UvToolContext.ExtractGroupKey(r.name)
                 });
             }
+
+            SyncFbxOverwriteMap();
+        }
+
+        // Keep fbxOverwriteMap in sync with unique FBX asset paths referenced by
+        // hierarchyEntries. New paths default to checked; paths that disappear
+        // from the hierarchy are removed.
+        void SyncFbxOverwriteMap()
+        {
+            var current = new HashSet<string>();
+            foreach (var e in hierarchyEntries)
+            {
+                if (e.fbxMesh == null) continue;
+                string p = AssetDatabase.GetAssetPath(e.fbxMesh);
+                if (string.IsNullOrEmpty(p)) continue;
+                if (!p.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase)) continue;
+                current.Add(p);
+                if (!fbxOverwriteMap.ContainsKey(p))
+                    fbxOverwriteMap[p] = true;
+            }
+            // Drop stale keys.
+            var stale = fbxOverwriteMap.Keys.Where(k => !current.Contains(k)).ToList();
+            foreach (var k in stale)
+                fbxOverwriteMap.Remove(k);
         }
 
         // Entries that drive bake / load / apply / preview.
@@ -215,6 +248,49 @@ namespace SashaRX.UnityMeshLab
             return ctx != null && ctx.MeshEntries != null
                 ? (IEnumerable<MeshEntry>)ctx.MeshEntries
                 : System.Array.Empty<MeshEntry>();
+        }
+
+        // Per-renderer include checkboxes (Hierarchy Mode only). Drives which
+        // meshes participate in Bake / Apply. Reuses MeshEntry.include which
+        // ExecuteBake / ApplyToMesh already filter by.
+        void DrawHierarchyMeshList()
+        {
+            int included = 0;
+            foreach (var e in hierarchyEntries) if (e.include) included++;
+
+            hierarchyEntriesFoldout = EditorGUILayout.Foldout(
+                hierarchyEntriesFoldout,
+                $"Meshes  ({included} / {hierarchyEntries.Count} included)",
+                true);
+            if (!hierarchyEntriesFoldout) return;
+
+            EditorGUI.indentLevel++;
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("All", EditorStyles.miniButtonLeft))
+                foreach (var e in hierarchyEntries) e.include = true;
+            if (GUILayout.Button("None", EditorStyles.miniButtonMid))
+                foreach (var e in hierarchyEntries) e.include = false;
+            if (GUILayout.Button("Invert", EditorStyles.miniButtonRight))
+                foreach (var e in hierarchyEntries) e.include = !e.include;
+            EditorGUILayout.EndHorizontal();
+
+            float rowHeight = EditorGUIUtility.singleLineHeight + 2f;
+            float listHeight = Mathf.Min(hierarchyEntries.Count, 8) * rowHeight + 4f;
+            hierarchyEntriesScroll = EditorGUILayout.BeginScrollView(
+                hierarchyEntriesScroll, GUILayout.Height(listHeight));
+            foreach (var e in hierarchyEntries)
+            {
+                if (e == null || e.renderer == null) continue;
+                string fbxName = e.fbxMesh != null
+                    ? System.IO.Path.GetFileName(AssetDatabase.GetAssetPath(e.fbxMesh))
+                    : null;
+                string label = string.IsNullOrEmpty(fbxName)
+                    ? e.renderer.name
+                    : $"{e.renderer.name}  —  {fbxName}";
+                e.include = EditorGUILayout.ToggleLeft(label, e.include);
+            }
+            EditorGUILayout.EndScrollView();
+            EditorGUI.indentLevel--;
         }
 
         void ClearResults()
@@ -277,6 +353,8 @@ namespace SashaRX.UnityMeshLab
                 EditorGUILayout.LabelField(
                     $"Root: {hierarchyRoot.name}  ({hierarchyEntries.Count} meshes)",
                     EditorStyles.miniLabel);
+
+                DrawHierarchyMeshList();
             }
             else if (ctx == null || ctx.MeshEntries == null || ctx.MeshEntries.Count == 0)
             {
@@ -414,6 +492,23 @@ namespace SashaRX.UnityMeshLab
                     LoadFromMesh();
                 GUI.backgroundColor = bgc;
                 EditorGUILayout.EndHorizontal();
+
+                if (hierarchyMode)
+                {
+                    var selectedEntry = FindSelectedHierarchyEntry();
+                    GUI.backgroundColor = new Color(.85f, .75f, .4f);
+                    using (new EditorGUI.DisabledScope(selectedEntry == null))
+                    {
+                        string label = selectedEntry != null
+                            ? $"Rebake Selected ({selectedEntry.renderer.name})"
+                            : "Rebake Selected";
+                        if (GUILayout.Button(new GUIContent(label,
+                            "Rebake AO for the currently selected hierarchy mesh using current UI settings. " +
+                            "Other meshes' results are preserved."), GUILayout.Height(24)))
+                            ExecuteRebakeSelected(selectedEntry);
+                    }
+                    GUI.backgroundColor = bgc;
+                }
             }
 
             // Results
@@ -545,20 +640,106 @@ namespace SashaRX.UnityMeshLab
                 EditorGUILayout.EndHorizontal();
 
                 // Export vertex colors to FBX (after Apply)
-                GUI.backgroundColor = new Color(.4f, .7f, .95f);
-                if (GUILayout.Button("Overwrite FBX (Vertex Colors)", GUILayout.Height(22)))
+                if (hierarchyMode)
+                    DrawFbxOverwritePicker();
+                else
                 {
-                    var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
-                    if (hub.Length > 0)
+                    GUI.backgroundColor = new Color(.4f, .7f, .95f);
+                    if (GUILayout.Button("Overwrite FBX (Vertex Colors)", GUILayout.Height(22)))
                     {
-                        var transferTool = hub[0].FindTool<LightmapTransferTool>();
-                        if (transferTool != null)
-                            transferTool.ExportVertexColorsToFbx();
-                        else
-                            UvtLog.Error("[Vertex AO] LightmapTransferTool not found.");
+                        var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
+                        if (hub.Length > 0)
+                        {
+                            var transferTool = hub[0].FindTool<LightmapTransferTool>();
+                            if (transferTool != null)
+                                transferTool.ExportVertexColorsToFbx();
+                            else
+                                UvtLog.Error("[Vertex AO] LightmapTransferTool not found.");
+                        }
                     }
+                    GUI.backgroundColor = bgc;
                 }
-                GUI.backgroundColor = bgc;
+            }
+        }
+
+        // Per-FBX overwrite picker for Hierarchy Mode. Lists each unique FBX
+        // referenced by hierarchyEntries; only checked files get rewritten.
+        void DrawFbxOverwritePicker()
+        {
+            if (fbxOverwriteMap.Count == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    "No FBX-backed meshes in this hierarchy.",
+                    MessageType.Info);
+                return;
+            }
+
+            int checkedCount = 0;
+            foreach (var v in fbxOverwriteMap.Values) if (v) checkedCount++;
+
+            fbxOverwriteFoldout = EditorGUILayout.Foldout(
+                fbxOverwriteFoldout,
+                $"Overwrite FBX  ({checkedCount} / {fbxOverwriteMap.Count} selected)",
+                true);
+            if (!fbxOverwriteFoldout) return;
+
+            EditorGUI.indentLevel++;
+            var paths = fbxOverwriteMap.Keys.OrderBy(p => p).ToList();
+            foreach (var path in paths)
+            {
+                string label = System.IO.Path.GetFileName(path);
+                bool cur = fbxOverwriteMap[path];
+                bool next = EditorGUILayout.ToggleLeft(new GUIContent(label, path), cur);
+                if (next != cur) fbxOverwriteMap[path] = next;
+            }
+
+            var bgc = GUI.backgroundColor;
+            GUI.backgroundColor = checkedCount > 0 ? new Color(.4f, .7f, .95f) : Color.white;
+            using (new EditorGUI.DisabledScope(checkedCount == 0))
+            {
+                if (GUILayout.Button($"Overwrite Selected FBX  ({checkedCount})", GUILayout.Height(22)))
+                    OverwriteSelectedFbx();
+            }
+            GUI.backgroundColor = bgc;
+            EditorGUI.indentLevel--;
+        }
+
+        void OverwriteSelectedFbx()
+        {
+            var selected = fbxOverwriteMap
+                .Where(kv => kv.Value)
+                .Select(kv => kv.Key)
+                .ToList();
+            if (selected.Count == 0) return;
+
+            string list = string.Join("\n", selected.Select(p => "  • " + System.IO.Path.GetFileName(p)));
+            if (!EditorUtility.DisplayDialog(
+                "Overwrite Selected FBX",
+                $"Overwrite {selected.Count} FBX file(s)?\n\n{list}\n\nOnly vertex colors are updated. UV2 and topology stay unchanged.",
+                "Overwrite", "Cancel"))
+                return;
+
+            var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
+            if (hub.Length == 0) return;
+            var transferTool = hub[0].FindTool<LightmapTransferTool>();
+            if (transferTool == null)
+            {
+                UvtLog.Error("[Vertex AO] LightmapTransferTool not found.");
+                return;
+            }
+
+            foreach (var path in selected)
+            {
+                var entriesForPath = hierarchyEntries
+                    .Where(e => e.fbxMesh != null &&
+                                string.Equals(AssetDatabase.GetAssetPath(e.fbxMesh), path, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (entriesForPath.Count == 0)
+                {
+                    UvtLog.Warn($"[Vertex AO] No hierarchy entries map to '{path}', skipping.");
+                    continue;
+                }
+                transferTool.ExportVertexColorsToFbx(path, entriesForPath);
             }
         }
 
@@ -582,26 +763,39 @@ namespace SashaRX.UnityMeshLab
                 return;
             }
 
-            var settings = new VertexAOSettings
-            {
-                sampleCount     = sampleCounts[sampleCountIndex],
-                depthResolution = resolutions[resolutionIndex],
-                maxRadius       = maxRadius,
-                intensity       = intensity,
-                groundPlane     = groundPlane,
-                groundOffset    = groundOffset,
-                backfaceCulling = backfaceCulling,
-                cosineWeighted  = cosineWeighted,
-                useGPU          = bakeMode == 0,
-                bakeType        = (AOBakeType)bakeTypeIndex,
-                occluderMode    = bakeTypeIndex == 0
-                    ? (VertexAOOccluderMode)occluderModeIndex
-                    : VertexAOOccluderMode.SelfOnly,
-                occluderRadiusMultiplier = Mathf.Max(occluderRadiusMultiplier, 0.01f),
-                includeCollisionOccluders = bakeTypeIndex == 0 && includeCollisionOccluders
-            };
+            var settings = BuildSettingsFromUI();
 
-            var batches = BuildLodBatches(entries, settings);
+            RunBatches(batches, settings, entries, seedFromExisting: false);
+        }
+
+        VertexAOSettings BuildSettingsFromUI() => new VertexAOSettings
+        {
+            sampleCount     = sampleCounts[sampleCountIndex],
+            depthResolution = resolutions[resolutionIndex],
+            maxRadius       = maxRadius,
+            intensity       = intensity,
+            groundPlane     = groundPlane,
+            groundOffset    = groundOffset,
+            backfaceCulling = backfaceCulling,
+            cosineWeighted  = cosineWeighted,
+            useGPU          = bakeMode == 0,
+            bakeType        = (AOBakeType)bakeTypeIndex,
+            occluderMode    = bakeTypeIndex == 0
+                ? (VertexAOOccluderMode)occluderModeIndex
+                : VertexAOOccluderMode.SelfOnly,
+            occluderRadiusMultiplier = Mathf.Max(occluderRadiusMultiplier, 0.01f),
+            includeCollisionOccluders = bakeTypeIndex == 0 && includeCollisionOccluders
+        };
+
+        // Kick off batches via GPU (async) or CPU (sync). When seedFromExisting
+        // is true, pre-populate pending dicts from current bakedRaw/FaceArea so
+        // a partial rebake merges into existing results instead of replacing.
+        void RunBatches(
+            List<LodBakeBatch> batches,
+            VertexAOSettings settings,
+            List<MeshEntry> entries,
+            bool seedFromExisting)
+        {
             if (batches.Count == 0)
             {
                 UvtLog.Warn("[Vertex AO] No valid meshes to bake.");
@@ -611,12 +805,19 @@ namespace SashaRX.UnityMeshLab
 
             bakeStopwatch = Stopwatch.StartNew();
 
+            var seedRaw = seedFromExisting && bakedRawAO != null
+                ? new Dictionary<Mesh, float[]>(bakedRawAO)
+                : new Dictionary<Mesh, float[]>();
+            var seedFace = seedFromExisting && bakedFaceAreaAO != null
+                ? new Dictionary<Mesh, float[]>(bakedFaceAreaAO)
+                : new Dictionary<Mesh, float[]>();
+
             if (settings.useGPU && SystemInfo.supportsComputeShaders)
             {
                 pendingLodBatches = batches;
                 pendingLodBatchIndex = 0;
-                pendingRawAO = new Dictionary<Mesh, float[]>();
-                pendingFaceAreaAO = new Dictionary<Mesh, float[]>();
+                pendingRawAO = seedRaw;
+                pendingFaceAreaAO = seedFace;
                 pendingBakeEntries = entries;
                 pendingBakeSettings = settings;
 
@@ -628,8 +829,64 @@ namespace SashaRX.UnityMeshLab
             {
                 if (settings.useGPU && !SystemInfo.supportsComputeShaders)
                     UvtLog.Warn("[Vertex AO] Compute shaders not supported. Falling back to CPU.");
-                ExecuteBakeCPU(batches, settings, entries);
+                ExecuteBakeCPU(batches, settings, entries, seedRaw, seedFace);
             }
+        }
+
+        MeshEntry FindSelectedHierarchyEntry()
+        {
+            if (!hierarchyMode) return null;
+            var go = Selection.activeGameObject;
+            if (go == null) return null;
+            var mr = go.GetComponentInParent<MeshRenderer>();
+            if (mr == null) return null;
+            foreach (var e in hierarchyEntries)
+                if (e.renderer == mr) return e;
+            return null;
+        }
+
+        void ExecuteRebakeSelected(MeshEntry selEntry)
+        {
+            if (selEntry == null || selEntry.renderer == null)
+            {
+                UvtLog.Warn("[Vertex AO] Select a hierarchy mesh in the scene to rebake.");
+                return;
+            }
+
+            Mesh selectedMesh = selEntry.originalMesh ?? selEntry.fbxMesh;
+            if (selectedMesh == null) return;
+
+            CancelGpuJob();
+            RestorePreview();
+
+            var settings = BuildSettingsFromUI();
+
+            // Single-target batch; other hierarchy targets become occluders so
+            // the context matches a full bake. CollectAdditionalOccluders then
+            // layers in nearby / collision geometry per user's occluder mode
+            // (skipping renderers we pre-added here to avoid double-add).
+            var batch = new LodBakeBatch { lodIndex = 0 };
+            batch.targetEntries.Add(selEntry);
+            batch.targetMeshes.Add((selectedMesh, selEntry.renderer.transform.localToWorldMatrix));
+            batch.preAddedOccluderRendererIds = new HashSet<int>();
+
+            foreach (var e in hierarchyEntries)
+            {
+                if (e == selEntry || !e.include || e.renderer == null) continue;
+                Mesh m = e.originalMesh ?? e.fbxMesh;
+                if (m == null) continue;
+                batch.occluderMeshes.Add((m, e.renderer.transform.localToWorldMatrix));
+                batch.renderableOccluderCount++;
+                batch.preAddedOccluderRendererIds.Add(e.renderer.GetInstanceID());
+            }
+
+            CollectAdditionalOccluders(batch, hierarchyEntries, settings);
+
+            RunBatches(
+                new List<LodBakeBatch> { batch },
+                settings,
+                new List<MeshEntry> { selEntry },
+                seedFromExisting: true);
         }
 
         List<LodBakeBatch> BuildLodBatches(List<MeshEntry> entries, VertexAOSettings settings)
@@ -716,6 +973,9 @@ namespace SashaRX.UnityMeshLab
                 if (targetRendererIds.Contains(rendererId))
                     continue;
                 if (alternateLodRendererIds.Contains(rendererId))
+                    continue;
+                if (batch.preAddedOccluderRendererIds != null &&
+                    batch.preAddedOccluderRendererIds.Contains(rendererId))
                     continue;
                 if (MeshHygieneUtility.IsCollisionNodeName(renderer.name))
                     continue;
@@ -1211,10 +1471,12 @@ namespace SashaRX.UnityMeshLab
         void ExecuteBakeCPU(
             List<LodBakeBatch> batches,
             VertexAOSettings settings,
-            List<MeshEntry> entries)
+            List<MeshEntry> entries,
+            Dictionary<Mesh, float[]> seedRaw = null,
+            Dictionary<Mesh, float[]> seedFace = null)
         {
-            bakedRawAO = new Dictionary<Mesh, float[]>();
-            bakedFaceAreaAO = new Dictionary<Mesh, float[]>();
+            bakedRawAO = seedRaw ?? new Dictionary<Mesh, float[]>();
+            bakedFaceAreaAO = seedFace ?? new Dictionary<Mesh, float[]>();
 
             foreach (var batch in batches)
             {
