@@ -373,12 +373,11 @@ namespace SashaRX.UnityMeshLab
 
         // ── UI ──
 
-        public void OnDrawSidebar()
+        // Draws header toggle + hierarchy root info (or standalone/LOD help
+        // box). Returns false when nothing is selected that the tool can
+        // bake — caller should bail out.
+        bool DrawSelectionGate()
         {
-            EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Vertex AO Baker", EditorStyles.boldLabel);
-            EditorGUILayout.Space(4);
-
             hierarchyMode = EditorGUILayout.ToggleLeft(
                 new GUIContent("Hierarchy Mode",
                     "Bake AO across all active MeshRenderer descendants of the selected root as a single batch. " +
@@ -387,10 +386,10 @@ namespace SashaRX.UnityMeshLab
 
             if (hierarchyMode)
             {
-                // While preview is active, MeshFilters hold clone meshes — don't
-                // rebuild from them or Apply would target the clones. Preview is
-                // always restored before bake/load/apply, so the stale window is
-                // user-visible only (ok).
+                // While preview is active, MeshFilters hold clone meshes —
+                // don't rebuild from them or Apply would target the clones.
+                // Preview is always restored before bake/load/apply, so the
+                // stale window is user-visible only (ok).
                 if (!previewActive)
                     RefreshHierarchyEntriesIfNeeded();
                 if (hierarchyRoot == null || hierarchyEntries.Count == 0)
@@ -398,23 +397,29 @@ namespace SashaRX.UnityMeshLab
                     EditorGUILayout.HelpBox(
                         "Select a root GameObject that has active MeshRenderer descendants.",
                         MessageType.Info);
-                    return;
+                    return false;
                 }
                 EditorGUILayout.LabelField(
                     $"Root: {hierarchyRoot.name}  ({hierarchyEntries.Count} meshes)",
                     EditorStyles.miniLabel);
-
                 DrawHierarchyMeshList();
+                return true;
             }
-            else if (ctx == null || ctx.MeshEntries == null || ctx.MeshEntries.Count == 0)
+
+            if (ctx == null || ctx.MeshEntries == null || ctx.MeshEntries.Count == 0)
             {
                 EditorGUILayout.HelpBox(
                     "Select a LODGroup or an individual MeshRenderer to bake vertex AO.",
                     MessageType.Info);
-                return;
+                return false;
             }
+            return true;
+        }
 
-            // Bake mode selector
+        // Bake-mode selector + target channel + sample / res / radius /
+        // intensity + ground plane / backface / cosine + occluder mode.
+        void DrawBakeSettings()
+        {
             bool gpuAvailable = SystemInfo.supportsComputeShaders;
             if (gpuAvailable)
             {
@@ -433,7 +438,6 @@ namespace SashaRX.UnityMeshLab
 
             EditorGUILayout.Space(4);
 
-            // Target channel — two combo boxes
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.PrefixLabel(new GUIContent("Target", "Channel to store AO values."));
             channelType = EditorGUILayout.Popup(channelType, channelTypeNames);
@@ -448,7 +452,6 @@ namespace SashaRX.UnityMeshLab
 
             EditorGUILayout.Space(4);
 
-            // Bake settings
             sampleCountIndex = EditorGUILayout.Popup(
                 new GUIContent("Sample Count", "Number of hemisphere directions to sample. Higher = smoother AO, slower bake."),
                 sampleCountIndex, sampleLabels);
@@ -465,7 +468,6 @@ namespace SashaRX.UnityMeshLab
                 new GUIContent("Intensity", "AO contrast. >1 = darker shadows, <1 = softer."),
                 intensity, 0.5f, 3.0f);
 
-            // Ground plane & backface culling (not relevant for thickness)
             if (bakeTypeIndex == 0)
             {
                 EditorGUILayout.Space(4);
@@ -511,16 +513,39 @@ namespace SashaRX.UnityMeshLab
                         includeCollisionOccluders);
                 }
             }
+        }
+
+        public void OnDrawSidebar()
+        {
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("Vertex AO Baker", EditorStyles.boldLabel);
+            EditorGUILayout.Space(4);
+
+            if (!DrawSelectionGate()) return;
+
+            DrawBakeSettings();
 
             EditorGUILayout.Space(8);
 
-            // Bake button / progress
+            DrawBakeActionsRow();
+
+            if (bakedFinalAO == null || bakedFinalAO.Count == 0) return;
+
+            DrawResults();
+            DrawPostProcessing();
+            DrawApplyFilters();
+            DrawApplyAndExportRow();
+        }
+
+        // Bake / Load / Rebake Selected buttons, or progress + cancel while
+        // a GPU job is running.
+        void DrawBakeActionsRow()
+        {
             bool isBaking = activeGpuJob != null && activeGpuJob.IsRunning;
             var bgc = GUI.backgroundColor;
 
             if (isBaking)
             {
-                // Inline progress bar + cancel
                 var rect = EditorGUILayout.GetControlRect(false, 22);
                 EditorGUI.ProgressBar(rect, activeGpuJob.Progress, activeGpuJob.StatusText);
                 GUI.backgroundColor = new Color(.9f, .5f, .3f);
@@ -530,186 +555,189 @@ namespace SashaRX.UnityMeshLab
                     UvtLog.Info("[Vertex AO] GPU bake cancelled.");
                 }
                 GUI.backgroundColor = bgc;
-            }
-            else
-            {
-                EditorGUILayout.BeginHorizontal();
-                GUI.backgroundColor = new Color(.4f, .8f, .4f);
-                if (GUILayout.Button("Bake Vertex AO", GUILayout.Height(28)))
-                    ExecuteBake();
-                GUI.backgroundColor = new Color(.6f, .75f, .9f);
-                if (GUILayout.Button("Load from Mesh", GUILayout.Height(28)))
-                    LoadFromMesh();
-                GUI.backgroundColor = bgc;
-                EditorGUILayout.EndHorizontal();
-
-                if (hierarchyMode)
-                {
-                    var selectedEntry = FindSelectedHierarchyEntry();
-                    GUI.backgroundColor = new Color(.85f, .75f, .4f);
-                    using (new EditorGUI.DisabledScope(selectedEntry == null))
-                    {
-                        string label = selectedEntry != null
-                            ? $"Rebake Selected ({selectedEntry.renderer.name})"
-                            : "Rebake Selected";
-                        if (GUILayout.Button(new GUIContent(label,
-                            "Rebake AO for the currently selected hierarchy mesh using current UI settings. " +
-                            "Other meshes' results are preserved."), GUILayout.Height(24)))
-                            ExecuteRebakeSelected(selectedEntry);
-                    }
-                    GUI.backgroundColor = bgc;
-                }
+                return;
             }
 
-            // Results
-            if (bakedFinalAO != null && bakedFinalAO.Count > 0)
+            EditorGUILayout.BeginHorizontal();
+            GUI.backgroundColor = new Color(.4f, .8f, .4f);
+            if (GUILayout.Button("Bake Vertex AO", GUILayout.Height(28)))
+                ExecuteBake();
+            GUI.backgroundColor = new Color(.6f, .75f, .9f);
+            if (GUILayout.Button("Load from Mesh", GUILayout.Height(28)))
+                LoadFromMesh();
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+
+            if (!hierarchyMode) return;
+
+            var selectedEntry = FindSelectedHierarchyEntry();
+            GUI.backgroundColor = new Color(.85f, .75f, .4f);
+            using (new EditorGUI.DisabledScope(selectedEntry == null))
             {
-                EditorGUILayout.Space(8);
-                EditorGUILayout.LabelField("Results", EditorStyles.boldLabel);
-                EditorGUILayout.LabelField(
-                    $"  {bakedVertexCount:N0} vertices, {sampleCounts[sampleCountIndex]} samples, {bakeTimeSeconds:F1}s",
-                    EditorStyles.miniLabel);
-                EditorGUILayout.LabelField(
-                    $"  Target: {TargetChannelName}",
-                    EditorStyles.miniLabel);
-                EditorGUILayout.LabelField(
-                    $"  Bake meshes: {lastTargetMeshCount}, nearby occluders: {lastRenderableOccluderCount}, collision occluders: {lastColliderOccluderCount}",
-                    EditorStyles.miniLabel);
-                if (lastUsedSidecarCollisionFallback)
-                    EditorGUILayout.LabelField("  Collision source: sidecar fallback", EditorStyles.miniLabel);
+                string label = selectedEntry != null
+                    ? $"Rebake Selected ({selectedEntry.renderer.name})"
+                    : "Rebake Selected";
+                if (GUILayout.Button(new GUIContent(label,
+                    "Rebake AO for the currently selected hierarchy mesh using current UI settings. " +
+                    "Other meshes' results are preserved."), GUILayout.Height(24)))
+                    ExecuteRebakeSelected(selectedEntry);
+            }
+            GUI.backgroundColor = bgc;
+        }
 
-                // Post-processing — all controls update preview in real-time
-                EditorGUILayout.Space(4);
-                EditorGUILayout.LabelField("Post-Processing", EditorStyles.boldLabel);
-                EditorGUI.BeginChangeCheck();
+        // Readonly post-bake summary labels.
+        void DrawResults()
+        {
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("Results", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                $"  {bakedVertexCount:N0} vertices, {sampleCounts[sampleCountIndex]} samples, {bakeTimeSeconds:F1}s",
+                EditorStyles.miniLabel);
+            EditorGUILayout.LabelField(
+                $"  Target: {TargetChannelName}",
+                EditorStyles.miniLabel);
+            EditorGUILayout.LabelField(
+                $"  Bake meshes: {lastTargetMeshCount}, nearby occluders: {lastRenderableOccluderCount}, collision occluders: {lastColliderOccluderCount}",
+                EditorStyles.miniLabel);
+            if (lastUsedSidecarCollisionFallback)
+                EditorGUILayout.LabelField("  Collision source: sidecar fallback", EditorStyles.miniLabel);
+        }
 
-                // Face-area correction blend
-                faceAreaStrength = EditorGUILayout.Slider(
-                    new GUIContent("Face-Area Fix", "Blend raw AO with face-area corrected. Fixes black polygons with open surfaces."),
-                    faceAreaStrength, 0f, 1f);
+        // Face-area / topo blur / 3D blur / brightness+contrast. All re-run
+        // ApplyBlur on change for live preview.
+        void DrawPostProcessing()
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Post-Processing", EditorStyles.boldLabel);
+            EditorGUI.BeginChangeCheck();
 
-                // Topology blur
-                EditorGUILayout.Space(2);
-                topoBlurIter = EditorGUILayout.IntSlider(
-                    new GUIContent("Topo Blur", "Topology blur along mesh edges."),
-                    topoBlurIter, 0, 10);
-                if (topoBlurIter > 0)
+            faceAreaStrength = EditorGUILayout.Slider(
+                new GUIContent("Face-Area Fix", "Blend raw AO with face-area corrected. Fixes black polygons with open surfaces."),
+                faceAreaStrength, 0f, 1f);
+
+            EditorGUILayout.Space(2);
+            topoBlurIter = EditorGUILayout.IntSlider(
+                new GUIContent("Topo Blur", "Topology blur along mesh edges."),
+                topoBlurIter, 0, 10);
+            if (topoBlurIter > 0)
+            {
+                topoBlurStr = EditorGUILayout.Slider(
+                    new GUIContent("  Strength", "Blend factor per iteration."),
+                    topoBlurStr, 0f, 1f);
+                topoCrossHardEdges = EditorGUILayout.Toggle(
+                    new GUIContent("  Cross Hard Edges", "Blur across hard edges."),
+                    topoCrossHardEdges);
+                topoCrossUvSeams = EditorGUILayout.Toggle(
+                    new GUIContent("  Cross UV Seams", "Blur across UV shell boundaries."),
+                    topoCrossUvSeams);
+            }
+
+            EditorGUILayout.Space(2);
+            spatialBlurIter = EditorGUILayout.IntSlider(
+                new GUIContent("3D Blur", "3D spatial blur — ignores topology, crosses all seams."),
+                spatialBlurIter, 0, 10);
+            if (spatialBlurIter > 0)
+            {
+                spatialBlurStr = EditorGUILayout.Slider(
+                    new GUIContent("  Strength", "Blend factor per iteration."),
+                    spatialBlurStr, 0f, 1f);
+                spatialBlurRadius = EditorGUILayout.Slider(
+                    new GUIContent("  Radius", "3D search radius in world units."),
+                    spatialBlurRadius, 0.01f, 2f);
+            }
+
+            EditorGUILayout.Space(2);
+            ppBrightness = EditorGUILayout.Slider(
+                new GUIContent("Brightness", "Shift AO values. + lighter, - darker."),
+                ppBrightness, -1f, 1f);
+            ppContrast = EditorGUILayout.Slider(
+                new GUIContent("Contrast", "AO contrast around 0.5. >1 = sharper, <1 = flatter."),
+                ppContrast, 0f, 3f);
+            if (EditorGUI.EndChangeCheck())
+                ApplyBlur();
+        }
+
+        // Optional narrow-target apply: only selected renderer / submesh.
+        void DrawApplyFilters()
+        {
+            EditorGUILayout.Space(8);
+            applySelectedRendererOnly = EditorGUILayout.ToggleLeft(
+                new GUIContent("Apply only selected renderer", "Apply AO only to currently selected mesh renderer/skinned renderer."),
+                applySelectedRendererOnly);
+            if (!applySelectedRendererOnly) return;
+
+            var selectedRenderer = Selection.activeGameObject != null
+                ? Selection.activeGameObject.GetComponentInParent<Renderer>()
+                : null;
+            int subCount = GetRendererSubmeshCount(selectedRenderer);
+            if (selectedRenderer == null || subCount <= 0)
+            {
+                EditorGUILayout.HelpBox("Select an object with MeshRenderer/SkinnedMeshRenderer for selective apply.", MessageType.Warning);
+                return;
+            }
+
+            applySelectedSubmeshOnly = EditorGUILayout.ToggleLeft(
+                new GUIContent("Only selected submesh", "Apply AO only to vertices used by the chosen submesh. Other parts stay untouched."),
+                applySelectedSubmeshOnly);
+            if (applySelectedSubmeshOnly)
+            {
+                selectedSubmeshIndex = EditorGUILayout.IntSlider(
+                    new GUIContent("Submesh Index"),
+                    Mathf.Clamp(selectedSubmeshIndex, 0, subCount - 1),
+                    0,
+                    subCount - 1);
+            }
+        }
+
+        // Preview / Apply / Clear row + FBX overwrite (picker in hierarchy
+        // mode, single-button shortcut for LODGroup / standalone paths).
+        void DrawApplyAndExportRow()
+        {
+            var bgc = GUI.backgroundColor;
+
+            EditorGUILayout.BeginHorizontal();
+            var prevBg = GUI.backgroundColor;
+            GUI.backgroundColor = previewActive ? new Color(.3f, .7f, 1f) : Color.white;
+            if (GUILayout.Button(previewActive ? "Preview ON" : "Preview", GUILayout.Height(24)))
+            {
+                if (previewActive) RestorePreview();
+                else ActivatePreview();
+            }
+            GUI.backgroundColor = prevBg;
+
+            GUI.backgroundColor = new Color(.3f, .85f, .4f);
+            if (GUILayout.Button("Apply to Mesh", GUILayout.Height(24)))
+                ApplyToMesh();
+            GUI.backgroundColor = new Color(.9f, .3f, .3f);
+            if (GUILayout.Button("Clear", GUILayout.Height(24)))
+            {
+                RestorePreview();
+                ClearResults();
+                requestRepaint?.Invoke();
+            }
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+
+            if (hierarchyMode)
+            {
+                DrawFbxOverwritePicker();
+                return;
+            }
+
+            GUI.backgroundColor = new Color(.4f, .7f, .95f);
+            if (GUILayout.Button("Overwrite FBX (Vertex Colors)", GUILayout.Height(22)))
+            {
+                var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
+                if (hub.Length > 0)
                 {
-                    topoBlurStr = EditorGUILayout.Slider(
-                        new GUIContent("  Strength", "Blend factor per iteration."),
-                        topoBlurStr, 0f, 1f);
-                    topoCrossHardEdges = EditorGUILayout.Toggle(
-                        new GUIContent("  Cross Hard Edges", "Blur across hard edges."),
-                        topoCrossHardEdges);
-                    topoCrossUvSeams = EditorGUILayout.Toggle(
-                        new GUIContent("  Cross UV Seams", "Blur across UV shell boundaries."),
-                        topoCrossUvSeams);
-                }
-
-                // 3D Spatial blur
-                EditorGUILayout.Space(2);
-                spatialBlurIter = EditorGUILayout.IntSlider(
-                    new GUIContent("3D Blur", "3D spatial blur — ignores topology, crosses all seams."),
-                    spatialBlurIter, 0, 10);
-                if (spatialBlurIter > 0)
-                {
-                    spatialBlurStr = EditorGUILayout.Slider(
-                        new GUIContent("  Strength", "Blend factor per iteration."),
-                        spatialBlurStr, 0f, 1f);
-                    spatialBlurRadius = EditorGUILayout.Slider(
-                        new GUIContent("  Radius", "3D search radius in world units."),
-                        spatialBlurRadius, 0.01f, 2f);
-                }
-
-                // Levels
-                EditorGUILayout.Space(2);
-                ppBrightness = EditorGUILayout.Slider(
-                    new GUIContent("Brightness", "Shift AO values. + lighter, - darker."),
-                    ppBrightness, -1f, 1f);
-                ppContrast = EditorGUILayout.Slider(
-                    new GUIContent("Contrast", "AO contrast around 0.5. >1 = sharper, <1 = flatter."),
-                    ppContrast, 0f, 3f);
-                if (EditorGUI.EndChangeCheck())
-                    ApplyBlur();
-
-                EditorGUILayout.Space(8);
-
-                applySelectedRendererOnly = EditorGUILayout.ToggleLeft(
-                    new GUIContent("Apply only selected renderer", "Apply AO only to currently selected mesh renderer/skinned renderer."),
-                    applySelectedRendererOnly);
-                if (applySelectedRendererOnly)
-                {
-                    var selectedRenderer = Selection.activeGameObject != null
-                        ? Selection.activeGameObject.GetComponentInParent<Renderer>()
-                        : null;
-                    int subCount = GetRendererSubmeshCount(selectedRenderer);
-                    if (selectedRenderer == null || subCount <= 0)
-                    {
-                        EditorGUILayout.HelpBox("Select an object with MeshRenderer/SkinnedMeshRenderer for selective apply.", MessageType.Warning);
-                    }
+                    var transferTool = hub[0].FindTool<LightmapTransferTool>();
+                    if (transferTool != null)
+                        transferTool.ExportVertexColorsToFbx();
                     else
-                    {
-                        applySelectedSubmeshOnly = EditorGUILayout.ToggleLeft(
-                            new GUIContent("Only selected submesh", "Apply AO only to vertices used by the chosen submesh. Other parts stay untouched."),
-                            applySelectedSubmeshOnly);
-                        if (applySelectedSubmeshOnly)
-                        {
-                            selectedSubmeshIndex = EditorGUILayout.IntSlider(
-                                new GUIContent("Submesh Index"),
-                                Mathf.Clamp(selectedSubmeshIndex, 0, subCount - 1),
-                                0,
-                                subCount - 1);
-                        }
-                    }
-                }
-
-                // Preview / Apply / Clear — three buttons
-                EditorGUILayout.BeginHorizontal();
-
-                // Preview toggle button (highlighted when active)
-                var prevBg = GUI.backgroundColor;
-                GUI.backgroundColor = previewActive ? new Color(.3f, .7f, 1f) : Color.white;
-                if (GUILayout.Button(previewActive ? "Preview ON" : "Preview", GUILayout.Height(24)))
-                {
-                    if (previewActive) RestorePreview();
-                    else ActivatePreview();
-                }
-                GUI.backgroundColor = prevBg;
-
-                GUI.backgroundColor = new Color(.3f, .85f, .4f);
-                if (GUILayout.Button("Apply to Mesh", GUILayout.Height(24)))
-                    ApplyToMesh();
-                GUI.backgroundColor = new Color(.9f, .3f, .3f);
-                if (GUILayout.Button("Clear", GUILayout.Height(24)))
-                {
-                    RestorePreview();
-                    ClearResults();
-                    requestRepaint?.Invoke();
-                }
-                GUI.backgroundColor = bgc;
-                EditorGUILayout.EndHorizontal();
-
-                // Export vertex colors to FBX (after Apply)
-                if (hierarchyMode)
-                    DrawFbxOverwritePicker();
-                else
-                {
-                    GUI.backgroundColor = new Color(.4f, .7f, .95f);
-                    if (GUILayout.Button("Overwrite FBX (Vertex Colors)", GUILayout.Height(22)))
-                    {
-                        var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
-                        if (hub.Length > 0)
-                        {
-                            var transferTool = hub[0].FindTool<LightmapTransferTool>();
-                            if (transferTool != null)
-                                transferTool.ExportVertexColorsToFbx();
-                            else
-                                UvtLog.Error("[Vertex AO] LightmapTransferTool not found.");
-                        }
-                    }
-                    GUI.backgroundColor = bgc;
+                        UvtLog.Error("[Vertex AO] LightmapTransferTool not found.");
                 }
             }
+            GUI.backgroundColor = bgc;
         }
 
         // Per-FBX overwrite picker for Hierarchy Mode. Lists each unique FBX
