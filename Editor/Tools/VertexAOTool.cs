@@ -987,8 +987,19 @@ namespace SashaRX.UnityMeshLab
             if (candidateRenderers == null || candidateRenderers.Length == 0)
                 return;
 
-            var targetAnchors = ComputeTargetAnchors(batch.targetEntries, out Bounds targetBounds);
-            float effectiveRadius = Mathf.Max(targetBounds.extents.magnitude * settings.occluderRadiusMultiplier, 0.01f);
+            var targetAnchors = ComputeTargetAnchors(batch.targetEntries, out Bounds targetBounds, out var perTargetBounds);
+            // Base the radius on the largest single target extent (not the
+            // encapsulated extent), so spread-out target sets don't inflate
+            // the radius into absurd values that pull in irrelevant geometry.
+            float largestTargetExtent = 0f;
+            for (int i = 0; i < perTargetBounds.Count; i++)
+            {
+                float e = perTargetBounds[i].extents.magnitude;
+                if (e > largestTargetExtent) largestTargetExtent = e;
+            }
+            if (largestTargetExtent <= 0f)
+                largestTargetExtent = targetBounds.extents.magnitude;
+            float effectiveRadius = Mathf.Max(largestTargetExtent * settings.occluderRadiusMultiplier, 0.01f);
 
             var targetRendererIds = new HashSet<int>(
                 batch.targetEntries
@@ -1026,7 +1037,7 @@ namespace SashaRX.UnityMeshLab
                     continue;
                 if (!TryGetRendererOccluderData(renderer, out var mesh, out var matrix, out var bounds, out var anchor))
                     continue;
-                if (!IsWithinOccluderRange(targetBounds, targetAnchors, bounds, anchor, effectiveRadius))
+                if (!IsWithinOccluderRange(targetBounds, perTargetBounds, targetAnchors, bounds, anchor, effectiveRadius))
                     continue;
 
                 batch.occluderMeshes.Add((mesh, matrix));
@@ -1036,11 +1047,11 @@ namespace SashaRX.UnityMeshLab
             if (!settings.includeCollisionOccluders)
                 return;
 
-            int liveColliderCount = CollectLiveCollisionOccluders(batch, root, targetBounds, targetAnchors, effectiveRadius);
+            int liveColliderCount = CollectLiveCollisionOccluders(batch, root, targetBounds, perTargetBounds, targetAnchors, effectiveRadius);
             if (liveColliderCount > 0 || string.IsNullOrEmpty(ctx?.SourceFbxPath))
                 return;
 
-            CollectSidecarCollisionOccluders(batch, candidateRenderers, targetBounds, targetAnchors, effectiveRadius);
+            CollectSidecarCollisionOccluders(batch, candidateRenderers, targetBounds, perTargetBounds, targetAnchors, effectiveRadius);
         }
 
         GameObject ResolveOccluderRoot(List<MeshEntry> targetEntries)
@@ -1063,12 +1074,18 @@ namespace SashaRX.UnityMeshLab
             LodBakeBatch batch,
             GameObject root,
             Bounds targetBounds,
+            List<Bounds> perTargetBounds,
             List<Vector3> targetAnchors,
             float effectiveRadius)
         {
             int added = 0;
             var seen = new HashSet<int>();
-            foreach (var go in MeshHygieneUtility.FindCollisionObjects(root.transform))
+            // Deep walk: hierarchy mode can nest collision objects arbitrarily;
+            // MeshHygieneUtility.FindCollisionObjects only scans two levels
+            // (legacy LODGroup convention) and would miss deeper ones.
+            var candidates = new List<GameObject>();
+            CollectCollisionDescendants(root.transform, candidates);
+            foreach (var go in candidates)
             {
                 if (go == null || !go.activeInHierarchy)
                     continue;
@@ -1076,7 +1093,7 @@ namespace SashaRX.UnityMeshLab
                     continue;
                 if (!TryGetCollisionMesh(go, out var mesh, out var matrix, out var bounds, out var anchor))
                     continue;
-                if (!IsWithinOccluderRange(targetBounds, targetAnchors, bounds, anchor, effectiveRadius))
+                if (!IsWithinOccluderRange(targetBounds, perTargetBounds, targetAnchors, bounds, anchor, effectiveRadius))
                     continue;
 
                 batch.occluderMeshes.Add((mesh, matrix));
@@ -1086,10 +1103,25 @@ namespace SashaRX.UnityMeshLab
             return added;
         }
 
+        // Recursive collection of collision-named descendants (strict suffix
+        // match via IsCollisionNodeName).
+        static void CollectCollisionDescendants(Transform root, List<GameObject> result)
+        {
+            if (root == null) return;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                var child = root.GetChild(i);
+                if (MeshHygieneUtility.IsCollisionNodeName(child.name))
+                    result.Add(child.gameObject);
+                CollectCollisionDescendants(child, result);
+            }
+        }
+
         void CollectSidecarCollisionOccluders(
             LodBakeBatch batch,
             Renderer[] candidateRenderers,
             Bounds targetBounds,
+            List<Bounds> perTargetBounds,
             List<Vector3> targetAnchors,
             float effectiveRadius)
         {
@@ -1128,7 +1160,7 @@ namespace SashaRX.UnityMeshLab
 
                     var bounds = TransformBounds(mesh.bounds, matrix);
                     var anchor = GetMeshWorldAnchor(mesh, matrix);
-                    if (!IsWithinOccluderRange(targetBounds, targetAnchors, bounds, anchor, effectiveRadius))
+                    if (!IsWithinOccluderRange(targetBounds, perTargetBounds, targetAnchors, bounds, anchor, effectiveRadius))
                         continue;
 
                     batch.occluderMeshes.Add((mesh, matrix));
@@ -1257,11 +1289,15 @@ namespace SashaRX.UnityMeshLab
             return true;
         }
 
-        static List<Vector3> ComputeTargetAnchors(List<MeshEntry> entries, out Bounds bounds)
+        static List<Vector3> ComputeTargetAnchors(
+            List<MeshEntry> entries,
+            out Bounds bounds,
+            out List<Bounds> perTargetBounds)
         {
             bounds = default;
             bool hasBounds = false;
             var anchors = new List<Vector3>();
+            perTargetBounds = new List<Bounds>();
             foreach (var entry in entries)
             {
                 if (entry?.renderer == null)
@@ -1274,6 +1310,7 @@ namespace SashaRX.UnityMeshLab
                 var matrix = entry.renderer.transform.localToWorldMatrix;
                 var worldBounds = GetRendererWorldBounds(entry.renderer, mesh, matrix);
                 anchors.Add(GetRendererWorldAnchor(entry.renderer, mesh, matrix));
+                perTargetBounds.Add(worldBounds);
 
                 if (!hasBounds)
                 {
@@ -1334,22 +1371,40 @@ namespace SashaRX.UnityMeshLab
 
         static bool IsWithinOccluderRange(
             Bounds targetBounds,
+            List<Bounds> perTargetBounds,
             List<Vector3> targetAnchors,
             Bounds candidateBounds,
             Vector3 candidateAnchor,
             float radius)
         {
+            // Combined bbox vs candidate bbox — fast accept for candidates
+            // close to the overall target region.
             if (BoundsDistance(targetBounds, candidateBounds) <= radius)
                 return true;
 
-            if (targetAnchors == null || targetAnchors.Count == 0)
-                return false;
-
-            float sqrRadius = radius * radius;
-            for (int i = 0; i < targetAnchors.Count; i++)
+            // Per-target bbox vs candidate bbox — catches candidates that are
+            // near an individual target but far from the combined centroid
+            // (common in spread-out hierarchies). Uses bbox-to-bbox distance
+            // so a large candidate next to a small target is still captured.
+            if (perTargetBounds != null)
             {
-                if ((targetAnchors[i] - candidateAnchor).sqrMagnitude <= sqrRadius)
-                    return true;
+                for (int i = 0; i < perTargetBounds.Count; i++)
+                {
+                    if (BoundsDistance(perTargetBounds[i], candidateBounds) <= radius)
+                        return true;
+                }
+            }
+
+            // Pivot-to-pivot fallback (cheap, catches edge cases where bounds
+            // are tiny / degenerate).
+            if (targetAnchors != null && targetAnchors.Count > 0)
+            {
+                float sqrRadius = radius * radius;
+                for (int i = 0; i < targetAnchors.Count; i++)
+                {
+                    if ((targetAnchors[i] - candidateAnchor).sqrMagnitude <= sqrRadius)
+                        return true;
+                }
             }
 
             return false;
