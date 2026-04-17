@@ -244,8 +244,8 @@ namespace SashaRX.UnityMeshLab
                     entry.include = prev;
                 hierarchyEntries.Add(entry);
             }
-
-            SyncFbxOverwriteMap();
+            // fbxOverwriteMap is resynced each paint inside DrawFbxOverwritePicker;
+            // no separate sync here.
         }
 
         // Keep fbxOverwriteMap in sync with unique FBX asset paths referenced
@@ -2012,26 +2012,6 @@ namespace SashaRX.UnityMeshLab
             }
             previewBackups.Clear();
             previewActive = false;
-            SceneView.RepaintAll();
-        }
-
-        void UpdatePreviewColors()
-        {
-            if (!previewActive || bakedFinalAO == null) return;
-            // Update preview clone colors without re-creating everything
-            foreach (var (mf, originalMesh, _) in previewBackups)
-            {
-                if (mf == null || mf.sharedMesh == null) continue;
-                if (!bakedFinalAO.TryGetValue(originalMesh, out var ao)) continue;
-                var clone = mf.sharedMesh;
-                var colors = new Color32[clone.vertexCount];
-                for (int i = 0; i < colors.Length && i < ao.Length; i++)
-                {
-                    byte v = (byte)(Mathf.Clamp01(ao[i]) * 255f);
-                    colors[i] = new Color32(v, v, v, 255);
-                }
-                clone.colors32 = colors;
-            }
             SceneView.RepaintAll();
         }
 

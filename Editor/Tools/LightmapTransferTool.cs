@@ -1656,7 +1656,7 @@ namespace SashaRX.UnityMeshLab
 
                 cloneMf.sharedMesh = cloneMesh;
             }
-            UvtLog.Info($"[FBX Export] CopyVertexDataToClone: visited={visitedCloneMfs}, matched={matchedCloneMfs}, uv{(aoUvIdx >= 0 ? aoUvIdx.ToString() : "-")}Writes={uvWrites}, totalUpdates={updated}.");
+            UvtLog.Verbose($"[FBX Export] CopyVertexDataToClone: visited={visitedCloneMfs}, matched={matchedCloneMfs}, uv{(aoUvIdx >= 0 ? aoUvIdx.ToString() : "-")}Writes={uvWrites}, totalUpdates={updated}.");
             return updated;
         }
 
