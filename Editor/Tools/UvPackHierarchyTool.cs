@@ -102,6 +102,16 @@ namespace LightmapUvTool
         {
             var sel = Selection.activeGameObject;
             if (entriesBuilt && sel == lastSelection) return;
+
+            // Row-click sets Selection to a descendant so the canvas shows
+            // that mesh's UV1 — keep the original root and list intact.
+            if (entriesBuilt && hierarchyRoot != null && sel != null &&
+                (sel == hierarchyRoot || sel.transform.IsChildOf(hierarchyRoot.transform)))
+            {
+                lastSelection = sel;
+                return;
+            }
+
             RefreshEntries();
             lastSelection = sel;
             entriesBuilt = true;
@@ -241,7 +251,12 @@ namespace LightmapUvTool
                 GUILayout.Space(4);
                 string rowLabel = hasUv1 ? e.renderer.name : e.renderer.name + "  *";
                 if (GUILayout.Button(new GUIContent(rowLabel, tooltip), EditorStyles.label))
+                {
+                    // Select (not just ping) so the shared UV canvas refreshes
+                    // onto this mesh via ctx.RefreshStandalone and shows UV1.
+                    Selection.activeGameObject = e.renderer.gameObject;
                     EditorGUIUtility.PingObject(e.renderer.gameObject);
+                }
                 EditorGUILayout.EndHorizontal();
             }
             EditorGUILayout.EndScrollView();

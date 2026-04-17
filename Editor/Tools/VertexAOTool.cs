@@ -183,6 +183,18 @@ namespace SashaRX.UnityMeshLab
                 sel == lastHierarchySelection)
                 return;
 
+            // Row-click sets Selection to a descendant so the canvas shows
+            // that mesh's UV — keep the original root and mesh list intact.
+            if (hierarchyEntriesBuilt &&
+                hierarchyMode == lastHierarchyMode &&
+                hierarchyRoot != null &&
+                sel != null &&
+                (sel == hierarchyRoot || sel.transform.IsChildOf(hierarchyRoot.transform)))
+            {
+                lastHierarchySelection = sel;
+                return;
+            }
+
             RefreshHierarchyEntries();
             lastHierarchySelection = sel;
             lastHierarchyMode = hierarchyMode;
@@ -336,7 +348,13 @@ namespace SashaRX.UnityMeshLab
                 GUILayout.Space(4);
                 if (GUILayout.Button(new GUIContent(e.renderer.name, tooltip),
                         EditorStyles.label))
+                {
+                    // Select (not just ping) so the UV canvas can refresh onto
+                    // this mesh. Root / mesh list survives via the
+                    // descendant-of-root guard in RefreshHierarchyEntriesIfNeeded.
+                    Selection.activeGameObject = e.renderer.gameObject;
                     EditorGUIUtility.PingObject(e.renderer.gameObject);
+                }
                 EditorGUILayout.EndHorizontal();
             }
             EditorGUILayout.EndScrollView();
