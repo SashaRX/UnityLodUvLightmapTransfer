@@ -317,8 +317,9 @@ namespace SashaRX.UnityMeshLab
                     : $"{e.renderer.name}  —  {fbxName}";
 
                 EditorGUILayout.BeginHorizontal();
-                bool next = EditorGUILayout.Toggle(e.include, GUILayout.Width(16));
+                bool next = EditorGUILayout.Toggle(e.include, GUILayout.Width(22));
                 if (next != e.include) e.include = next;
+                GUILayout.Space(4);
                 if (GUILayout.Button(new GUIContent(label, "Click to ping in Hierarchy"),
                         EditorStyles.label))
                     EditorGUIUtility.PingObject(e.renderer.gameObject);
@@ -725,8 +726,9 @@ namespace SashaRX.UnityMeshLab
                 string label = System.IO.Path.GetFileName(path);
                 bool cur = fbxOverwriteMap[path];
                 EditorGUILayout.BeginHorizontal();
-                bool next = EditorGUILayout.Toggle(cur, GUILayout.Width(16));
+                bool next = EditorGUILayout.Toggle(cur, GUILayout.Width(22));
                 if (next != cur) fbxOverwriteMap[path] = next;
+                GUILayout.Space(4);
                 if (GUILayout.Button(new GUIContent(label, path + "\nClick to ping in Project"),
                         EditorStyles.label))
                 {
