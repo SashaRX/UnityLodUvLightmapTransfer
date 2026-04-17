@@ -1564,46 +1564,54 @@ namespace SashaRX.UnityMeshLab
                     aoUvIdx = (ch - (int)AOTargetChannel.UV0_X) / 2;
             }
 
-            int updated = 0;
+            // Index entries by mesh name so we can visit each cloneMf exactly
+            // once. If multiple scene entries reference the same FBX sub-asset
+            // (hierarchy mode often has instanced meshes), sharedMesh data is
+            // already identical in the scene — keeping the last entry is fine.
+            var sceneByName = new Dictionary<string, MeshEntry>(StringComparer.Ordinal);
             foreach (var e in entries)
             {
-                if (!e.include) continue;
+                if (e == null || !e.include) continue;
+                Mesh sm = e.originalMesh ?? e.fbxMesh;
+                if (sm == null || string.IsNullOrEmpty(sm.name)) continue;
+                sceneByName[sm.name] = e;
+            }
+
+            int updated = 0;
+            foreach (var cloneMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (cloneMf == null || cloneMf.sharedMesh == null) continue;
+                if (!sceneByName.TryGetValue(cloneMf.sharedMesh.name, out var e)) continue;
+
                 Mesh sceneMesh = e.originalMesh ?? e.fbxMesh;
                 if (sceneMesh == null) continue;
 
-                foreach (var cloneMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+                var cloneMesh = UnityEngine.Object.Instantiate(cloneMf.sharedMesh);
+                cloneMesh.name = cloneMf.sharedMesh.name;
+
+                if (sceneMesh.colors32 != null && sceneMesh.colors32.Length == cloneMesh.vertexCount)
                 {
-                    if (cloneMf == null || cloneMf.sharedMesh == null) continue;
-                    if (cloneMf.sharedMesh.name != sceneMesh.name) continue;
-
-                    var cloneMesh = UnityEngine.Object.Instantiate(cloneMf.sharedMesh);
-                    cloneMesh.name = cloneMf.sharedMesh.name;
-
-                    if (sceneMesh.colors32 != null && sceneMesh.colors32.Length == cloneMesh.vertexCount)
-                    {
-                        cloneMesh.colors32 = sceneMesh.colors32;
-                        updated++;
-                    }
-                    else if (sceneMesh.colors != null && sceneMesh.colors.Length == cloneMesh.vertexCount)
-                    {
-                        cloneMesh.colors = sceneMesh.colors;
-                        updated++;
-                    }
-
-                    if (aoUvIdx >= 0 && sceneMesh.vertexCount == cloneMesh.vertexCount)
-                    {
-                        var uvs = new List<Vector2>();
-                        sceneMesh.GetUVs(aoUvIdx, uvs);
-                        if (uvs.Count == cloneMesh.vertexCount)
-                        {
-                            cloneMesh.SetUVs(aoUvIdx, uvs);
-                            updated++;
-                        }
-                    }
-
-                    cloneMf.sharedMesh = cloneMesh;
-                    break;
+                    cloneMesh.colors32 = sceneMesh.colors32;
+                    updated++;
                 }
+                else if (sceneMesh.colors != null && sceneMesh.colors.Length == cloneMesh.vertexCount)
+                {
+                    cloneMesh.colors = sceneMesh.colors;
+                    updated++;
+                }
+
+                if (aoUvIdx >= 0 && sceneMesh.vertexCount == cloneMesh.vertexCount)
+                {
+                    var uvs = new List<Vector2>();
+                    sceneMesh.GetUVs(aoUvIdx, uvs);
+                    if (uvs.Count == cloneMesh.vertexCount)
+                    {
+                        cloneMesh.SetUVs(aoUvIdx, uvs);
+                        updated++;
+                    }
+                }
+
+                cloneMf.sharedMesh = cloneMesh;
             }
             return updated;
         }
