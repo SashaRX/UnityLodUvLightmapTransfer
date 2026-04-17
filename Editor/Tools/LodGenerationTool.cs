@@ -329,6 +329,22 @@ namespace SashaRX.UnityMeshLab
             if (generatedObjects.Count > 0) ClearGeneratedLods();
             lastResults.Clear();
 
+            // If LODGroup lives in a prefab instance, unpack up front. Our
+            // generation destroys/creates child GameObjects and recreates the
+            // component; leaving the prefab link alive causes children to
+            // flicker in and out on reimport ("prefab child disappeared").
+            // User can re-apply to a new prefab asset afterwards.
+            var lgGo = ctx.LodGroup.gameObject;
+            if (PrefabUtility.IsPartOfPrefabInstance(lgGo))
+            {
+                var outer = PrefabUtility.GetOutermostPrefabInstanceRoot(lgGo);
+                if (outer != null)
+                {
+                    UvtLog.Info($"[GenerateLOD] Unpacking prefab instance '{outer.name}' before LOD regeneration.");
+                    PrefabUtility.UnpackPrefabInstance(outer, PrefabUnpackMode.Completely, InteractionMode.AutomatedAction);
+                }
+            }
+
             var sourceMeshes = new List<(MeshEntry entry, Mesh mesh)>();
             foreach (var e in ctx.MeshEntries)
             {
@@ -460,8 +476,11 @@ namespace SashaRX.UnityMeshLab
                     }
                 }
 
-                Undo.RecordObject(ctx.LodGroup, "Generate LODs");
-                ctx.LodGroup.SetLODs(newLods.ToArray());
+                // Rebuild LODGroup from scratch instead of in-place SetLODs.
+                // On prefab instances this sidesteps stale override tracking
+                // that could later hide LOD children; NormalizeTransitions
+                // keeps screenRelativeTransitionHeight strictly decreasing.
+                ctx.LodGroup = LodGroupUtility.Rebuild(ctx.LodGroup.gameObject, newLods.ToArray());
                 AssetDatabase.SaveAssets();
             }
             finally { EditorUtility.ClearProgressBar(); }

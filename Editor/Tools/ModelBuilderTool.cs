@@ -874,6 +874,20 @@ namespace SashaRX.UnityMeshLab
                 EditorGUILayout.LabelField($"{rendCount}r {totalVerts:N0}v",
                     EditorStyles.miniLabel, GUILayout.Width(80));
 
+                // Per-row Regenerate button (LOD >= 1 only — LOD0 is the source).
+                if (li > 0)
+                {
+                    GUI.backgroundColor = new Color(.6f, .75f, .9f);
+                    if (GUILayout.Button(new GUIContent("\u21BB",
+                            "Regenerate this LOD mesh from LOD0 via mesh simplifier."),
+                            GUILayout.Width(22), GUILayout.Height(18)))
+                    {
+                        RegenerateLod(li);
+                        return; // UI invalidated
+                    }
+                    GUI.backgroundColor = Color.white;
+                }
+
                 // Remove LOD button
                 if (lods.Length > 1)
                 {
@@ -925,10 +939,7 @@ namespace SashaRX.UnityMeshLab
             }
 
             if (changed)
-            {
-                Undo.RecordObject(ctx.LodGroup, "Edit LOD Transitions");
-                ctx.LodGroup.SetLODs(lods);
-            }
+                LodGroupUtility.ApplyLods(ctx.LodGroup, lods);
 
             // Add LOD button
             EditorGUILayout.Space(4);
@@ -943,16 +954,14 @@ namespace SashaRX.UnityMeshLab
         {
             if (ctx.LodGroup == null) return;
 
-            Undo.RecordObject(ctx.LodGroup, "Add LOD Level");
             var lods = ctx.LodGroup.GetLODs();
             var newLods = new LOD[lods.Length + 1];
             System.Array.Copy(lods, newLods, lods.Length);
 
-            // New LOD with lower transition than the last one
             float lastTrans = lods.Length > 0 ? lods[lods.Length - 1].screenRelativeTransitionHeight : 0.5f;
             newLods[lods.Length] = new LOD(lastTrans * 0.5f, new Renderer[0]);
 
-            ctx.LodGroup.SetLODs(newLods);
+            LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
             ctx.Refresh(ctx.LodGroup);
             requestRepaint?.Invoke();
             UvtLog.Info($"Added LOD{lods.Length} (transition: {lastTrans * 0.5f:F3})");
@@ -962,7 +971,6 @@ namespace SashaRX.UnityMeshLab
         {
             if (ctx.LodGroup == null) return;
 
-            Undo.RecordObject(ctx.LodGroup, "Remove LOD Level");
             var lods = ctx.LodGroup.GetLODs();
             if (lodIndex < 0 || lodIndex >= lods.Length) return;
 
@@ -973,11 +981,113 @@ namespace SashaRX.UnityMeshLab
                 newLods[j++] = lods[i];
             }
 
-            ctx.LodGroup.SetLODs(newLods);
+            LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
             ctx.LodGroup.RecalculateBounds();
             ctx.Refresh(ctx.LodGroup);
             requestRepaint?.Invoke();
             UvtLog.Info($"Removed LOD{lodIndex}");
+        }
+
+        // Regenerate a single LOD's meshes from the matching LOD0 source via
+        // mesh simplifier. Preserves existing LOD renderer GameObjects — we
+        // just swap mf.sharedMesh — so prefab-instance structure stays
+        // intact. Matches sources by stripped group key (UvToolContext.
+        // ExtractGroupKey), so LOD0 'Wall' pairs with LODN 'Wall_LOD2', etc.
+        void RegenerateLod(int lodIndex)
+        {
+            if (ctx.LodGroup == null) return;
+            if (lodIndex <= 0)
+            {
+                UvtLog.Warn("[LOD] Can't regenerate LOD0 — it is the source.");
+                return;
+            }
+            var lods = ctx.LodGroup.GetLODs();
+            if (lodIndex >= lods.Length)
+            {
+                UvtLog.Warn($"[LOD] Invalid LOD index {lodIndex}.");
+                return;
+            }
+
+            var lod0 = lods[0].renderers ?? new Renderer[0];
+            var lodN = lods[lodIndex].renderers ?? new Renderer[0];
+            if (lod0.Length == 0 || lodN.Length == 0)
+            {
+                UvtLog.Warn($"[LOD] Regenerate LOD{lodIndex}: empty source or target.");
+                return;
+            }
+
+            // Index LOD0 source meshes by stripped base name.
+            var sourceByKey = new System.Collections.Generic.Dictionary<string, Mesh>();
+            foreach (var r in lod0)
+            {
+                if (r == null) continue;
+                var mf = r.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+                var key = UvToolContext.ExtractGroupKey(r.name);
+                if (!string.IsNullOrEmpty(key))
+                    sourceByKey[key] = mf.sharedMesh;
+            }
+
+            if (sourceByKey.Count == 0)
+            {
+                UvtLog.Warn($"[LOD] Regenerate LOD{lodIndex}: no LOD0 source meshes found.");
+                return;
+            }
+
+            // Ratio: 0.5^lodIndex against LOD0. Reasonable default for most
+            // pipelines; user can tweak via LodGen tab for finer control.
+            float ratio = Mathf.Clamp(Mathf.Pow(0.5f, lodIndex), 0.05f, 0.95f);
+            var settings = new MeshSimplifier.SimplifySettings
+            {
+                targetRatio  = ratio,
+                targetError  = 0.1f,
+                uv2Weight    = 0.5f,
+                normalWeight = 0.5f,
+                lockBorder   = true,
+                uvChannel    = 1,
+            };
+
+            int regenerated = 0;
+            try
+            {
+                foreach (var r in lodN)
+                {
+                    if (r == null) continue;
+                    var mf = r.GetComponent<MeshFilter>();
+                    if (mf == null) continue;
+                    var key = UvToolContext.ExtractGroupKey(r.name);
+                    if (string.IsNullOrEmpty(key)) continue;
+                    if (!sourceByKey.TryGetValue(key, out var sourceMesh)) continue;
+
+                    var res = MeshSimplifier.Simplify(sourceMesh, settings);
+                    if (!res.ok)
+                    {
+                        UvtLog.Warn($"[LOD] Simplify failed for '{sourceMesh.name}': {res.error}");
+                        continue;
+                    }
+                    res.simplifiedMesh.name = sourceMesh.name + "_LOD" + lodIndex;
+
+                    Undo.RecordObject(mf, "Regenerate LOD");
+                    mf.sharedMesh = res.simplifiedMesh;
+                    regenerated++;
+                }
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            if (regenerated > 0)
+            {
+                UvtLog.Info($"[LOD] Regenerated LOD{lodIndex}: {regenerated} mesh(es), ratio={ratio:P0}");
+                ctx.LodGroup.RecalculateBounds();
+                ctx.Refresh(ctx.LodGroup);
+                requestRepaint?.Invoke();
+            }
+            else
+            {
+                UvtLog.Warn($"[LOD] Regenerate LOD{lodIndex}: nothing matched (check that LODN renderer names share a base with LOD0).");
+            }
         }
 
         void MoveRendererBetweenLods(Renderer renderer, int fromLod, int toLod)
