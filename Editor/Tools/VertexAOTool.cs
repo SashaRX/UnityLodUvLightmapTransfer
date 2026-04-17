@@ -246,15 +246,17 @@ namespace SashaRX.UnityMeshLab
             SyncFbxOverwriteMap();
         }
 
-        // Keep fbxOverwriteMap in sync with unique FBX asset paths referenced by
-        // hierarchyEntries. New paths default to checked; paths that disappear
-        // from the hierarchy are removed.
+        // Keep fbxOverwriteMap in sync with unique FBX asset paths referenced
+        // by INCLUDED hierarchyEntries. Excluded meshes drop out of the
+        // overwrite picker — only FBX files that AO actually applied to are
+        // candidates for re-save. New paths default to checked; paths that
+        // disappear (entry unchecked or removed) are dropped.
         void SyncFbxOverwriteMap()
         {
             var current = new HashSet<string>();
             foreach (var e in hierarchyEntries)
             {
-                if (e.fbxMesh == null) continue;
+                if (e == null || !e.include || e.fbxMesh == null) continue;
                 string p = AssetDatabase.GetAssetPath(e.fbxMesh);
                 if (string.IsNullOrEmpty(p)) continue;
                 if (!p.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase)) continue;
@@ -702,10 +704,14 @@ namespace SashaRX.UnityMeshLab
         // referenced by hierarchyEntries; only checked files get rewritten.
         void DrawFbxOverwritePicker()
         {
+            // Re-sync each paint so toggling Meshes checkboxes updates the
+            // FBX list immediately. Cheap — set ops over hierarchyEntries.
+            SyncFbxOverwriteMap();
+
             if (fbxOverwriteMap.Count == 0)
             {
                 EditorGUILayout.HelpBox(
-                    "No FBX-backed meshes in this hierarchy.",
+                    "No included FBX-backed meshes. Tick at least one row in the Meshes list above.",
                     MessageType.Info);
                 return;
             }
