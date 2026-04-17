@@ -1017,25 +1017,23 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // When colliders are enabled as occluders, a collider named
-            // "<Name>_COL" should REPLACE its matching "<Name>" renderer in
-            // the BVH instead of stacking on top. Pre-walk collider nodes and
-            // collect the base name (suffix stripped) — renderers with a
-            // matching base name are skipped below. Only a trailing "_COL"
-            // suffix is stripped; variations like "_COL_Hull01" are not
-            // tried here to keep the match rule predictable.
+            // When colliders are enabled as occluders, a collider mesh whose
+            // .name ends with "_COL" REPLACES the renderer whose mesh name
+            // equals the collider base (the collider name minus "_COL"). The
+            // suffix lives on the mesh asset name — the GameObject node may
+            // be named anything. Pre-walk collision mesh candidates to
+            // collect base keys; renderers whose mesh name matches are
+            // skipped below.
             HashSet<string> collCoveredKeys = null;
             if (settings.includeCollisionOccluders)
             {
                 collCoveredKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                var collCandidates = new List<GameObject>();
-                CollectCollisionDescendants(root.transform, collCandidates);
-                foreach (var go in collCandidates)
+                var collCandidates = new List<(GameObject go, Mesh mesh)>();
+                CollectCollisionMeshCandidates(root.transform, collCandidates);
+                foreach (var c in collCandidates)
                 {
-                    if (go == null || !go.activeInHierarchy) continue;
-                    string n = go.name;
-                    if (n.EndsWith("_COL", StringComparison.OrdinalIgnoreCase))
-                        collCoveredKeys.Add(n.Substring(0, n.Length - 4));
+                    string n = c.mesh.name;
+                    collCoveredKeys.Add(n.Substring(0, n.Length - 4));
                 }
             }
 
@@ -1057,11 +1055,11 @@ namespace SashaRX.UnityMeshLab
                     continue;
                 if (MeshHygieneUtility.IsCollisionNodeName(renderer.name))
                     continue;
-                if (collCoveredKeys != null && collCoveredKeys.Count > 0 &&
-                    collCoveredKeys.Contains(renderer.name))
-                    continue; // replaced by sibling "<name>_COL" collider below
                 if (!TryGetRendererOccluderData(renderer, out var mesh, out var matrix, out var bounds, out var anchor))
                     continue;
+                if (collCoveredKeys != null && collCoveredKeys.Count > 0 &&
+                    mesh != null && collCoveredKeys.Contains(mesh.name))
+                    continue; // replaced by matching "<meshName>_COL" collider below
                 if (!IsWithinOccluderRange(targetBounds, perTargetBounds, targetAnchors, bounds, anchor, effectiveRadius))
                     continue;
 
@@ -1111,42 +1109,62 @@ namespace SashaRX.UnityMeshLab
         {
             int added = 0;
             var seen = new HashSet<int>();
-            // Deep walk: hierarchy mode can nest collision objects arbitrarily;
-            // MeshHygieneUtility.FindCollisionObjects only scans two levels
-            // (legacy LODGroup convention) and would miss deeper ones.
-            var candidates = new List<GameObject>();
-            CollectCollisionDescendants(root.transform, candidates);
-            foreach (var go in candidates)
+            var candidates = new List<(GameObject go, Mesh mesh)>();
+            CollectCollisionMeshCandidates(root.transform, candidates);
+            foreach (var c in candidates)
             {
-                if (go == null || !go.activeInHierarchy)
-                    continue;
-                if (!seen.Add(go.GetInstanceID()))
-                    continue;
-                if (!TryGetCollisionMesh(go, out var mesh, out var matrix, out var bounds, out var anchor))
-                    continue;
+                if (c.go == null || !c.go.activeInHierarchy) continue;
+                if (!seen.Add(c.mesh.GetInstanceID())) continue;
+
+                var matrix = c.go.transform.localToWorldMatrix;
+                var bounds = TransformBounds(c.mesh.bounds, matrix);
+                var anchor = GetMeshWorldAnchor(c.mesh, matrix);
                 if (!IsWithinOccluderRange(targetBounds, perTargetBounds, targetAnchors, bounds, anchor, effectiveRadius))
                     continue;
 
-                batch.occluderMeshes.Add((mesh, matrix));
+                batch.occluderMeshes.Add((c.mesh, matrix));
                 batch.colliderOccluderCount++;
                 added++;
             }
             return added;
         }
 
-        // Recursive collection of collision-named descendants (strict suffix
-        // match via IsCollisionNodeName).
-        static void CollectCollisionDescendants(Transform root, List<GameObject> result)
+        // Collision detection is by MESH-NAME suffix "_COL", not by GameObject
+        // node name. Walks both MeshCollider.sharedMesh and MeshFilter.
+        // sharedMesh; dedups per (GO, mesh) so a GO with both MC+MF pointing
+        // at the same asset isn't added twice. Strict trailing-"_COL" rule
+        // mirrors the renderer-skip key (mesh name minus "_COL").
+        static void CollectCollisionMeshCandidates(
+            Transform root,
+            List<(GameObject go, Mesh mesh)> result)
         {
             if (root == null) return;
-            for (int i = 0; i < root.childCount; i++)
+
+            foreach (var mc in root.GetComponentsInChildren<MeshCollider>(true))
             {
-                var child = root.GetChild(i);
-                if (MeshHygieneUtility.IsCollisionNodeName(child.name))
-                    result.Add(child.gameObject);
-                CollectCollisionDescendants(child, result);
+                if (mc == null || mc.sharedMesh == null) continue;
+                if (!EndsWithColSuffix(mc.sharedMesh.name)) continue;
+                result.Add((mc.gameObject, mc.sharedMesh));
+            }
+
+            foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (mf == null || mf.sharedMesh == null) continue;
+                if (!EndsWithColSuffix(mf.sharedMesh.name)) continue;
+
+                bool dup = false;
+                for (int i = 0; i < result.Count; i++)
+                {
+                    if (result[i].go == mf.gameObject && result[i].mesh == mf.sharedMesh)
+                    { dup = true; break; }
+                }
+                if (!dup) result.Add((mf.gameObject, mf.sharedMesh));
             }
         }
+
+        static bool EndsWithColSuffix(string name)
+            => !string.IsNullOrEmpty(name) &&
+               name.EndsWith("_COL", StringComparison.OrdinalIgnoreCase);
 
         void CollectSidecarCollisionOccluders(
             LodBakeBatch batch,
@@ -1288,35 +1306,6 @@ namespace SashaRX.UnityMeshLab
             matrix = renderer.transform.localToWorldMatrix;
             bounds = GetRendererWorldBounds(renderer, mesh, matrix);
             anchor = GetRendererWorldAnchor(renderer, mesh, matrix);
-            return true;
-        }
-
-        static bool TryGetCollisionMesh(GameObject go, out Mesh mesh, out Matrix4x4 matrix, out Bounds bounds, out Vector3 anchor)
-        {
-            mesh = null;
-            matrix = Matrix4x4.identity;
-            bounds = default;
-            anchor = Vector3.zero;
-            if (go == null)
-                return false;
-
-            var meshCollider = go.GetComponent<MeshCollider>();
-            if (meshCollider != null && meshCollider.sharedMesh != null)
-                mesh = meshCollider.sharedMesh;
-
-            if (mesh == null)
-            {
-                var meshFilter = go.GetComponent<MeshFilter>();
-                if (meshFilter != null && meshFilter.sharedMesh != null)
-                    mesh = meshFilter.sharedMesh;
-            }
-
-            if (mesh == null)
-                return false;
-
-            matrix = go.transform.localToWorldMatrix;
-            bounds = TransformBounds(mesh.bounds, matrix);
-            anchor = GetMeshWorldAnchor(mesh, matrix);
             return true;
         }
 
