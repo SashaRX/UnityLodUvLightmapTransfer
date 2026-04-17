@@ -415,7 +415,6 @@ namespace LightmapUvTool
             for (int y = 0; y < kGridRes; y++)
                 for (int x = 0; x < kGridRes; x++)
                     sat[x + 1, y + 1] = grid[x, y] + sat[x, y + 1] + sat[x + 1, y] - sat[x, y];
-
             // Sort overlapping shells by area (largest first) for better packing
             var toRelocate = new List<int>(overlapping);
             toRelocate.Sort((a, b) =>
