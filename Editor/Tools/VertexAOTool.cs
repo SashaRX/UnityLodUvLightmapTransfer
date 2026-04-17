@@ -888,6 +888,16 @@ namespace SashaRX.UnityMeshLab
             }
 
             var settings = BuildSettingsFromUI();
+
+            // Color-space sanity: AO is computed + stored in LINEAR [0,1].
+            // In a Linear-space project the preview shader renders linearly
+            // and Unity does the final linear→sRGB for display; vertex-color
+            // writes are raw byte-remapped (no gamma conversion). In a Gamma
+            // project the byte value is displayed as-is. Log once so the
+            // user can verify this matches their shader's expectations.
+            UvtLog.Info($"[Vertex AO] Project color space: {PlayerSettings.colorSpace}. " +
+                        $"AO values are linear in [0,1]; vertex color / UV writes store them as-is.");
+
             var batches = BuildLodBatches(entries, settings);
             RunBatches(batches, settings, entries, seedFromExisting: false);
         }
@@ -1828,7 +1838,7 @@ namespace SashaRX.UnityMeshLab
                 if (uvs.Count != vertCount) return null;
                 var ao = new float[vertCount];
                 for (int i = 0; i < vertCount; i++)
-                    ao[i] = comp == 0 ? uvs[i].x : uvs[i].y;
+                    ao[i] = Mathf.Clamp01(comp == 0 ? uvs[i].x : uvs[i].y);
                 return ao;
             }
         }
