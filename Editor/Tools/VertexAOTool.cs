@@ -1017,6 +1017,26 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
+            // When colliders are enabled as occluders, a collider with the
+            // same stripped group key (e.g. Wall_COL ↔ Wall) should REPLACE
+            // the renderer, not add on top of it. Pre-walk collider names
+            // to collect covered group keys; renderers that fall into a
+            // covered group are skipped below. Renderers with no matching
+            // collider still contribute.
+            HashSet<string> collCoveredKeys = null;
+            if (settings.includeCollisionOccluders)
+            {
+                collCoveredKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var collCandidates = new List<GameObject>();
+                CollectCollisionDescendants(root.transform, collCandidates);
+                foreach (var go in collCandidates)
+                {
+                    if (go == null || !go.activeInHierarchy) continue;
+                    var key = UvToolContext.ExtractGroupKey(go.name);
+                    if (!string.IsNullOrEmpty(key)) collCoveredKeys.Add(key);
+                }
+            }
+
             var seenRenderers = new HashSet<int>();
             foreach (var renderer in candidateRenderers)
             {
@@ -1035,6 +1055,12 @@ namespace SashaRX.UnityMeshLab
                     continue;
                 if (MeshHygieneUtility.IsCollisionNodeName(renderer.name))
                     continue;
+                if (collCoveredKeys != null && collCoveredKeys.Count > 0)
+                {
+                    var rKey = UvToolContext.ExtractGroupKey(renderer.name);
+                    if (!string.IsNullOrEmpty(rKey) && collCoveredKeys.Contains(rKey))
+                        continue; // replaced by sibling collider below
+                }
                 if (!TryGetRendererOccluderData(renderer, out var mesh, out var matrix, out var bounds, out var anchor))
                     continue;
                 if (!IsWithinOccluderRange(targetBounds, perTargetBounds, targetAnchors, bounds, anchor, effectiveRadius))
