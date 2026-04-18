@@ -76,6 +76,37 @@ JSON output mirrors the CSV but nests `records[]` inside a run envelope.
    *Run Full Pipeline* again. Each run produces a separate CSV — diff with
    a spreadsheet / pandas.
 
+### Parameter sweep (atlasRes × shellPad × borderPad)
+
+For automated sweeps across repack parameters, fill `TestSuiteAsset.sweep`:
+
+```
+atlasResolutions      = [256, 512, 2048]
+shellPaddingPxVariants = [2, 4, 8, 32]
+borderPaddingPxVariants = [0]
+resetBetweenRuns      = true
+```
+
+In *LightmapTransferTool → Setup tab*, assign the asset to the **Sweep suite**
+field; the neighbouring **Run Sweep (N)** button iterates the cartesian
+product (N = product of array lengths). Each cell:
+
+1. Sets `ctx.AtlasResolution` / `ShellPaddingPx` / `BorderPaddingPx`.
+2. Calls `ResetWorkingCopies()` (no sidecar delete, no FBX reimport — just
+   restores `originalMesh = fbxMesh` and clears pipeline flags).
+3. Runs `ExecFullPipeline("sweep_res{R}_pad{S}_bdr{B}")` — each cell's CSV
+   + JSON carry the cell identifier in the filename and as the `runLabel`
+   column.
+
+Original atlas/padding values are restored when the sweep finishes or is
+cancelled. A progress bar with **Cancel** is shown during the sweep.
+
+Concatenate the output for analysis:
+
+```
+pandas.concat([pd.read_csv(f) for f in glob('BenchmarkReports/*_sweep_*.csv')])
+```
+
 ### Log filters
 
 When a run is noisy (e.g. Adaptive threshold messages spam the console), open

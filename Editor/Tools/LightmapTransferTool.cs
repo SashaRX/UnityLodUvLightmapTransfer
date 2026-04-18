@@ -43,6 +43,7 @@ namespace LightmapUvTool
         SymmetrySplitShells.ThresholdMode symSplitThresholdMode = SymmetrySplitShells.ThresholdMode.LegacyFixed;
         HashSet<int> lastSymmetrySplitLods = new HashSet<int>();
         Vector2 reportScroll;
+        TestSuiteAsset sweepSuite;
 
         // ── LOD generation ──
         int generateLodCount = 2;
@@ -346,6 +347,27 @@ namespace LightmapUvTool
             SymmetrySplitShells.CurrentThresholdMode = symSplitThresholdMode;
             ColorBtn(new Color(.2f,.75f,.95f), "Run Full Pipeline", 30, ExecFullPipeline);
             splitTargetsInSymmetryStep = EditorGUILayout.ToggleLeft("SymSplit target LODs (advanced)", splitTargetsInSymmetryStep);
+
+            // Parameter sweep: atlasRes × shellPad × borderPad from a TestSuiteAsset.
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                sweepSuite = (TestSuiteAsset)EditorGUILayout.ObjectField(
+                    "Sweep suite", sweepSuite, typeof(TestSuiteAsset), false);
+                int cells = 0;
+                if (sweepSuite != null && sweepSuite.sweep != null)
+                {
+                    var sm = sweepSuite.sweep;
+                    int rL = sm.atlasResolutions?.Length ?? 0;
+                    int pL = sm.shellPaddingPxVariants?.Length ?? 0;
+                    int bL = sm.borderPaddingPxVariants?.Length ?? 0;
+                    cells = Mathf.Max(1, rL) * Mathf.Max(1, pL) * Mathf.Max(1, bL);
+                }
+                using (new EditorGUI.DisabledScope(sweepSuite == null || cells == 0))
+                {
+                    if (GUILayout.Button($"Run Sweep ({cells})", GUILayout.Width(130), GUILayout.Height(22)))
+                        ExecSweep(sweepSuite.sweep);
+                }
+            }
 
             EditorGUILayout.Space(6);
             H("Pipeline Settings");
@@ -680,10 +702,12 @@ namespace LightmapUvTool
             requestRepaint?.Invoke();
         }
 
-        void ExecFullPipeline()
+        void ExecFullPipeline() => ExecFullPipeline("FullPipeline");
+
+        void ExecFullPipeline(string runLabel)
         {
             if (ctx.LodGroup == null) return;
-            using var _bench = BenchmarkRecorder.NewRun(ctx, "FullPipeline",
+            using var _bench = BenchmarkRecorder.NewRun(ctx, runLabel,
                 splitTargetsInSymmetryStep, symSplitThresholdMode);
             BenchmarkRecorder.Current?.StageBegin("pipeline");
             try
@@ -696,6 +720,59 @@ namespace LightmapUvTool
                 if (BenchmarkRecorder.Current != null)
                     foreach (var e in ctx.MeshEntries)
                         BenchmarkRecorder.Current.RecordMesh(e);
+            }
+        }
+
+        /// <summary>
+        /// Run the full pipeline once per cell of a sweep matrix (cartesian product of
+        /// atlasResolutions × shellPaddingPxVariants × borderPaddingPxVariants).
+        /// Each cell writes its own CSV/JSON with runLabel "sweep_res{R}_pad{S}_bdr{B}".
+        /// Original ctx values are restored on exit.
+        /// </summary>
+        void ExecSweep(TestSuiteAsset.SweepMatrix sm)
+        {
+            if (ctx.LodGroup == null || sm == null) return;
+            var resArr = (sm.atlasResolutions != null && sm.atlasResolutions.Length > 0)
+                ? sm.atlasResolutions : new[] { ctx.AtlasResolution };
+            var padArr = (sm.shellPaddingPxVariants != null && sm.shellPaddingPxVariants.Length > 0)
+                ? sm.shellPaddingPxVariants : new[] { ctx.ShellPaddingPx };
+            var bdrArr = (sm.borderPaddingPxVariants != null && sm.borderPaddingPxVariants.Length > 0)
+                ? sm.borderPaddingPxVariants : new[] { ctx.BorderPaddingPx };
+
+            int total = resArr.Length * padArr.Length * bdrArr.Length;
+            int origRes = ctx.AtlasResolution, origPad = ctx.ShellPaddingPx, origBdr = ctx.BorderPaddingPx;
+            int done = 0;
+            bool cancelled = false;
+            try
+            {
+                foreach (int r in resArr)
+                foreach (int s in padArr)
+                foreach (int b in bdrArr)
+                {
+                    if (EditorUtility.DisplayCancelableProgressBar("Pipeline Sweep",
+                            $"cell {done + 1}/{total}: res={r}, shellPad={s}, borderPad={b}",
+                            (float)done / Mathf.Max(1, total)))
+                    {
+                        cancelled = true;
+                        break;
+                    }
+                    ctx.AtlasResolution = r;
+                    ctx.ShellPaddingPx  = s;
+                    ctx.BorderPaddingPx = b;
+                    if (sm.resetBetweenRuns) ResetWorkingCopies();
+                    ExecFullPipeline($"sweep_res{r}_pad{s}_bdr{b}");
+                    done++;
+                    if (cancelled) break;
+                }
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+                ctx.AtlasResolution = origRes;
+                ctx.ShellPaddingPx  = origPad;
+                ctx.BorderPaddingPx = origBdr;
+                UvtLog.Info(UvtLog.Category.Benchmark,
+                    $"Sweep complete: {done}/{total} cells{(cancelled ? " (cancelled)" : "")}");
             }
         }
 

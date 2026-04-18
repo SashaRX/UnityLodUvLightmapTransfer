@@ -51,6 +51,33 @@ namespace LightmapUvTool
         [Tooltip("Free-form description of this suite — what it's for, when it was updated.")]
         [TextArea(2, 6)]
         public string description = "";
+
+        /// <summary>
+        /// Parameter sweep configuration — drives ExecSweep to run the Full Pipeline across
+        /// the cartesian product of the listed atlas resolutions / paddings. One CSV + JSON
+        /// per cell, each with a runLabel of sweep_res{R}_pad{S}_bdr{B}.
+        /// </summary>
+        [System.Serializable]
+        public class SweepMatrix
+        {
+            [Tooltip("Atlas resolutions (pixels) to sweep. Each resolution is combined with every " +
+                     "shell padding and border padding value below.")]
+            public int[] atlasResolutions = { 256, 512, 2048 };
+
+            [Tooltip("Shell padding values (pixels) to sweep.")]
+            public int[] shellPaddingPxVariants = { 2, 4, 8, 32 };
+
+            [Tooltip("Border padding values (pixels) to sweep. Leave as {0} if you don't want " +
+                     "to vary it — a single-value array still produces N×M×1 combinations.")]
+            public int[] borderPaddingPxVariants = { 0 };
+
+            [Tooltip("Call ResetPipelineState between sweep cells so each cell starts from the " +
+                     "unmodified FBX meshes. Disable only for debugging a single cell.")]
+            public bool resetBetweenRuns = true;
+        }
+
+        [Tooltip("Parameter sweep driven by LightmapTransferTool.ExecSweep (Run Sweep button).")]
+        public SweepMatrix sweep = new SweepMatrix();
     }
 
 #if UNITY_EDITOR
