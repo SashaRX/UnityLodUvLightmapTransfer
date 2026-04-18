@@ -3557,9 +3557,23 @@ namespace LightmapUvTool
         //  Works on raw UV2 array + UvShell list (independent of TargetTransferState)
         // ═══════════════════════════════════════════════════════════
 
+        // ── Benchmark counters (reset by the caller, read after EnforceShellTopologyOnUv2) ──
+        /// <summary>
+        /// Number of Laplacian iterations actually executed in the most recent
+        /// <see cref="EnforceShellTopologyOnUv2"/> call. Capped at <c>kMaxTopologyIterations</c>.
+        /// </summary>
+        public static int LastTopologyIterations;
+        /// <summary>Total vertices moved by the most recent topology enforcement pass.</summary>
+        public static int LastTopologyFixed;
+        /// <summary>True when the iteration cap was reached and more fixes were still pending.</summary>
+        public static bool LastTopologyCapHit;
+
         static void EnforceShellTopologyOnUv2(
             Vector2[] uv2, Vector3[] verts, int[] triangles, List<UvShell> shells)
         {
+            LastTopologyIterations = 0;
+            LastTopologyFixed = 0;
+            LastTopologyCapHit = false;
             if (uv2 == null || uv2.Length == 0) return;
 
             int faceCount = triangles.Length / 3;
@@ -3793,17 +3807,22 @@ namespace LightmapUvTool
                 }
 
                 totalFixed += fixedThisPass;
-                UvtLog.Verbose($"[ShellTopology] iter={iteration} fixed={fixedThisPass} candidates={candidates.Count}");
+                LastTopologyIterations = iteration + 1;
+                UvtLog.Verbose(UvtLog.Category.Topology, $"iter={iteration} fixed={fixedThisPass} candidates={candidates.Count}");
                 if (fixedThisPass == 0) break;
 
                 if (iteration == kMaxTopologyIterations - 1 && fixedThisPass > 0)
-                    UvtLog.Warn($"[ShellTopology] Cap reached ({kMaxTopologyIterations} iterations) " +
+                {
+                    LastTopologyCapHit = true;
+                    UvtLog.Warn(UvtLog.Category.Topology, $"Cap reached ({kMaxTopologyIterations} iterations) " +
                         $"with {fixedThisPass} vertices still fixable — consider increasing cap");
+                }
             }
 
+            LastTopologyFixed = totalFixed;
             if (totalFixed > 0)
             {
-                UvtLog.Info($"[GroupedTransfer] Shell topology enforcement fixed {totalFixed} displaced vertices");
+                UvtLog.Info(UvtLog.Category.Topology, $"Shell topology enforcement fixed {totalFixed} displaced vertices");
             }
         }
 
