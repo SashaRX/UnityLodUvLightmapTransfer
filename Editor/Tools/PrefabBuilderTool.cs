@@ -1,4 +1,4 @@
-// ModelBuilderTool.cs — Model Builder tool (IUvTool tab).
+// PrefabBuilderTool.cs — Prefab Builder tool (IUvTool tab).
 // Provides 3D scene preview of mesh channels, edge topology, and problem areas.
 // PR #1: preview modes only. PR #2: cleanup scan/fix migration. PR #3: LOD + collision management.
 
@@ -10,15 +10,15 @@ using UnityEditor.SceneManagement;
 
 namespace SashaRX.UnityMeshLab
 {
-    public class ModelBuilderTool : IUvTool
+    public class PrefabBuilderTool : IUvTool
     {
         UvToolContext ctx;
         UvCanvasView canvas;
         System.Action requestRepaint;
 
         // ── Identity ──
-        public string ToolName  => "Model Builder";
-        public string ToolId    => "model_builder";
+        public string ToolName  => "Prefab Builder";
+        public string ToolId    => "prefab_builder";
         public int    ToolOrder => 44;
         public System.Action RequestRepaint { set => requestRepaint = value; }
 
@@ -35,7 +35,7 @@ namespace SashaRX.UnityMeshLab
         }
 
         PreviewMode previewMode = PreviewMode.None;
-        ModelBuilderPreview preview;
+        PrefabBuilderPreview preview;
 
         // ── Hierarchy editing state ──
         Dictionary<int, string> pendingNames; // instanceID → edited name
@@ -101,7 +101,7 @@ namespace SashaRX.UnityMeshLab
         {
             this.ctx = ctx;
             this.canvas = canvas;
-            if (preview == null) preview = new ModelBuilderPreview();
+            if (preview == null) preview = new PrefabBuilderPreview();
             pendingNames = new Dictionary<int, string>();
         }
 
@@ -128,7 +128,7 @@ namespace SashaRX.UnityMeshLab
         public void OnDrawSidebar()
         {
             EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Model Builder", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Prefab Builder", EditorStyles.boldLabel);
             EditorGUILayout.Space(4);
 
             if (ctx == null || (ctx.LodGroup == null && !ctx.StandaloneMesh))
@@ -438,7 +438,7 @@ namespace SashaRX.UnityMeshLab
         {
             if (pendingNames == null || pendingNames.Count == 0) return;
 
-            Undo.SetCurrentGroupName("Model Builder: Rename");
+            Undo.SetCurrentGroupName("Prefab Builder: Rename");
             int group = Undo.GetCurrentGroup();
 
             foreach (var kvp in pendingNames)
@@ -463,7 +463,7 @@ namespace SashaRX.UnityMeshLab
         {
             if (ctx.LodGroup == null) return;
 
-            Undo.SetCurrentGroupName("Model Builder: Normalize");
+            Undo.SetCurrentGroupName("Prefab Builder: Normalize");
             int group = Undo.GetCurrentGroup();
 
             var root = ctx.LodGroup.transform;
@@ -1731,7 +1731,7 @@ namespace SashaRX.UnityMeshLab
         {
             if (splitCandidates == null) return;
 
-            Undo.SetCurrentGroupName("Model Builder: Split by Material");
+            Undo.SetCurrentGroupName("Prefab Builder: Split by Material");
             int undoGroup = Undo.GetCurrentGroup();
             int split = 0;
 
@@ -1808,7 +1808,7 @@ namespace SashaRX.UnityMeshLab
         {
             if (mergeCandidates == null) return;
 
-            Undo.SetCurrentGroupName("Model Builder: Merge");
+            Undo.SetCurrentGroupName("Prefab Builder: Merge");
             int undoGroup = Undo.GetCurrentGroup();
             int merged = 0;
 

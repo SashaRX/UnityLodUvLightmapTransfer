@@ -1,4 +1,4 @@
-// BuildValidator.cs — Pre-save validation for ModelBuilder's Build Pipeline.
+// BuildValidator.cs — Pre-save validation for PrefabBuilder's Build Pipeline.
 // Groups issues into NullRefs / Materials / Uv2Readable / Topology; callers
 // decide which groups block the save. NullRefs and Materials are fatal —
 // FBX export cannot succeed without them. Uv2Readable and Topology are

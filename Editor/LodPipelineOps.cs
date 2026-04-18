@@ -1,5 +1,5 @@
 // LodPipelineOps.cs — Shared LOD generation helper used by LodGenerationTool
-// and ModelBuilderTool's Build Pipeline. Encapsulates the meshoptimizer-driven
+// and PrefabBuilderTool's Build Pipeline. Encapsulates the meshoptimizer-driven
 // simplification loop, prefab unpacking, LODGroup rebuild, scaleInLightmap
 // propagation, and MeshEntry registration so both tools run identical logic.
 

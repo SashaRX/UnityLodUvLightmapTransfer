@@ -1,5 +1,5 @@
 // LodGroupUtility.cs — Prefab-aware LODGroup rebuild + transition normalization.
-// Shared by LodGenerationTool and ModelBuilderTool so both end up with a clean
+// Shared by LodGenerationTool and PrefabBuilderTool so both end up with a clean
 // component state after generation / edit (recreates the component instead of
 // mutating in place, which sidesteps stale override tracking on prefab
 // instances) and monotonically-decreasing transition heights.
