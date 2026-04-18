@@ -640,6 +640,24 @@ namespace LightmapUvTool
         void ExecFullPipeline()
         {
             if (ctx.LodGroup == null) return;
+            using var _bench = BenchmarkRecorder.NewRun(ctx, "FullPipeline",
+                splitTargetsInSymmetryStep, symSplitThresholdMode);
+            BenchmarkRecorder.Current?.StageBegin("pipeline");
+            try
+            {
+                ExecFullPipelineCore();
+            }
+            finally
+            {
+                BenchmarkRecorder.Current?.StageEnd("pipeline");
+                if (BenchmarkRecorder.Current != null)
+                    foreach (var e in ctx.MeshEntries)
+                        BenchmarkRecorder.Current.RecordMesh(e);
+            }
+        }
+
+        void ExecFullPipelineCore()
+        {
             string version = UnityEditor.PackageManager.PackageInfo
                 .FindForAssembly(typeof(LightmapTransferTool).Assembly)?.version ?? "0.0.0";
             UvtLog.Info($"[Pipeline] Starting full pipeline... (v{version})");
@@ -804,6 +822,15 @@ namespace LightmapUvTool
         void ExecRepack(List<MeshEntry> entries)
         {
             if (entries.Count == 0) return;
+            using var _bench = BenchmarkRecorder.NewRun(ctx, "Repack",
+                splitTargetsInSymmetryStep, symSplitThresholdMode);
+            BenchmarkRecorder.Current?.StageBegin("repack");
+            try { ExecRepackCore(entries); }
+            finally { BenchmarkRecorder.Current?.StageEnd("repack"); }
+        }
+
+        void ExecRepackCore(List<MeshEntry> entries)
+        {
             UvtLog.Info($"[Repack] {entries.Count} meshes, res={ctx.AtlasResolution}, pad={ctx.ShellPaddingPx}, bdr={ctx.BorderPaddingPx}");
             var validEntries = new List<MeshEntry>();
             var meshCopies = new List<Mesh>();
@@ -856,15 +883,29 @@ namespace LightmapUvTool
 
         void ExecTransferAll()
         {
-            accumulatedOverlapHints.Clear();
-            accumulatedMatchHints.Clear();
-            for (int li = 0; li < ctx.LodCount; li++)
+            using var _bench = BenchmarkRecorder.NewRun(ctx, "TransferAll",
+                splitTargetsInSymmetryStep, symSplitThresholdMode);
+            bool ownsSession = _bench is BenchmarkRecorder;
+            BenchmarkRecorder.Current?.StageBegin("transfer");
+            try
             {
-                if (li == ctx.SourceLodIndex) continue;
-                ExecTransferLod(li);
+                accumulatedOverlapHints.Clear();
+                accumulatedMatchHints.Clear();
+                for (int li = 0; li < ctx.LodCount; li++)
+                {
+                    if (li == ctx.SourceLodIndex) continue;
+                    ExecTransferLod(li);
+                }
+                ctx.HasTransfer = true;
+                requestRepaint?.Invoke();
             }
-            ctx.HasTransfer = true;
-            requestRepaint?.Invoke();
+            finally
+            {
+                BenchmarkRecorder.Current?.StageEnd("transfer");
+                if (ownsSession && BenchmarkRecorder.Current != null)
+                    foreach (var e in ctx.MeshEntries)
+                        BenchmarkRecorder.Current.RecordMesh(e);
+            }
         }
 
         void ExecTransferLod(int tLod)
@@ -924,7 +965,9 @@ namespace LightmapUvTool
                 tgt.shellTransferResult = tr;
 
                 // Validation
+                BenchmarkRecorder.Current?.StageBegin("validate");
                 tgt.validationReport = TransferValidator.Validate(tgtMesh, tr.uv2, tr);
+                BenchmarkRecorder.Current?.StageEnd("validate");
 
                 float pct = tr.verticesTotal > 0 ? tr.verticesTransferred * 100f / tr.verticesTotal : 0;
                 UvtLog.Info($"[Transfer] '{tgt.renderer.name}' LOD{tLod}: {tr.shellsMatched} shells, {pct:F0}% coverage");

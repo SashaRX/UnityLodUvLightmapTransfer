@@ -20,6 +20,9 @@ namespace LightmapUvTool
     {
         public static BenchmarkRecorder Current { get; private set; }
 
+        // Sentinel for nested calls — caller treats it as a scope that does nothing on Dispose.
+        sealed class NoOpScope : IDisposable { public static readonly NoOpScope Instance = new NoOpScope(); public void Dispose() { } }
+
         // ── Session state ──
         readonly string runLabel;
         readonly string lodGroupName;
@@ -71,14 +74,15 @@ namespace LightmapUvTool
             symSplitTotalAt0    = 0;
         }
 
-        public static BenchmarkRecorder NewRun(UvToolContext ctx, string label,
+        /// <summary>
+        /// Begin a new recording session. Nested calls are no-ops — the outer session
+        /// captures everything and the inner caller gets a scope whose Dispose does nothing.
+        /// Always call inside `using (BenchmarkRecorder.NewRun(...)) { ... }`.
+        /// </summary>
+        public static IDisposable NewRun(UvToolContext ctx, string label,
             bool splitTargets, SymmetrySplitShells.ThresholdMode symMode)
         {
-            if (Current != null)
-            {
-                // Nested run — finalize the outer one first so we don't lose data.
-                try { Current.Dispose(); } catch { /* best effort */ }
-            }
+            if (Current != null) return NoOpScope.Instance;
             Current = new BenchmarkRecorder(ctx, label, splitTargets, symMode);
             return Current;
         }
@@ -181,7 +185,9 @@ namespace LightmapUvTool
 
         void WriteArtefacts()
         {
-            if (records.Count == 0 && stageAccum.Count == 0) return;
+            // Only emit artefacts for runs that produced per-mesh data.
+            // Bare repack/transfer runs without RecordMesh calls aren't worth a file.
+            if (records.Count == 0) return;
 
             string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
             string dir = Path.Combine(projectRoot, "BenchmarkReports");
