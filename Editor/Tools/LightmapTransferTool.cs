@@ -40,6 +40,7 @@ namespace LightmapUvTool
         bool foldLogFilters;
         bool foldValidationOverlay;
         bool splitTargetsInSymmetryStep;
+        bool skipSymmetrySplitStep;
         SymmetrySplitShells.ThresholdMode symSplitThresholdMode = SymmetrySplitShells.ThresholdMode.LegacyFixed;
         HashSet<int> lastSymmetrySplitLods = new HashSet<int>();
         Vector2 reportScroll;
@@ -360,6 +361,7 @@ namespace LightmapUvTool
             SymmetrySplitShells.CurrentThresholdMode = symSplitThresholdMode;
             ColorBtn(new Color(.2f,.75f,.95f), "Run Full Pipeline", 30, ExecFullPipeline);
             splitTargetsInSymmetryStep = EditorGUILayout.ToggleLeft("SymSplit target LODs (advanced)", splitTargetsInSymmetryStep);
+            skipSymmetrySplitStep      = EditorGUILayout.ToggleLeft("Skip SymSplit step (diagnostic)", skipSymmetrySplitStep);
 
             // Parameter sweep: atlasRes × shellPad × borderPad from a TestSuiteAsset.
             using (new EditorGUILayout.HorizontalScope())
@@ -857,8 +859,11 @@ namespace LightmapUvTool
                         ctx.HasTransfer = false;
                     }
 
-                    // 3. SymSplit
-                    ExecSymmetrySplit(splitTargetsInSymmetryStep, sepThresh);
+                    // 3. SymSplit (skipped via diagnostic toggle to isolate xatlas packing)
+                    if (!skipSymmetrySplitStep)
+                        ExecSymmetrySplit(splitTargetsInSymmetryStep, sepThresh);
+                    else
+                        UvtLog.Info(UvtLog.Category.SymSplit, "[Pipeline] SymSplit step SKIPPED by user toggle");
 
                     // 4. Repack
                     var src = ctx.ForLod(ctx.SourceLodIndex);
