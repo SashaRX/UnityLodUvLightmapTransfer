@@ -33,7 +33,7 @@ Located under `.github/workflows/`:
 - `build-native.yml` — builds native plugin binaries (platform-specific).
 - `meta-check.yml` — verifies `.meta` file coverage.
 - `version-bump.yml` — automates `package.json` version bumps.
-- `test.yml` — EditMode test run on Unity 6000.0. Requires `UNITY_LICENSE` (personal) OR `UNITY_SERIAL` + `UNITY_EMAIL` + `UNITY_PASSWORD` (professional) repository secrets. See `unity-ci-validation/SKILL.md`.
+- `test.yml` — EditMode test run on Unity 6000.0. License-gated: skips cleanly when no `UNITY_LICENSE`/`UNITY_SERIAL` secrets are configured. **This repository is on Unity Personal (free) tier**, and Unity disabled manual `.alf`→`.ulf` activation for Personal seats in 2024, so the test job is currently always **skipped** on GitHub-hosted runners. Local Test Runner remains the canonical pre-commit verification path. See `unity-ci-validation/SKILL.md` §License activation for the recipe and the path forward (self-hosted runner or Plus/Pro upgrade).
 - `release.yml` — tag-triggered GitHub Release; verifies `v<version>` tag matches `package.json` and extracts the matching section from `CHANGELOG.md`.
 
 ## Deviations from `_shared/naming-conventions.md`
