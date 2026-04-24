@@ -1472,11 +1472,6 @@ namespace SashaRX.UnityMeshLab
             }
 
             // ── Phase 4: Reimport (single refresh) ──
-            // Re-apply UV2-friendly importer flags before refresh. The .meta
-            // restore above brings back whatever the user originally had
-            // (potentially keepQuads=false, globalScale=0.01); without this
-            // fixup the re-imported FBX would be triangulated and 100× shrunk.
-            Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
             AssetDatabase.Refresh();
             if (ctx.LodGroup != null)
             {
@@ -1750,8 +1745,11 @@ namespace SashaRX.UnityMeshLab
                 // For overwrite flow, lock import settings BEFORE export.
                 // This avoids an extra post-export reimport that can let third-party
                 // importers (e.g. Bakery) touch UV2 again before user validation.
+                // lockForFbxOverwrite=true normalizes topology and scale (keepQuads,
+                // useFileScale, globalScale=1.0) so the Setup → Repack → Transfer →
+                // Export round-trip round-trips 1:1 metres and preserves quads.
                 if (overwriteSource)
-                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
+                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true, lockForFbxOverwrite: true);
 
                 // Ensure FBX meshes are readable so the FBX Exporter can access
                 // vertex data (especially for _COL meshes without sidecar data).
@@ -2162,11 +2160,11 @@ namespace SashaRX.UnityMeshLab
                 // triangulation/scale on the next import. peek mode lets us skip
                 // the second SaveAndReimport when nothing actually drifted.
                 if (overwriteSource && groupSucceeded &&
-                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true, peek: true))
+                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true, peek: true, lockForFbxOverwrite: true))
                 {
                     if (!persistentSidecarMode)
                         ArmTransientReplayForOverwrite(sourceFbxPath, transientReplayEntriesByPath);
-                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true);
+                    Uv2AssetPostprocessor.PrepareImportSettings(sourceFbxPath, force: true, lockForFbxOverwrite: true);
                 }
             }
 

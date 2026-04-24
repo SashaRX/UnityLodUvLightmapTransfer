@@ -81,8 +81,13 @@ namespace SashaRX.UnityMeshLab
         /// <paramref name="force"/> bypasses the opt-in gate (fbxOverwritePaths/managedImportPaths)
         /// so the CleanupTool Import Settings fixer can apply the same enforcement to any
         /// tool-managed FBX without having to pre-register it.
+        /// <paramref name="lockForFbxOverwrite"/> opts in to FBX-overwrite-only enforcements
+        /// (keepQuads=true, useFileScale=true, globalScale=1.0) that normalize topology and
+        /// scale for the Setup → Repack → Transfer → Export round-trip. These are OFF by
+        /// default because they would silently rewrite intentional user settings in
+        /// non-overwrite callers (managed UV2 apply, CleanupTool scoped fixers).
         /// </summary>
-        internal static bool PrepareImportSettings(string assetPath, bool force = false, bool peek = false)
+        internal static bool PrepareImportSettings(string assetPath, bool force = false, bool peek = false, bool lockForFbxOverwrite = false)
         {
             if (bypassPaths.Contains(assetPath)) return false;
 
@@ -109,32 +114,35 @@ namespace SashaRX.UnityMeshLab
                 changed = true;
                 if (!peek) UvtLog.Info($"[UV2 Preprocess] Disabled weldVertices on '{assetPath}'");
             }
-            // Disable triangulation on (re-)import so quad topology survives a
-            // Setup → Repack → Transfer → Export round-trip. Unity FBX Exporter
-            // writes whatever topology the source mesh has; keepQuads=false
-            // would force the new FBX back to triangles on the next import.
-            if (!modelImporter.keepQuads)
+            if (lockForFbxOverwrite)
             {
-                if (!peek) modelImporter.keepQuads = true;
-                changed = true;
-                if (!peek) UvtLog.Info($"[UV2 Preprocess] Enabled keepQuads on '{assetPath}'");
-            }
-            // Lock scale to 1:1 metres. Unity FBX Exporter always writes the
-            // file in centimetres (1 m mesh → 100 cm in FBX); useFileScale=true
-            // applies the cm→m conversion on import and globalScale=1.0 keeps
-            // the multiplier neutral. Restoring a .meta with globalScale=0.01
-            // (Maya cm preset) would otherwise shrink the re-saved model 100×.
-            if (!modelImporter.useFileScale)
-            {
-                if (!peek) modelImporter.useFileScale = true;
-                changed = true;
-                if (!peek) UvtLog.Info($"[UV2 Preprocess] Enabled useFileScale on '{assetPath}'");
-            }
-            if (!Mathf.Approximately(modelImporter.globalScale, 1f))
-            {
-                if (!peek) UvtLog.Info($"[UV2 Preprocess] Reset globalScale ({modelImporter.globalScale} → 1.0) on '{assetPath}'");
-                if (!peek) modelImporter.globalScale = 1f;
-                changed = true;
+                // Disable triangulation on (re-)import so quad topology survives a
+                // Setup → Repack → Transfer → Export round-trip. Unity FBX Exporter
+                // writes whatever topology the source mesh has; keepQuads=false
+                // would force the new FBX back to triangles on the next import.
+                if (!modelImporter.keepQuads)
+                {
+                    if (!peek) modelImporter.keepQuads = true;
+                    changed = true;
+                    if (!peek) UvtLog.Info($"[UV2 Preprocess] Enabled keepQuads on '{assetPath}'");
+                }
+                // Lock scale to 1:1 metres. Unity FBX Exporter always writes the
+                // file in centimetres (1 m mesh → 100 cm in FBX); useFileScale=true
+                // applies the cm→m conversion on import and globalScale=1.0 keeps
+                // the multiplier neutral. Restoring a .meta with globalScale=0.01
+                // (Maya cm preset) would otherwise shrink the re-saved model 100×.
+                if (!modelImporter.useFileScale)
+                {
+                    if (!peek) modelImporter.useFileScale = true;
+                    changed = true;
+                    if (!peek) UvtLog.Info($"[UV2 Preprocess] Enabled useFileScale on '{assetPath}'");
+                }
+                if (!Mathf.Approximately(modelImporter.globalScale, 1f))
+                {
+                    if (!peek) UvtLog.Info($"[UV2 Preprocess] Reset globalScale ({modelImporter.globalScale} → 1.0) on '{assetPath}'");
+                    if (!peek) modelImporter.globalScale = 1f;
+                    changed = true;
+                }
             }
             if (modelImporter.meshCompression != ModelImporterMeshCompression.Off)
             {
