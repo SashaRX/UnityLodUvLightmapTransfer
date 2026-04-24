@@ -119,6 +119,23 @@ namespace SashaRX.UnityMeshLab
                 changed = true;
                 UvtLog.Info($"[UV2 Preprocess] Enabled keepQuads on '{assetPath}'");
             }
+            // Lock scale to 1:1 metres. Unity FBX Exporter always writes the
+            // file in centimetres (1 m mesh → 100 cm in FBX); useFileScale=true
+            // applies the cm→m conversion on import and globalScale=1.0 keeps
+            // the multiplier neutral. Restoring a .meta with globalScale=0.01
+            // (Maya cm preset) would otherwise shrink the re-saved model 100×.
+            if (!modelImporter.useFileScale)
+            {
+                modelImporter.useFileScale = true;
+                changed = true;
+                UvtLog.Info($"[UV2 Preprocess] Enabled useFileScale on '{assetPath}'");
+            }
+            if (!Mathf.Approximately(modelImporter.globalScale, 1f))
+            {
+                UvtLog.Info($"[UV2 Preprocess] Reset globalScale ({modelImporter.globalScale} → 1.0) on '{assetPath}'");
+                modelImporter.globalScale = 1f;
+                changed = true;
+            }
             if (modelImporter.meshCompression != ModelImporterMeshCompression.Off)
             {
                 UvtLog.Info($"[UV2 Preprocess] Disabled meshCompression ({modelImporter.meshCompression}) on '{assetPath}'");
