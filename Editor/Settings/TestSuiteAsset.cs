@@ -6,7 +6,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEditor;
 
-namespace LightmapUvTool
+namespace SashaRX.UnityMeshLab
 {
     [CreateAssetMenu(menuName = "Lightmap UV Tool/Test Suite", fileName = "UvTransferTestSuite")]
     public class TestSuiteAsset : ScriptableObject

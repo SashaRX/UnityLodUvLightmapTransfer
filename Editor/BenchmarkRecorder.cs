@@ -10,7 +10,7 @@ using System.IO;
 using System.Text;
 using UnityEngine;
 
-namespace LightmapUvTool
+namespace SashaRX.UnityMeshLab
 {
     /// <summary>
     /// Collects per-mesh metrics during a pipeline run and writes CSV + JSON on Dispose.

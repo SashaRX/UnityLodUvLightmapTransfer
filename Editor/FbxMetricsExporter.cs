@@ -11,7 +11,7 @@ using System.Text;
 using UnityEditor;
 using UnityEngine;
 
-namespace LightmapUvTool
+namespace SashaRX.UnityMeshLab
 {
     public static class FbxMetricsExporter
     {

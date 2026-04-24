@@ -6,7 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-namespace LightmapUvTool
+namespace SashaRX.UnityMeshLab
 {
     internal static class UvPngWriter
     {
