@@ -11,7 +11,7 @@ using System.Linq;
 using UnityEngine;
 using UnityEditor;
 
-namespace LightmapUvTool
+namespace SashaRX.UnityMeshLab
 {
     public class UvPackHierarchyTool : IUvTool
     {
