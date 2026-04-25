@@ -1,18 +1,53 @@
-<!doctype html><html><head><meta charset="utf-8"><title>UV2 sweep gallery index</title><style>body{background:#181820;color:#ddd;font-family:system-ui,sans-serif;margin:18px;}a{color:#9cf;}a:visited{color:#c9c9ff;}
+<!doctype html><html><head><meta charset="utf-8"><title>UV2 sweep gallery</title>
+<style>
+body{background:#181820;color:#ddd;font-family:system-ui,sans-serif;margin:18px;}
+a{color:#9cf;}a:visited{color:#c9c9ff;}
 h1,h2{border-bottom:1px solid #333;padding-bottom:4px;}
 h2{margin-top:32px;}
 table{border-collapse:collapse;margin:8px 0 24px;}
-th,td{border:1px solid #333;padding:4px;text-align:center;font-size:11px;vertical-align:top;}
-th{background:#222;}td{background:#222;}
+th,td{border:1px solid #333;padding:4px;text-align:center;font-size:11px;vertical-align:top;background:#222;}
+th{background:#222;}
+td.cell{position:relative;width:200px;}
 td.capHit{outline:2px solid #f80;}
 td.bad{background:#3a1818;}
 td.empty{color:#555;}
-img{display:block;width:180px;height:180px;object-fit:contain;background:#0c0c10;}
+img{display:block;width:180px;height:180px;object-fit:contain;background:#0c0c10;cursor:pointer;}
 .meta{font-size:10px;color:#aaa;line-height:1.3;margin-top:2px;text-align:left;}
 .legend{font-size:12px;color:#999;margin:6px 0 16px;}
-.nav a{color:#9cf;margin-right:10px;}</style></head><body>
-<h1>UV2 sweep gallery (LegacyFixed, 2026-04-19)</h1>
-<p>Per-model galleries (open one to inspect <b>res × pad</b> matrix for every renderer × LOD):</p>
+.nav a{margin-right:10px;}
+/* Voting controls */
+.vote-row{display:flex;justify-content:space-between;align-items:center;margin-top:3px;}
+.vote-btns{display:flex;gap:2px;}
+.vote-btn{cursor:pointer;width:18px;height:18px;font-size:11px;line-height:18px;border:1px solid #444;background:#1a1a1f;color:#888;text-align:center;border-radius:3px;}
+.vote-btn:hover{background:#2a2a30;color:#ddd;}
+.vote-btn.active{background:#3b6;color:#000;font-weight:bold;}
+.vote-btn[data-rating="1"].active{background:#c33;color:#fff;}
+.vote-btn[data-rating="2"].active{background:#e74;color:#fff;}
+.vote-btn[data-rating="3"].active{background:#dd4;color:#000;}
+.vote-btn[data-rating="4"].active{background:#9c4;color:#000;}
+.vote-btn[data-rating="5"].active{background:#3b6;color:#000;}
+.tag-toggle{cursor:pointer;font-size:11px;color:#888;border:1px solid #444;padding:1px 6px;border-radius:3px;background:#1a1a1f;}
+.tag-toggle:hover{color:#ddd;}
+.tag-panel{display:none;position:absolute;left:0;right:0;top:100%;z-index:5;background:#1a1a22;border:1px solid #555;padding:6px;margin-top:2px;text-align:left;}
+.tag-panel.open{display:block;}
+.tag-panel label{display:block;font-size:10px;color:#bbb;margin:1px 0;cursor:pointer;}
+.tag-panel textarea{width:100%;background:#0c0c10;color:#ddd;border:1px solid #333;font-size:10px;margin-top:4px;height:32px;}
+td.cell.rate-1{box-shadow:inset 0 0 0 3px #c33;}
+td.cell.rate-2{box-shadow:inset 0 0 0 3px #e74;}
+td.cell.rate-3{box-shadow:inset 0 0 0 3px #dd4;}
+td.cell.rate-4{box-shadow:inset 0 0 0 3px #9c4;}
+td.cell.rate-5{box-shadow:inset 0 0 0 3px #3b6;}
+td.cell.current{outline:3px solid #59f;outline-offset:-3px;}
+/* Bottom bar */
+#bar{position:sticky;bottom:0;background:#222;border-top:1px solid #444;padding:8px 12px;margin:24px -18px -18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;}
+#bar button{background:#2a2a30;color:#ddd;border:1px solid #555;padding:5px 10px;cursor:pointer;border-radius:3px;font-size:12px;}
+#bar button:hover{background:#3a3a44;}
+#bar .stat{font-size:12px;color:#9cf;}
+#help{font-size:11px;color:#888;}
+#help kbd{background:#222;border:1px solid #555;padding:0 4px;border-radius:2px;color:#ddd;font-family:monospace;}
+</style></head><body>
+<h1>UV2 sweep gallery — legacyfixed-2026-04-19</h1>
+<p>Per-model galleries with voting (rating 1-5 + tags). Votes live in your browser; export at the bottom of each page.</p>
 <ul>
 <li><a href="_gallery_Carousel.html">Carousel</a></li>
 <li><a href="_gallery_Gazebo.html">Gazebo</a></li>
