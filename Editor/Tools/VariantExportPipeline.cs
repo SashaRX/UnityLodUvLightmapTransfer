@@ -125,7 +125,14 @@ namespace SashaRX.UnityMeshLab
 
             // Detect duplicate suffixes inside the batch — would either fight
             // for the same output path or auto-increment unpredictably.
-            var dupes = variants.GroupBy(v => v.suffix).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+            // Case-insensitive: case-insensitive filesystems (default on Windows
+            // and macOS) collapse "Red" and "red" to the same FBX path, which
+            // would silently clobber one variant's output with the other.
+            var dupes = variants
+                .GroupBy(v => v.suffix, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToList();
             if (dupes.Count > 0)
             {
                 results.Add(Fail("", default, "Duplicate suffix(es) in batch: " + string.Join(", ", dupes)));
@@ -310,20 +317,24 @@ namespace SashaRX.UnityMeshLab
             }
             else if (policy == ConflictPolicy.AutoIncrement)
             {
+                // Test the current candidate, then bump if it conflicts. The
+                // exhaustion check sits BEFORE the bump so the final candidate
+                // (`{suffix}_99`) actually gets tested instead of being prepared
+                // and then immediately discarded.
                 int attempt = 2;
-                while (attempt < 100)
+                while (true)
                 {
                     bool fbxConflict = System.IO.File.Exists(MakeFbx(finalSuffix));
                     var pp = MakePrefab(finalSuffix);
                     bool prefabConflict = pp != null && System.IO.File.Exists(pp);
                     if (!fbxConflict && !prefabConflict) break;
+                    if (attempt >= 100)
+                    {
+                        error = "Auto-increment exhausted after 99 attempts.";
+                        return false;
+                    }
                     finalSuffix = $"{suffix}_{attempt}";
                     attempt++;
-                }
-                if (attempt >= 100)
-                {
-                    error = "Auto-increment exhausted after 99 attempts.";
-                    return false;
                 }
             }
             // Overwrite: nothing to check; caller accepted clobber.
