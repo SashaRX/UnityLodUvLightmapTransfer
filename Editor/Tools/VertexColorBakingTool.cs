@@ -79,6 +79,14 @@ namespace SashaRX.UnityMeshLab
         bool applySelectedSubmeshOnly;
         int selectedSubmeshIndex;
 
+        // ── Bake Kind (AO vs Solid Color) ──
+        internal enum BakeKind { AO = 0, SolidColor = 1 }
+        BakeKind bakeKind = BakeKind.AO;
+        static readonly string[] bakeKindLabels = { "AO", "Solid Color" };
+
+        // ── Solid Color settings ──
+        Color solidColor = Color.white;
+
         // ── Hierarchy mode (no LODGroup, all descendant MeshRenderers as one batch) ──
         bool hierarchyMode;
         GameObject hierarchyRoot;
@@ -537,23 +545,126 @@ namespace SashaRX.UnityMeshLab
         public void OnDrawSidebar()
         {
             EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Vertex AO Baker", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Vertex Color Baking", EditorStyles.boldLabel);
+            EditorGUILayout.Space(4);
+
+            DrawBakeKindSelector();
             EditorGUILayout.Space(4);
 
             if (!DrawSelectionGate()) return;
 
-            DrawBakeSettings();
+            if (bakeKind == BakeKind.AO)
+            {
+                DrawBakeSettings();
 
-            EditorGUILayout.Space(8);
+                EditorGUILayout.Space(8);
 
-            DrawBakeActionsRow();
+                DrawBakeActionsRow();
 
-            if (bakedFinalAO == null || bakedFinalAO.Count == 0) return;
+                if (bakedFinalAO == null || bakedFinalAO.Count == 0) return;
 
-            DrawResults();
-            DrawPostProcessing();
-            DrawApplyFilters();
-            DrawApplyAndExportRow();
+                DrawResults();
+                DrawPostProcessing();
+                DrawApplyFilters();
+                DrawApplyAndExportRow();
+            }
+            else // BakeKind.SolidColor
+            {
+                DrawSolidColorSettings();
+                EditorGUILayout.Space(8);
+                DrawSolidBakeActionsRow();
+            }
+        }
+
+        void DrawBakeKindSelector()
+        {
+            EditorGUI.BeginChangeCheck();
+            int newKind = GUILayout.Toolbar((int)bakeKind, bakeKindLabels, GUILayout.Height(22));
+            if (EditorGUI.EndChangeCheck())
+            {
+                bakeKind = (BakeKind)newKind;
+                if (bakeKind == BakeKind.SolidColor && previewActive)
+                    RestorePreview();
+                requestRepaint?.Invoke();
+            }
+        }
+
+        void DrawSolidColorSettings()
+        {
+            EditorGUILayout.LabelField("Solid Color", EditorStyles.boldLabel);
+            solidColor = EditorGUILayout.ColorField(
+                new GUIContent("Color", "Single color to fill all vertex colors with (RGBA)."),
+                solidColor);
+            EditorGUILayout.HelpBox(
+                "Writes mesh.colors32 — full RGBA. Collision meshes are skipped automatically.",
+                MessageType.None);
+        }
+
+        void DrawSolidBakeActionsRow()
+        {
+            var bgc = GUI.backgroundColor;
+            EditorGUILayout.BeginHorizontal();
+            GUI.backgroundColor = new Color(.4f, .8f, .4f);
+            if (GUILayout.Button("Bake Solid Color", GUILayout.Height(28)))
+                ExecuteSolidColorBake();
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+        }
+
+        void ExecuteSolidColorBake()
+        {
+            var entries = ActiveEntries()
+                .Where(e => e.include && e.renderer != null)
+                .ToList();
+
+            if (entries.Count == 0)
+            {
+                UvtLog.Warn("[Vertex Colors] No meshes selected.");
+                return;
+            }
+
+            var color32 = (Color32)solidColor;
+            var paintedMeshes = new HashSet<Mesh>();
+            int totalVerts = 0;
+            int skippedCollision = 0;
+
+            foreach (var entry in entries)
+            {
+                if (MeshHygieneUtility.IsCollisionNodeName(entry.renderer.name))
+                {
+                    skippedCollision++;
+                    continue;
+                }
+
+                // Mirror across all mesh variants of the entry so a later FBX
+                // export consumes the painted color regardless of which mesh
+                // instance the export pipeline picks up.
+                var targetMeshes = new List<Mesh>();
+                if (entry.originalMesh    != null) targetMeshes.Add(entry.originalMesh);
+                if (entry.repackedMesh    != null) targetMeshes.Add(entry.repackedMesh);
+                if (entry.transferredMesh != null) targetMeshes.Add(entry.transferredMesh);
+                if (entry.fbxMesh         != null) targetMeshes.Add(entry.fbxMesh);
+
+                foreach (var mesh in targetMeshes)
+                {
+                    if (mesh == null || mesh.vertexCount == 0) continue;
+                    if (!paintedMeshes.Add(mesh)) continue;
+
+                    Undo.RecordObject(mesh, "Bake Solid Color");
+                    var arr = new Color32[mesh.vertexCount];
+                    for (int i = 0; i < arr.Length; i++) arr[i] = color32;
+                    mesh.colors32 = arr;
+                    EditorUtility.SetDirty(mesh);
+                    totalVerts += arr.Length;
+                }
+            }
+
+            string hex = ColorUtility.ToHtmlStringRGBA(solidColor);
+            string skippedNote = skippedCollision > 0 ? $", skipped {skippedCollision} collision" : "";
+            UvtLog.Info(
+                $"[Vertex Colors] Solid #{hex} → {paintedMeshes.Count} mesh(es), " +
+                $"{totalVerts} vertices{skippedNote}");
+            requestRepaint?.Invoke();
         }
 
         // Bake / Load / Rebake Selected buttons, or progress + cancel while
