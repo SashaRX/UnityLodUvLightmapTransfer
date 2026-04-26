@@ -1,4 +1,5 @@
-// VertexAOTool.cs — Vertex AO baking tool (IUvTool tab).
+// VertexColorBakingTool.cs — Vertex color baking tool (IUvTool tab).
+// Bake modes: AO (GPU/CPU BVH ray tracing) and Solid Color (uniform fill).
 // GPU: non-blocking async BVH ray tracing via compute shader.
 // CPU: synchronous BVH ray tracing with Parallel.For.
 
@@ -12,14 +13,14 @@ using UnityEditor;
 
 namespace SashaRX.UnityMeshLab
 {
-    public class VertexAOTool : IUvTool
+    public class VertexColorBakingTool : IUvTool
     {
         UvToolContext ctx;
         UvCanvasView canvas;
         Action requestRepaint;
 
-        public string ToolName  => "Vertex AO";
-        public string ToolId    => "vertex_ao";
+        public string ToolName  => "Vertex Color Baking";
+        public string ToolId    => "vertex_color_baking";
         public int    ToolOrder => 50;
 
         public Action RequestRepaint { set => requestRepaint = value; }
@@ -121,7 +122,7 @@ namespace SashaRX.UnityMeshLab
 
         // ── Lifecycle ──
 
-        internal static VertexAOTool ActiveInstance { get; private set; }
+        internal static VertexColorBakingTool ActiveInstance { get; private set; }
         internal static AOTargetChannel? LastAppliedTargetChannel { get; private set; }
 
         class LodBakeBatch

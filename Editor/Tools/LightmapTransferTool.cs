@@ -1161,7 +1161,7 @@ namespace SashaRX.UnityMeshLab
             uvChannel = -1;
             uvComponent = 0;
 
-            var ch = VertexAOTool.LastAppliedTargetChannel;
+            var ch = VertexColorBakingTool.LastAppliedTargetChannel;
             if (!ch.HasValue) return false;
 
             int v = (int)ch.Value;
@@ -1231,7 +1231,7 @@ namespace SashaRX.UnityMeshLab
 
         static Mesh SelectUv2Donor(MeshEntry entry, Mesh resultMesh, int uvChannel)
         {
-            // AO is written into selected UV component by VertexAOTool.ApplyToMesh,
+            // AO is written into selected UV component by VertexColorBakingTool.ApplyToMesh,
             // usually on original/fbx-backed working meshes.
             // Keep transferred mesh last
             // so UV1 transfer result stays authoritative while AO comes from AO donor.
@@ -1375,7 +1375,7 @@ namespace SashaRX.UnityMeshLab
         }
 
         // Hierarchy-mode entry point: export a specific FBX using a filtered
-        // entry list. Caller (VertexAOTool) owns user confirmation. The FBX
+        // entry list. Caller (VertexColorBakingTool) owns user confirmation. The FBX
         // structure is preserved as-is (no LOD-style hierarchy normalization)
         // so unrelated submeshes / instanced refs are not mutated.
         public void ExportVertexColorsToFbx(string sourceFbxPath, IEnumerable<MeshEntry> entries, int uvChannelOverride = -1)
@@ -1417,7 +1417,7 @@ namespace SashaRX.UnityMeshLab
             // - aoUvIdx == -1: no UV channel to copy (vertex color only)
             // - aoUvIdx == 1:  Unity UV channel 1 (lightmap UV) → lock generateSecondaryUV
             // - aoUvIdx >= 0:  also lock weld/compression/optimization so vertex order survives reimport
-            // Priority: explicit override > VertexAOTool.LastAppliedTargetChannel (AO flow).
+            // Priority: explicit override > VertexColorBakingTool.LastAppliedTargetChannel (AO flow).
             int aoUvIdx;
             if (uvChannelOverride >= 0)
             {
@@ -1426,7 +1426,7 @@ namespace SashaRX.UnityMeshLab
             else
             {
                 aoUvIdx = -1;
-                var aoChannel = VertexAOTool.LastAppliedTargetChannel;
+                var aoChannel = VertexColorBakingTool.LastAppliedTargetChannel;
                 if (aoChannel.HasValue)
                 {
                     int ch = (int)aoChannel.Value;
@@ -3181,7 +3181,7 @@ namespace SashaRX.UnityMeshLab
                 shellColorPreviewEnabled = false;
             }
             if (lightmapPreviewActive) RestoreLightmapPreview();
-            VertexAOTool.ActiveInstance?.RestorePreview();
+            VertexColorBakingTool.ActiveInstance?.RestorePreview();
             canvas.CurrentPreviewMode = UvCanvasView.PreviewMode.Off;
         }
 
