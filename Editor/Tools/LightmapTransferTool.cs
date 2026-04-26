@@ -1424,9 +1424,14 @@ namespace SashaRX.UnityMeshLab
             }
 
             RestoreAllPreviews();
+            // normalizeHierarchy=false: VariantExportPipeline matches new-FBX
+            // sub-meshes to source-prefab MeshFilters by sub-asset name. Hierarchy
+            // normalization renames sub-meshes (LOD-style) and breaks that
+            // matching. The variant FBX must mirror the source FBX's sub-mesh
+            // naming so prefab clones can swap mesh refs cleanly.
             return ExportVertexColorsToFbxCore(
                 sourceFbxPath, list,
-                normalizeHierarchy: true,
+                normalizeHierarchy: false,
                 uvChannelOverride,
                 outputFbxPathOverride: outputFbxPath);
 #else

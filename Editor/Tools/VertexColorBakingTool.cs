@@ -623,47 +623,15 @@ namespace SashaRX.UnityMeshLab
                 return;
             }
 
-            var color32 = (Color32)solidColor;
-            var paintedMeshes = new HashSet<Mesh>();
-            int totalVerts = 0;
-            int skippedCollision = 0;
-
-            foreach (var entry in entries)
+            int painted = VariantExportPipeline.BakeSolidColorOnEntries(entries, solidColor);
+            if (painted == 0)
             {
-                if (MeshHygieneUtility.IsCollisionNodeName(entry.renderer.name))
-                {
-                    skippedCollision++;
-                    continue;
-                }
-
-                // Mirror across all mesh variants of the entry so a later FBX
-                // export consumes the painted color regardless of which mesh
-                // instance the export pipeline picks up.
-                var targetMeshes = new List<Mesh>();
-                if (entry.originalMesh    != null) targetMeshes.Add(entry.originalMesh);
-                if (entry.repackedMesh    != null) targetMeshes.Add(entry.repackedMesh);
-                if (entry.transferredMesh != null) targetMeshes.Add(entry.transferredMesh);
-                if (entry.fbxMesh         != null) targetMeshes.Add(entry.fbxMesh);
-
-                foreach (var mesh in targetMeshes)
-                {
-                    if (mesh == null || mesh.vertexCount == 0) continue;
-                    if (!paintedMeshes.Add(mesh)) continue;
-
-                    Undo.RecordObject(mesh, "Bake Solid Color");
-                    var arr = new Color32[mesh.vertexCount];
-                    for (int i = 0; i < arr.Length; i++) arr[i] = color32;
-                    mesh.colors32 = arr;
-                    EditorUtility.SetDirty(mesh);
-                    totalVerts += arr.Length;
-                }
+                UvtLog.Warn("[Vertex Colors] Nothing painted (all collision, excluded, or empty).");
+                return;
             }
 
             string hex = ColorUtility.ToHtmlStringRGBA(solidColor);
-            string skippedNote = skippedCollision > 0 ? $", skipped {skippedCollision} collision" : "";
-            UvtLog.Info(
-                $"[Vertex Colors] Solid #{hex} → {paintedMeshes.Count} mesh(es), " +
-                $"{totalVerts} vertices{skippedNote}");
+            UvtLog.Info($"[Vertex Colors] Solid #{hex} → {painted} mesh(es).");
             requestRepaint?.Invoke();
         }
 
