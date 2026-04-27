@@ -75,6 +75,7 @@ th{background:#222;}
 td.cell{position:relative;width:200px;}
 td.capHit{outline:2px solid #f80;}
 td.bad{background:#3a1818;}
+td.lowUtil{box-shadow:inset 0 0 0 2px #f33;}
 td.empty{color:#555;}
 img{display:block;width:180px;height:180px;object-fit:contain;background:#0c0c10;cursor:pointer;}
 .meta{font-size:10px;color:#aaa;line-height:1.3;margin-top:2px;text-align:left;}
@@ -326,6 +327,8 @@ def cell_html(cell, model, renderer, lod, res_axis, pad_axis, root_dir):
             tex = float(r.get("texelDensityMedian", 0))
             topfx = int(float(r.get("topologyFixed", 0)))
             cap = r.get("topologyCapHit", "False").lower() in ("1","true")
+            try: util = float(r.get("atlasUtilization", 0) or 0)
+            except: util = 0.0
             png_name = f"{r.get('rendererName')}_LOD{lod}_uv2.png"
             png_path = os.path.join(c["png_dir"], png_name)
             full_png = os.path.join(root_dir, png_path)
@@ -343,10 +346,12 @@ def cell_html(cell, model, renderer, lod, res_axis, pad_axis, root_dir):
                 f'<span class="vote-btn" data-rating="{r}">{r}</span>'
                 for r in (1,2,3,4,5)
             )
+            util_label = (f'util={util*100:.0f}%' if util > 0 else 'util=?')
+            if util > 0 and util < 0.5: cls.append('lowUtil')
             out.append(
                 f'<td class="{ " ".join(cls)}" data-cell-id="{html.escape(cell_id)}">'
                 f'{img_html}'
-                f'<div class="meta">inv={inv} str={stt} 0A={za}<br/>tex={tex:.0f} topFx={topfx}{"⛔" if cap else ""}</div>'
+                f'<div class="meta">inv={inv} str={stt} 0A={za} {util_label}<br/>tex={tex:.0f} topFx={topfx}{"⛔" if cap else ""}</div>'
                 f'<div class="vote-row">'
                 f'  <div class="vote-btns">{vote_buttons}</div>'
                 f'  <span class="tag-toggle" title="toggle tags">tags</span>'

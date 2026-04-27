@@ -189,6 +189,29 @@ namespace SashaRX.UnityMeshLab
                 uv2Snapshot       = uv2Snap,
                 trianglesSnapshot = trisSnap,
             };
+
+            // atlasUtilization = bbox area of UV2 in [0,1] space (1.0 = full atlas).
+            // Catches the "atlas only 25% filled" failure mode that shell-level
+            // metrics miss because individual triangles can be valid but the
+            // whole layout is squished into a corner.
+            if (uv2Snap != null && uv2Snap.Length > 0)
+            {
+                Vector2 mn = new Vector2(float.MaxValue, float.MaxValue);
+                Vector2 mx = new Vector2(float.MinValue, float.MinValue);
+                int nz = 0;
+                for (int i = 0; i < uv2Snap.Length; i++)
+                {
+                    if (uv2Snap[i].sqrMagnitude < 1e-12f) continue;
+                    mn = Vector2.Min(mn, uv2Snap[i]);
+                    mx = Vector2.Max(mx, uv2Snap[i]);
+                    nz++;
+                }
+                if (nz > 0)
+                {
+                    Vector2 sz = mx - mn;
+                    rec.atlasUtilization = Mathf.Max(0f, sz.x) * Mathf.Max(0f, sz.y);
+                }
+            }
             records.Add(rec);
         }
 
@@ -258,7 +281,7 @@ namespace SashaRX.UnityMeshLab
                 "overlapShellPairs,overlapTriangleCount,overlapSameSrcPairs," +
                 "texelDensityBadCount,texelDensityMedian," +
                 "symSplitFallbackCount,symSplitTotalCount," +
-                "topologyIterations,topologyFixed,topologyCapHit," +
+                "topologyIterations,topologyFixed,topologyCapHit,atlasUtilization," +
                 "preRepackOverlaps,postRepackOverlaps," +
                 "pipelineMs,repackMs,transferMs,validateMs");
 
@@ -311,6 +334,7 @@ namespace SashaRX.UnityMeshLab
                 sb.Append(r.topologyIterations.ToString(inv)).Append(',');
                 sb.Append(r.topologyFixed.ToString(inv)).Append(',');
                 sb.Append(r.topologyCapHit ? '1' : '0').Append(',');
+                sb.Append(r.atlasUtilization.ToString("R", inv)).Append(',');
                 sb.Append(preRepackOverlaps.ToString(inv)).Append(',');
                 sb.Append(postRepackOverlaps.ToString(inv)).Append(',');
                 sb.Append(pipelineMs.ToString(inv)).Append(',');
@@ -384,7 +408,8 @@ namespace SashaRX.UnityMeshLab
                 AppendJsonKv(sb, "symSplitTotalCount",   r.symSplitTotalCount);   sb.Append(", ");
                 AppendJsonKv(sb, "topologyIterations",   r.topologyIterations);   sb.Append(", ");
                 AppendJsonKv(sb, "topologyFixed",        r.topologyFixed);        sb.Append(", ");
-                AppendJsonKv(sb, "topologyCapHit",       r.topologyCapHit);
+                AppendJsonKv(sb, "topologyCapHit",       r.topologyCapHit);       sb.Append(", ");
+                AppendJsonKv(sb, "atlasUtilization",     r.atlasUtilization);
                 sb.Append("}");
                 if (i < records.Count - 1) sb.Append(',');
                 sb.Append('\n');
@@ -462,6 +487,9 @@ namespace SashaRX.UnityMeshLab
             public int symSplitFallbackCount, symSplitTotalCount;
             public int topologyIterations, topologyFixed;
             public bool topologyCapHit;
+
+            /// <summary>UV2 bbox area in [0,1] space; 1.0 = full atlas, 0.25 = quarter-filled.</summary>
+            public float atlasUtilization;
 
             // Snapshot of the result UV2 channel for post-run PNG rendering.
             // Not written to CSV/JSON — consumed only by WriteArtefacts.
