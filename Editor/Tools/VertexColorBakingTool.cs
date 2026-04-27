@@ -1,4 +1,5 @@
-// VertexAOTool.cs — Vertex AO baking tool (IUvTool tab).
+// VertexColorBakingTool.cs — Vertex color baking tool (IUvTool tab).
+// Bake modes: AO (GPU/CPU BVH ray tracing) and Solid Color (uniform fill).
 // GPU: non-blocking async BVH ray tracing via compute shader.
 // CPU: synchronous BVH ray tracing with Parallel.For.
 
@@ -12,14 +13,14 @@ using UnityEditor;
 
 namespace SashaRX.UnityMeshLab
 {
-    public class VertexAOTool : IUvTool
+    public class VertexColorBakingTool : IUvTool
     {
         UvToolContext ctx;
         UvCanvasView canvas;
         Action requestRepaint;
 
-        public string ToolName  => "Vertex AO";
-        public string ToolId    => "vertex_ao";
+        public string ToolName  => "Vertex Color Baking";
+        public string ToolId    => "vertex_color_baking";
         public int    ToolOrder => 50;
 
         public Action RequestRepaint { set => requestRepaint = value; }
@@ -78,6 +79,17 @@ namespace SashaRX.UnityMeshLab
         bool applySelectedSubmeshOnly;
         int selectedSubmeshIndex;
 
+        // ── Bake Kind (AO vs Solid Color) ──
+        internal enum BakeKind { AO = 0, SolidColor = 1 }
+        BakeKind bakeKind = BakeKind.AO;
+        static readonly string[] bakeKindLabels = { "AO", "Solid Color" };
+
+        // ── Solid Color variants (batch export) ──
+        List<VariantExportPipeline.Variant> variants = new List<VariantExportPipeline.Variant>
+        {
+            new VariantExportPipeline.Variant { color = Color.red, suffix = "Red" }
+        };
+
         // ── Hierarchy mode (no LODGroup, all descendant MeshRenderers as one batch) ──
         bool hierarchyMode;
         GameObject hierarchyRoot;
@@ -121,7 +133,7 @@ namespace SashaRX.UnityMeshLab
 
         // ── Lifecycle ──
 
-        internal static VertexAOTool ActiveInstance { get; private set; }
+        internal static VertexColorBakingTool ActiveInstance { get; private set; }
         internal static AOTargetChannel? LastAppliedTargetChannel { get; private set; }
 
         class LodBakeBatch
@@ -536,23 +548,194 @@ namespace SashaRX.UnityMeshLab
         public void OnDrawSidebar()
         {
             EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Vertex AO Baker", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Vertex Color Baking", EditorStyles.boldLabel);
+            EditorGUILayout.Space(4);
+
+            DrawBakeKindSelector();
             EditorGUILayout.Space(4);
 
             if (!DrawSelectionGate()) return;
 
-            DrawBakeSettings();
+            if (bakeKind == BakeKind.AO)
+            {
+                DrawBakeSettings();
 
-            EditorGUILayout.Space(8);
+                EditorGUILayout.Space(8);
 
-            DrawBakeActionsRow();
+                DrawBakeActionsRow();
 
-            if (bakedFinalAO == null || bakedFinalAO.Count == 0) return;
+                if (bakedFinalAO == null || bakedFinalAO.Count == 0) return;
 
-            DrawResults();
-            DrawPostProcessing();
-            DrawApplyFilters();
-            DrawApplyAndExportRow();
+                DrawResults();
+                DrawPostProcessing();
+                DrawApplyFilters();
+                DrawApplyAndExportRow();
+            }
+            else // BakeKind.SolidColor
+            {
+                DrawSolidColorSettings();
+                EditorGUILayout.Space(8);
+                DrawSolidBakeActionsRow();
+            }
+        }
+
+        void DrawBakeKindSelector()
+        {
+            EditorGUI.BeginChangeCheck();
+            int newKind = GUILayout.Toolbar((int)bakeKind, bakeKindLabels, GUILayout.Height(22));
+            if (EditorGUI.EndChangeCheck())
+            {
+                bakeKind = (BakeKind)newKind;
+                if (bakeKind == BakeKind.SolidColor && previewActive)
+                    RestorePreview();
+                requestRepaint?.Invoke();
+            }
+        }
+
+        void DrawSolidColorSettings()
+        {
+            EditorGUILayout.LabelField("Solid Color Variants", EditorStyles.boldLabel);
+
+            int? removeIndex = null;
+            for (int i = 0; i < variants.Count; i++)
+            {
+                var v = variants[i];
+                EditorGUILayout.BeginHorizontal();
+                v.color = EditorGUILayout.ColorField(GUIContent.none, v.color, true, true, false, GUILayout.Width(80));
+                v.suffix = EditorGUILayout.TextField(v.suffix);
+                using (new EditorGUI.DisabledScope(variants.Count <= 1))
+                {
+                    if (GUILayout.Button("−", GUILayout.Width(24))) removeIndex = i;
+                }
+                EditorGUILayout.EndHorizontal();
+                variants[i] = v; // struct write-back
+            }
+            if (removeIndex.HasValue) variants.RemoveAt(removeIndex.Value);
+
+            if (GUILayout.Button("+ Add variant"))
+            {
+                variants.Add(new VariantExportPipeline.Variant
+                {
+                    color  = Color.white,
+                    suffix = $"Variant{variants.Count + 1}"
+                });
+            }
+
+            string fbxPath = ctx?.SourceFbxPath;
+            string baseName = !string.IsNullOrEmpty(fbxPath)
+                ? System.IO.Path.GetFileNameWithoutExtension(fbxPath)
+                : "(no FBX)";
+            string preview = string.Join(", ", variants.Select(v => $"{baseName}_{v.suffix}.fbx"));
+            EditorGUILayout.LabelField($"→ {preview}", EditorStyles.miniLabel);
+            EditorGUILayout.HelpBox(
+                "Skips collision meshes. Existing files are overwritten — use git to revert.",
+                MessageType.None);
+        }
+
+        void DrawSolidBakeActionsRow()
+        {
+            var bgc = GUI.backgroundColor;
+            EditorGUILayout.BeginHorizontal();
+            GUI.backgroundColor = new Color(.4f, .8f, .4f);
+            if (GUILayout.Button("Bake (preview)", GUILayout.Height(28)))
+                ExecuteBakeFirstVariant();
+            GUI.backgroundColor = new Color(.4f, .7f, .95f);
+            if (GUILayout.Button("Bake & Export All", GUILayout.Height(28)))
+                ExecuteBakeAndExportVariants();
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+        }
+
+        void ExecuteBakeFirstVariant()
+        {
+            if (variants.Count == 0)
+            {
+                UvtLog.Warn("[Vertex Colors] No variants defined.");
+                return;
+            }
+            var entries = ActiveEntries()
+                .Where(e => e.include && e.renderer != null)
+                .ToList();
+            if (entries.Count == 0)
+            {
+                UvtLog.Warn("[Vertex Colors] No meshes selected.");
+                return;
+            }
+            var first = variants[0];
+            int painted = VariantExportPipeline.BakeSolidColorOnEntries(entries, first.color);
+            if (painted == 0)
+            {
+                UvtLog.Warn("[Vertex Colors] Nothing painted (all collision, excluded, or empty).");
+                return;
+            }
+            string hex = ColorUtility.ToHtmlStringRGBA(first.color);
+            UvtLog.Info($"[Vertex Colors] Preview: '{first.suffix}' #{hex} on {painted} mesh(es).");
+            requestRepaint?.Invoke();
+        }
+
+        void ExecuteBakeAndExportVariants()
+        {
+            if (variants.Count == 0)
+            {
+                UvtLog.Warn("[Vertex Colors] No variants defined.");
+                return;
+            }
+            var entries = ActiveEntries()
+                .Where(e => e.include && e.renderer != null)
+                .ToList();
+            if (entries.Count == 0)
+            {
+                UvtLog.Warn("[Vertex Colors] No meshes selected.");
+                return;
+            }
+
+            string sourceFbxPath = ctx?.SourceFbxPath;
+            if (string.IsNullOrEmpty(sourceFbxPath))
+            {
+                UvtLog.Error("[Vertex Colors] No source FBX path resolved on the current selection.");
+                return;
+            }
+
+            var hub = Resources.FindObjectsOfTypeAll<UvToolHub>();
+            if (hub.Length == 0)
+            {
+                UvtLog.Error("[Vertex Colors] UvToolHub not found.");
+                return;
+            }
+            var fbxExporter = hub[0].FindTool<LightmapTransferTool>();
+            if (fbxExporter == null)
+            {
+                UvtLog.Error("[Vertex Colors] LightmapTransferTool not found.");
+                return;
+            }
+
+            var sourcePrefab = ResolveSourcePrefab();
+            if (sourcePrefab == null)
+                UvtLog.Warn("[Vertex Colors] No source prefab on selection — exporting FBX only.");
+
+            var results = VariantExportPipeline.ExportVariants(
+                fbxExporter, sourceFbxPath, sourcePrefab,
+                entries, variants,
+                VariantExportPipeline.ConflictPolicy.Overwrite);
+
+            int ok = results.Count(r => r.ok);
+            int fail = results.Count - ok;
+            UvtLog.Info($"[Vertex Colors] Variant export — {ok} ok, {fail} failed (of {variants.Count}).");
+            foreach (var r in results)
+                if (!r.ok) UvtLog.Error($"[Vertex Colors] '{r.suffix}': {r.error}");
+
+            requestRepaint?.Invoke();
+        }
+
+        GameObject ResolveSourcePrefab()
+        {
+            GameObject go = ctx?.LodGroup != null ? ctx.LodGroup.gameObject : null;
+            if (go == null && ctx?.MeshEntries != null && ctx.MeshEntries.Count > 0)
+                go = ctx.MeshEntries[0].renderer != null ? ctx.MeshEntries[0].renderer.gameObject : null;
+            if (go == null) return null;
+            var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(go);
+            if (instanceRoot == null) return null;
+            return PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot) as GameObject;
         }
 
         // Bake / Load / Rebake Selected buttons, or progress + cancel while
