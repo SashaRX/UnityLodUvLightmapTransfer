@@ -2680,11 +2680,16 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // Normalize direct child LOD names to contiguous _LOD0.._LODN suffixes.
-            // This prevents importer-side warnings ("_LOD1 found but no _LOD0")
-            // when source names contained invalid characters (e.g. dots) and were
-            // sanitized inconsistently across tools.
-            var directLodChildren = new List<(Transform transform, int index)>();
+            // Normalize direct child LOD names to contiguous _LOD0.._LODN suffixes
+            // PER GROUP. Group key = the child's own prefix before "_LOD<N>" — so
+            // hierarchies with multiple LOD chains under one root (e.g.
+            // <Root>/<A>_LOD0..2 + <Root>/<B>_LOD0..2) keep their distinct
+            // prefixes instead of being collapsed into one <Root>_LOD0..N chain.
+            // Prevents importer warnings ("_LOD1 found but no _LOD0") when source
+            // names contained invalid characters (e.g. dots) and were sanitized
+            // inconsistently across tools.
+            var groupedLodChildren = new Dictionary<string, List<(Transform transform, int index, int siblingIndex)>>();
+            var groupOrder = new List<string>();
             foreach (Transform child in root.transform)
             {
                 if (MeshHygieneUtility.IsCollisionNodeName(child.name))
@@ -2699,33 +2704,41 @@ namespace SashaRX.UnityMeshLab
 
                 var match = System.Text.RegularExpressions.Regex.Match(
                     child.name,
-                    @"_LOD(\d+)$",
+                    @"^(.+)_LOD(\d+)$",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (!match.Success)
                     continue;
 
                 int parsedIndex;
-                if (!int.TryParse(match.Groups[1].Value, out parsedIndex))
+                if (!int.TryParse(match.Groups[2].Value, out parsedIndex))
                     continue;
 
-                directLodChildren.Add((child, parsedIndex));
+                string groupPrefix = match.Groups[1].Value;
+                if (!groupedLodChildren.TryGetValue(groupPrefix, out var list))
+                {
+                    list = new List<(Transform, int, int)>();
+                    groupedLodChildren[groupPrefix] = list;
+                    groupOrder.Add(groupPrefix);
+                }
+                list.Add((child, parsedIndex, child.GetSiblingIndex()));
             }
 
-            if (directLodChildren.Count > 0)
+            foreach (var groupPrefix in groupOrder)
             {
-                directLodChildren.Sort((a, b) =>
+                var list = groupedLodChildren[groupPrefix];
+                list.Sort((a, b) =>
                 {
                     int cmp = a.index.CompareTo(b.index);
-                    return cmp != 0 ? cmp : a.transform.GetSiblingIndex().CompareTo(b.transform.GetSiblingIndex());
+                    return cmp != 0 ? cmp : a.siblingIndex.CompareTo(b.siblingIndex);
                 });
 
-                for (int i = 0; i < directLodChildren.Count; i++)
+                for (int i = 0; i < list.Count; i++)
                 {
-                    string normalizedName = sanitizedBaseName + "_LOD" + i;
-                    string oldName = directLodChildren[i].transform.name;
+                    string normalizedName = groupPrefix + "_LOD" + i;
+                    string oldName = list[i].transform.name;
                     if (oldName != normalizedName)
                     {
-                        directLodChildren[i].transform.name = normalizedName;
+                        list[i].transform.name = normalizedName;
                         renameMap[oldName] = normalizedName;
                     }
                 }
