@@ -1368,7 +1368,7 @@ namespace SashaRX.UnityMeshLab
                 "Overwrite", "Cancel"))
                 return;
 
-            ExportVertexColorsToFbxCore(sourceFbxPath, ctx.MeshEntries, normalizeHierarchy: true);
+            ExportVertexColorsToFbxCore(sourceFbxPath, ctx.MeshEntries, normalizeHierarchy: false);
 #else
             UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
 #endif
