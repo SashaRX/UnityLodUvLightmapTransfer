@@ -76,9 +76,13 @@ namespace SashaRX.UnityMeshLab
             return painted.Count;
         }
 
-        // Run a batch of variants against the same source FBX/prefab. All
-        // disk writes are wrapped in StartAssetEditing/StopAssetEditing so
-        // Unity refreshes once at the end.
+        // Run a batch of variants against the same source FBX/prefab. Each
+        // variant must finish its export + import + prefab clone cycle
+        // before the next one starts — wrapping the loop in
+        // StartAssetEditing/StopAssetEditing would defer ImportAsset and
+        // SaveAndReimport, so BuildPrefabClone would observe the just-
+        // exported FBX as "no meshes" and fail. A single Refresh at the
+        // end keeps the project view in sync without batching imports.
         public static IList<Result> ExportVariants(
             LightmapTransferTool fbxExporter,
             string sourceFbxPath,
@@ -141,13 +145,11 @@ namespace SashaRX.UnityMeshLab
 
             try
             {
-                AssetDatabase.StartAssetEditing();
                 foreach (var v in variants)
                     results.Add(ExportSingleVariant(fbxExporter, sourceFbxPath, sourcePrefab, entries, v, conflictPolicy));
             }
             finally
             {
-                AssetDatabase.StopAssetEditing();
                 AssetDatabase.Refresh();
             }
             return results;
