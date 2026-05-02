@@ -1952,7 +1952,14 @@ namespace SashaRX.UnityMeshLab
                     var meshRendererTemplates = new Dictionary<string, Renderer>();
                     foreach (var (entry, resultMesh) in entries)
                     {
+                        string meshName = ResolveExportMeshName(entry, resultMesh);
                         var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
+                        // Without an explicit name, Object.Instantiate produces "X(Clone)"
+                        // and Unity's FBX Exporter falls back to the FBX scene name
+                        // ("Scene") when writing the FbxMesh node — every reimported mesh
+                        // ends up named "Scene". Pin the canonical name now so the FBX
+                        // node and post-reimport mesh asset stay aligned with the source.
+                        exportMesh.name = meshName;
                         // Copy UV channels from fbxMesh first (base UVs),
                         // then from originalMesh (has AO and other tool modifications).
                         if (entry.fbxMesh != null)
@@ -1974,7 +1981,6 @@ namespace SashaRX.UnityMeshLab
                             if (uv2Donor != null)
                                 MergeUvComponentFromDonor(exportMesh, uv2Donor, aoUvChannel, aoUvComponent);
                         }
-                        string meshName = ResolveExportMeshName(entry, resultMesh);
                         meshReplacements[meshName] = exportMesh;
                         if (entry.renderer != null)
                             meshRendererTemplates[meshName] = entry.renderer;
@@ -2030,6 +2036,9 @@ namespace SashaRX.UnityMeshLab
                         }
                         var newMf = child.AddComponent<MeshFilter>();
                         var exportMesh = UnityEngine.Object.Instantiate(resultMesh);
+                        // See the matching note in the replace-existing branch above:
+                        // empty/Clone names cause Unity FBX Exporter to write "Scene".
+                        exportMesh.name = meshName;
                         if (entry.fbxMesh != null)
                             PreserveUvChannels(exportMesh, entry.fbxMesh);
                         if (entry.originalMesh != null && entry.originalMesh != entry.fbxMesh)
