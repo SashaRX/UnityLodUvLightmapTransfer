@@ -1669,6 +1669,317 @@ namespace SashaRX.UnityMeshLab
 #endif
         }
 
+        // ─────────────────────────────────────────────────────────────────
+        // Isolated-channel export (per FbxExportIntent)
+        //
+        // Re-saves the source FBX overwriting only the per-vertex channels
+        // listed in the intent. All other data — node names, hierarchy,
+        // transforms, material assignments, untouched UV channels, vertex
+        // colors, normals, tangents — is inherited from the source FBX
+        // asset on disk via clone-and-snapshot. Use this entry point when
+        // a tool changed exactly one aspect of the mesh (e.g. only UV2
+        // from atlas pack) and must not collateral-mutate the rest.
+        // ─────────────────────────────────────────────────────────────────
+
+        sealed class IsolatedExportSnapshot
+        {
+            public int vertexCount;
+            public Color32[] colors32;
+            public Color[]   colors;
+            public Vector3[] normals;
+            public Vector4[] tangents;
+            public readonly Vector2[][] uvs = new Vector2[8][];
+        }
+
+        static IsolatedExportSnapshot BuildIsolatedSnapshot(Mesh source, FbxExportIntent intent)
+        {
+            var snap = new IsolatedExportSnapshot { vertexCount = source.vertexCount };
+            if ((intent & FbxExportIntent.VertexColors) != 0)
+            {
+                var c32 = source.colors32;
+                if (c32 != null && c32.Length == source.vertexCount)
+                    snap.colors32 = c32;
+                else
+                {
+                    var c = source.colors;
+                    if (c != null && c.Length == source.vertexCount)
+                        snap.colors = c;
+                }
+            }
+            if ((intent & FbxExportIntent.Normals) != 0)
+            {
+                var n = source.normals;
+                if (n != null && n.Length == source.vertexCount)
+                    snap.normals = n;
+            }
+            if ((intent & FbxExportIntent.Tangents) != 0)
+            {
+                var t = source.tangents;
+                if (t != null && t.Length == source.vertexCount)
+                    snap.tangents = t;
+            }
+            for (int ch = 0; ch < 8; ch++)
+            {
+                if (!intent.IncludesUv(ch)) continue;
+                var list = new List<Vector2>();
+                source.GetUVs(ch, list);
+                if (list.Count == source.vertexCount)
+                    snap.uvs[ch] = list.ToArray();
+            }
+            return snap;
+        }
+
+        static int CopyIsolatedSnapshotsToClone(
+            GameObject tempRoot,
+            Dictionary<string, IsolatedExportSnapshot> snapshots)
+        {
+            if (snapshots == null) return 0;
+            int updated = 0;
+            int visited = 0;
+            int matched = 0;
+            foreach (var cloneMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (cloneMf == null || cloneMf.sharedMesh == null) continue;
+                visited++;
+                if (!snapshots.TryGetValue(cloneMf.sharedMesh.name, out var snap)) continue;
+                matched++;
+
+                if (snap.vertexCount != cloneMf.sharedMesh.vertexCount)
+                {
+                    UvtLog.Warn($"[FBX Export] Skip '{cloneMf.sharedMesh.name}': vertex count mismatch (scene={snap.vertexCount}, clone={cloneMf.sharedMesh.vertexCount}).");
+                    continue;
+                }
+
+                // Clone before mutating — never write into the live FBX
+                // sub-asset shared by other scene MeshFilters.
+                var cloneMesh = UnityEngine.Object.Instantiate(cloneMf.sharedMesh);
+                cloneMesh.name = cloneMf.sharedMesh.name;
+
+                if (snap.colors32 != null) { cloneMesh.colors32 = snap.colors32; updated++; }
+                else if (snap.colors != null) { cloneMesh.colors = snap.colors; updated++; }
+                if (snap.normals != null)  { cloneMesh.normals  = snap.normals;  updated++; }
+                if (snap.tangents != null) { cloneMesh.tangents = snap.tangents; updated++; }
+                for (int ch = 0; ch < 8; ch++)
+                {
+                    if (snap.uvs[ch] == null) continue;
+                    if (snap.uvs[ch].Length != cloneMesh.vertexCount) continue;
+                    cloneMesh.SetUVs(ch, snap.uvs[ch]);
+                    updated++;
+                }
+
+                cloneMf.sharedMesh = cloneMesh;
+            }
+            UvtLog.Verbose($"[FBX Export] CopyIsolatedSnapshotsToClone: visited={visited}, matched={matched}, updates={updated}.");
+            return updated;
+        }
+
+        /// <summary>
+        /// Re-save the FBX at <paramref name="sourceFbxPath"/> overwriting
+        /// only the per-vertex channels listed in <paramref name="intent"/>.
+        /// Mesh names, hierarchy, transforms, material assignments, and all
+        /// untouched per-vertex channels are preserved from the source FBX.
+        /// </summary>
+        /// <param name="sourceFbxPath">Project path to the FBX to overwrite.</param>
+        /// <param name="entries">Mesh entries supplying source data. Matched
+        /// against the FBX clone by sub-asset name.</param>
+        /// <param name="intent">Channels the caller is allowed to write.
+        /// <see cref="FbxExportIntent.None"/> is a no-op (logged + returns false).</param>
+        public bool ExportIsolatedChannelsToFbx(
+            string sourceFbxPath,
+            IEnumerable<MeshEntry> entries,
+            FbxExportIntent intent)
+        {
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (intent == FbxExportIntent.None)
+            {
+                UvtLog.Warn("[FBX Export] ExportIsolatedChannelsToFbx called with FbxExportIntent.None — nothing to write.");
+                return false;
+            }
+            if (string.IsNullOrEmpty(sourceFbxPath))
+            {
+                UvtLog.Error("[FBX Export] ExportIsolatedChannelsToFbx: missing source FBX path.");
+                return false;
+            }
+            var list = entries?.ToList();
+            if (list == null || list.Count == 0)
+            {
+                UvtLog.Warn($"[FBX Export] ExportIsolatedChannelsToFbx: no entries for '{sourceFbxPath}'.");
+                return false;
+            }
+            RestoreAllPreviews();
+            return ExportIsolatedChannelsToFbxCore(sourceFbxPath, list, intent, outputFbxPathOverride: null);
+#else
+            UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
+            return false;
+#endif
+        }
+
+        bool ExportIsolatedChannelsToFbxCore(
+            string sourceFbxPath,
+            IEnumerable<MeshEntry> entries,
+            FbxExportIntent intent,
+            string outputFbxPathOverride)
+        {
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (string.IsNullOrEmpty(sourceFbxPath) || entries == null) return false;
+
+            string targetFbxPath = string.IsNullOrEmpty(outputFbxPathOverride) ? sourceFbxPath : outputFbxPathOverride;
+            bool isVariantExport = !string.IsNullOrEmpty(outputFbxPathOverride)
+                && !string.Equals(outputFbxPathOverride, sourceFbxPath, StringComparison.OrdinalIgnoreCase);
+
+            // Snapshot pre-export. Captures only fields covered by intent.
+            // Phase 1 (importer prep) can trigger a reimport that resets the
+            // shared FBX sub-asset buffers in place — keying snapshots by
+            // sub-asset name lets us look up the original data after the
+            // reimport, when the in-memory mesh is back to its on-disk state.
+            var snapshots = new Dictionary<string, IsolatedExportSnapshot>(StringComparer.Ordinal);
+            foreach (var e in entries)
+            {
+                if (e == null || !e.include) continue;
+                Mesh sm = e.originalMesh ?? e.fbxMesh;
+                if (sm == null || string.IsNullOrEmpty(sm.name)) continue;
+                snapshots[sm.name] = BuildIsolatedSnapshot(sm, intent);
+            }
+            if (snapshots.Count == 0)
+            {
+                UvtLog.Warn($"[FBX Export] ExportIsolatedChannelsToFbx: no source meshes had data for intent {intent}.");
+                return false;
+            }
+
+            // ── Phase 1: Prepare importer (single reimport, scoped to intent) ──
+            ModelImporter srcImporter = null;
+            bool madeReadable = false;
+            if (!isVariantExport)
+            {
+                srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
+                bool needsReimport = false;
+                if (srcImporter != null)
+                {
+                    // generateSecondaryUV writes Unity UV channel 1.
+                    // Lock only when the intent overwrites that channel.
+                    if (intent.IncludesUv(1) && srcImporter.generateSecondaryUV)
+                        { srcImporter.generateSecondaryUV = false; needsReimport = true; }
+                    // weld / compression / optimization renumber vertices →
+                    // break per-vertex data. Lock when intent writes any
+                    // per-vertex channel.
+                    if (intent.TouchesPerVertex())
+                    {
+                        if (srcImporter.weldVertices)
+                            { srcImporter.weldVertices = false; needsReimport = true; }
+                        if (srcImporter.meshCompression != ModelImporterMeshCompression.Off)
+                            { srcImporter.meshCompression = ModelImporterMeshCompression.Off; needsReimport = true; }
+                        if (srcImporter.meshOptimizationFlags != 0)
+                            { srcImporter.meshOptimizationFlags = 0; needsReimport = true; }
+                    }
+                    if (!srcImporter.isReadable)
+                        { srcImporter.isReadable = true; needsReimport = true; madeReadable = true; }
+                    if (needsReimport)
+                    {
+                        Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
+                        srcImporter.SaveAndReimport();
+                    }
+                }
+            }
+
+            // ── Phase 2: Build export hierarchy ──
+            var fbxAsset = AssetDatabase.LoadMainAssetAtPath(sourceFbxPath) as GameObject;
+            if (fbxAsset == null)
+            {
+                UvtLog.Error($"[FBX Export] Cannot load FBX asset at '{sourceFbxPath}'.");
+                return false;
+            }
+
+            // Clone the source FBX prefab as-is — preserves names, hierarchy,
+            // transforms, materials, and every channel the intent does not
+            // cover. CopyIsolatedSnapshotsToClone overwrites only the
+            // intended channels on freshly cloned per-node meshes.
+            var tempRoot = UnityEngine.Object.Instantiate(fbxAsset);
+            tempRoot.name = fbxAsset.name;
+
+            int updated = 0;
+            bool exported = false;
+            try
+            {
+                updated = CopyIsolatedSnapshotsToClone(tempRoot, snapshots);
+                if (updated == 0)
+                {
+                    UvtLog.Warn($"[FBX Export] No matching meshes in clone for intent {intent}.");
+                    return false;
+                }
+
+                // ── Phase 3: Export FBX ──
+                string fullPath = System.IO.Path.GetFullPath(targetFbxPath);
+                string pathHash = Math.Abs(fullPath.GetHashCode()).ToString("X8");
+                string metaBak = System.IO.Path.Combine(
+                    System.IO.Path.GetTempPath(),
+                    System.IO.Path.GetFileName(fullPath) + "." + pathHash + ".meta.bak");
+                bool metaBackedUp = System.IO.File.Exists(fullPath + ".meta");
+                if (metaBackedUp)
+                    System.IO.File.Copy(fullPath + ".meta", metaBak, true);
+
+                var exportOptions = new UnityEditor.Formats.Fbx.Exporter.ExportModelOptions
+                    { ExportFormat = UnityEditor.Formats.Fbx.Exporter.ExportFormat.Binary };
+
+                // Signal the UV2 postprocessor to skip sidecar UV2 injection
+                // on the reimport triggered by this write — otherwise an
+                // isolated UV2 export would be immediately overwritten by
+                // stale sidecar data.
+                Uv2AssetPostprocessor.fbxOverwritePaths.Add(targetFbxPath);
+
+                UnityEditor.Formats.Fbx.Exporter.ModelExporter.ExportObjects(
+                    targetFbxPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
+
+                UvtLog.Info($"[FBX Export] Isolated channels {intent} ({updated} updates) -> {targetFbxPath}");
+                exported = true;
+
+                if (metaBackedUp && System.IO.File.Exists(metaBak))
+                {
+                    System.IO.File.Copy(metaBak, fullPath + ".meta", true);
+                    System.IO.File.Delete(metaBak);
+                }
+            }
+            catch (Exception ex)
+            {
+                Uv2AssetPostprocessor.fbxOverwritePaths.Remove(targetFbxPath);
+                UvtLog.Error("[FBX Export] Isolated channel export failed: " + ex);
+                return false;
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(tempRoot);
+            }
+
+            // ── Phase 4: Reimport + relink ──
+            // Variant export skips scene relink — live scene must keep
+            // showing source meshes; only the new FBX needs to be picked up.
+            AssetDatabase.Refresh();
+            if (!isVariantExport && ctx?.LodGroup != null)
+            {
+                // No node renames — isolated export never restructures the
+                // hierarchy. Pass null so RelinkSceneMeshReferences re-binds
+                // by sub-asset name without consulting a rename map.
+                RelinkSceneMeshReferences(sourceFbxPath, null, ctx.LodGroup);
+                ctx.Refresh(ctx.LodGroup);
+            }
+
+            // ── Phase 5: Restore importer settings + working copies ──
+            if (!isVariantExport)
+            {
+                if (madeReadable && srcImporter != null)
+                {
+                    srcImporter.isReadable = false;
+                    Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
+                    srcImporter.SaveAndReimport();
+                }
+                RestoreWorkingCopiesToScene();
+            }
+            return exported;
+#else
+            UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
+            return false;
+#endif
+        }
+
         string ResolveFbxPath()
         {
             string path = ctx.SourceFbxPath;
