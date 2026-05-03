@@ -317,8 +317,19 @@ namespace SashaRX.UnityMeshLab
 
             DrawRootRow();
 
+            // Indent each Dummy block so the hierarchy reads as a tree
+            // (Root at the left edge → Dummy children visually nested under
+            // it). Without this the helpBoxes float at the same x as Root
+            // and the structure looks flat.
             foreach (var dummy in hierarchyDummies)
+            {
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(HierarchyDummyIndent);
+                EditorGUILayout.BeginVertical();
                 DrawDummyBlock(dummy);
+                EditorGUILayout.EndVertical();
+                EditorGUILayout.EndHorizontal();
+            }
         }
 
         void DrawRootRow()
@@ -330,14 +341,19 @@ namespace SashaRX.UnityMeshLab
             DrawEditableNameField(rootGo, GUILayout.MinWidth(120));
             GUILayout.FlexibleSpace();
 
-            // Apply Names commits pending edits AND rebuilds leaf names from the
-            // current Root + Dummy values. Stays enabled even when no pending
-            // edits exist so the user can resync names after Insert / Delete.
+            // Rebuild Names commits pending edits AND rebuilds child LOD/COL
+            // names from the canonical "<prefix>_LOD{N}" / "<prefix>_COL[_Hull{N}]"
+            // pattern. Resolves duplicate names left over from Insert / Delete.
+            // Stays enabled even when no pending edits so users can resync.
             bool hasPending = pendingNames != null && pendingNames.Count > 0;
             var bgc = GUI.backgroundColor;
             GUI.backgroundColor = new Color(0.40f, 0.80f, 0.40f);
-            string label = hasPending ? $"Apply Names ({pendingNames.Count})" : "Apply Names";
-            if (GUILayout.Button(label, GUILayout.Height(20), GUILayout.Width(140)))
+            string label = hasPending ? $"Rebuild Names ({pendingNames.Count})" : "Rebuild Names";
+            var tooltip = new GUIContent(label,
+                "Commit pending Root/Dummy renames AND rebuild every child name from "
+                + "<Root>/<Dummy>_LOD{slot} (and _COL / _COL_Hull{N}). Use this to fix "
+                + "duplicate _LOD{N} names that appear after inserting or deleting LODs.");
+            if (GUILayout.Button(tooltip, GUILayout.Height(20), GUILayout.Width(140)))
                 ApplyPendingNames();
             GUI.backgroundColor = bgc;
             EditorGUILayout.EndHorizontal();
@@ -434,7 +450,7 @@ namespace SashaRX.UnityMeshLab
             {
                 EditorGUILayout.Space(2);
                 EditorGUILayout.HelpBox(
-                    "Pending rename — child names don't match Root/Dummy. Click Apply Names to commit.",
+                    "Child names don't match Root/Dummy. Click Rebuild Names to renumber.",
                     MessageType.None);
             }
 
@@ -442,6 +458,7 @@ namespace SashaRX.UnityMeshLab
         }
 
         const float HierarchyRowIndent = 10f;
+        const float HierarchyDummyIndent = 18f;
 
         // Returns true when the operation invalidates the UI for this frame.
         bool DrawLodRow(HierarchyDummy dummy, HierarchyLodRow lod)
@@ -452,18 +469,18 @@ namespace SashaRX.UnityMeshLab
             bool fresh = freshRendererIds != null && freshRendererIds.Contains(rid);
             bool stale = !fresh && IsLodRowStale(dummy, lod);
 
-            string nameLabel = (fresh ? "● " : "") + lod.renderer.gameObject.name;
-
-            // Row A: name + actions
+            // Row A: status marker + name + actions
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
+            DrawStatusMarker(fresh, stale);
 
             var prevBg = GUI.backgroundColor;
             if (fresh)
-                GUI.backgroundColor = new Color(1.55f, 0.85f, 0.30f);   // bright orange — just inserted/regen
+                GUI.backgroundColor = new Color(1.0f, 0.55f, 0.10f);    // bright orange — just inserted/regen
             else if (stale)
-                GUI.backgroundColor = new Color(1.30f, 1.05f, 0.55f);   // pale amber — name out of sync
-            EditorGUILayout.LabelField(nameLabel, EditorStyles.textField, GUILayout.MinWidth(120));
+                GUI.backgroundColor = new Color(0.95f, 0.78f, 0.30f);   // amber — name out of sync
+            EditorGUILayout.LabelField(lod.renderer.gameObject.name,
+                EditorStyles.textField, GUILayout.MinWidth(120));
             GUI.backgroundColor = prevBg;
             GUILayout.FlexibleSpace();
 
@@ -546,12 +563,13 @@ namespace SashaRX.UnityMeshLab
 
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
+            DrawStatusMarker(false, stale);
             var prevBg = GUI.backgroundColor;
-            // Stale COL → amber. Otherwise tint subtly green to match the
-            // collision palette already used in Hierarchy.
+            // Stale COL → amber. Otherwise tint green to match the collision
+            // palette used elsewhere.
             GUI.backgroundColor = stale
-                ? new Color(1.30f, 1.05f, 0.55f)
-                : new Color(0.70f, 1.05f, 0.85f);
+                ? new Color(0.95f, 0.78f, 0.30f)
+                : new Color(0.55f, 0.95f, 0.70f);
             EditorGUILayout.LabelField(col.colTransform.gameObject.name,
                 EditorStyles.textField, GUILayout.MinWidth(120));
             GUI.backgroundColor = prevBg;
@@ -712,36 +730,7 @@ namespace SashaRX.UnityMeshLab
             }
 
             // Step 2: rebuild leaf names from the current Root + Dummy names.
-            if (hierarchyDummies == null) RebuildHierarchyView();
-            string rootName = ctx.LodGroup.gameObject.name;
-            foreach (var dummy in hierarchyDummies)
-            {
-                if (dummy.dummy == null) continue;
-                string prefix = dummy.isRoot ? rootName : dummy.dummy.name;
-                if (string.IsNullOrEmpty(prefix)) prefix = "Group";
-
-                for (int i = 0; i < dummy.lods.Count; i++)
-                {
-                    var lod = dummy.lods[i];
-                    if (lod.renderer == null) continue;
-                    string desired = $"{prefix}_LOD{lod.lodIndex}";
-                    if (lod.renderer.gameObject.name == desired) continue;
-                    Undo.RecordObject(lod.renderer.gameObject, "Rename LOD");
-                    lod.renderer.gameObject.name = desired;
-                }
-
-                for (int i = 0; i < dummy.cols.Count; i++)
-                {
-                    var col = dummy.cols[i];
-                    if (col.colTransform == null) continue;
-                    string desired = dummy.cols.Count == 1
-                        ? $"{prefix}_COL"
-                        : $"{prefix}_COL_Hull{i}";
-                    if (col.colTransform.gameObject.name == desired) continue;
-                    Undo.RecordObject(col.colTransform.gameObject, "Rename COL");
-                    col.colTransform.gameObject.name = desired;
-                }
-            }
+            RebuildLeafNamesNoUndoGroup();
 
             Undo.CollapseUndoOperations(undoGroup);
             buildIntent |= FbxExportIntent.Hierarchy;
@@ -942,12 +931,19 @@ namespace SashaRX.UnityMeshLab
                 | FbxExportIntent.AnyUv | FbxExportIntent.Normals
                 | FbxExportIntent.Tangents | FbxExportIntent.VertexColors;
 
+            // Refresh + rebuild leaf names so the new LOD lands at its slot's
+            // canonical name and any LODs that shifted down get renumbered
+            // automatically — no manual Rebuild Names step required.
+            ctx.LodGroup.RecalculateBounds();
+            ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
+            RebuildLeafNamesNoUndoGroup();
+
             Undo.CollapseUndoOperations(undoGroup);
 
             UvtLog.Info($"[LightmapUV] Inserted LOD{targetIdx} '{go.name}' (quality {quality:P0}, "
                 + $"{res.originalTriCount} → {res.simplifiedTriCount} tris)");
 
-            ctx.LodGroup.RecalculateBounds();
             ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
             requestRepaint?.Invoke();
@@ -989,13 +985,19 @@ namespace SashaRX.UnityMeshLab
             if (lod.renderer != null && lod.renderer.gameObject != null)
                 Undo.DestroyObjectImmediate(lod.renderer.gameObject);
 
+            // Refresh + rebuild leaf names so the slot indices and GameObject
+            // names stay in sync without a manual Rebuild Names click.
+            ctx.LodGroup.RecalculateBounds();
+            ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
+            RebuildLeafNamesNoUndoGroup();
+
             Undo.CollapseUndoOperations(undoGroup);
 
             buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup;
 
             UvtLog.Info($"[LightmapUV] Removed LOD{lod.lodIndex} from '{dummy.dummy.name}'.");
 
-            ctx.LodGroup.RecalculateBounds();
             ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
             requestRepaint?.Invoke();
@@ -1013,6 +1015,65 @@ namespace SashaRX.UnityMeshLab
             if (ctx.LodGroup != null) ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
             requestRepaint?.Invoke();
+        }
+
+        // ── Leaf rename: rebuild every LOD/COL GameObject name from the
+        // canonical "<prefix>_LOD{N}" / "<prefix>_COL[_Hull{N}]" pattern.
+        // Caller is responsible for the surrounding Undo group; the rename
+        // ops are recorded with Undo.RecordObject so they collapse cleanly
+        // alongside the structural mutation that triggered them.
+        void RebuildLeafNamesNoUndoGroup()
+        {
+            if (ctx?.LodGroup == null) return;
+            if (hierarchyDummies == null) RebuildHierarchyView();
+            if (hierarchyDummies == null) return;
+
+            string rootName = ctx.LodGroup.gameObject.name;
+            foreach (var dummy in hierarchyDummies)
+            {
+                if (dummy.dummy == null) continue;
+                string prefix = dummy.isRoot ? rootName : dummy.dummy.name;
+                if (string.IsNullOrEmpty(prefix)) prefix = "Group";
+
+                for (int i = 0; i < dummy.lods.Count; i++)
+                {
+                    var lod = dummy.lods[i];
+                    if (lod.renderer == null) continue;
+                    string desired = $"{prefix}_LOD{lod.lodIndex}";
+                    if (lod.renderer.gameObject.name == desired) continue;
+                    Undo.RecordObject(lod.renderer.gameObject, "Rename LOD");
+                    lod.renderer.gameObject.name = desired;
+                }
+
+                for (int i = 0; i < dummy.cols.Count; i++)
+                {
+                    var col = dummy.cols[i];
+                    if (col.colTransform == null) continue;
+                    string desired = dummy.cols.Count == 1
+                        ? $"{prefix}_COL"
+                        : $"{prefix}_COL_Hull{i}";
+                    if (col.colTransform.gameObject.name == desired) continue;
+                    Undo.RecordObject(col.colTransform.gameObject, "Rename COL");
+                    col.colTransform.gameObject.name = desired;
+                }
+            }
+        }
+
+        // ── Status marker: small coloured square painted at the start of a row. ──
+        // Drawn via GetRect+DrawRect (a guaranteed-rendered rect from the layout)
+        // so the indicator survives nested helpBox layouts that swallow post-paint
+        // strokes elsewhere.
+        static void DrawStatusMarker(bool fresh, bool stale)
+        {
+            const float w = 6f;
+            const float h = 18f;
+            var rect = GUILayoutUtility.GetRect(w, h, GUILayout.Width(w), GUILayout.Height(h));
+            if (Event.current.type != EventType.Repaint) return;
+            Color color;
+            if (fresh) color = new Color(1f, 0.50f, 0.05f);      // bright orange — just inserted / regenerated
+            else if (stale) color = new Color(0.95f, 0.75f, 0.20f); // amber — name out of sync
+            else color = new Color(0.30f, 0.30f, 0.30f, 0.35f);  // subtle gutter
+            EditorGUI.DrawRect(new Rect(rect.x, rect.y + 2, w - 1, h - 4), color);
         }
 
         // ── Pre-Apply staleness detection ──
