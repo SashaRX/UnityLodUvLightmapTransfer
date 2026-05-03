@@ -1864,7 +1864,7 @@ namespace SashaRX.UnityMeshLab
             bool restoreMeshCompression = false;
             bool restoreMeshOptimization = false;
             ModelImporterMeshCompression originalMeshCompression = ModelImporterMeshCompression.Off;
-            int originalMeshOptimizationFlags = 0;
+            MeshOptimizationFlags originalMeshOptimizationFlags = 0;
             if (!isVariantExport)
             {
                 srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
