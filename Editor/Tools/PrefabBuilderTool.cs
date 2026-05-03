@@ -1,12 +1,18 @@
 // PrefabBuilderTool.cs — Prefab Builder tool (IUvTool tab).
-// Provides 3D scene preview of mesh channels, edge topology, and problem areas.
-// PR #1: preview modes only. PR #2: cleanup scan/fix migration. PR #3: LOD + collision management.
+// Sidebar layout (PR-1):
+//   • Scene preview toolbar (Off / Vert Colors / Normals / Tangents / UV0-3 / Edges / Problems)
+//   • Hierarchy: Root + Apply Names + per-Dummy blocks (LOD rows + COL rows + channel badges)
+//   • Legacy Collision / Split / Merge / Mesh Info / Edge / Problem sections
+//
+// PR-2 will pull tool settings (LOD generation, transfer, collider, VC bake) into a
+// right-side stack and migrate the legacy sections out of the sidebar. PR-3 adds the
+// Build & Save bottom bar with pre-flight validation. The Build Pipeline / LOD Levels
+// foldouts that lived here previously have been folded into the new Hierarchy view.
 
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using UnityEditor;
-using UnityEditor.SceneManagement;
 
 namespace SashaRX.UnityMeshLab
 {
@@ -37,11 +43,43 @@ namespace SashaRX.UnityMeshLab
         PreviewMode previewMode = PreviewMode.None;
         PrefabBuilderPreview preview;
 
-        // ── Hierarchy editing state ──
-        Dictionary<int, string> pendingNames; // instanceID → edited name
+        // ── Hierarchy view state ──
+        // pendingNames: instanceID → edited name (uncommitted; committed by Apply Names).
+        // lodQualitySliders: renderer instanceID → simplification target ratio.
+        // hierarchyDummies: cached view model rebuilt from ctx; null = needs rebuild.
+        Dictionary<int, string> pendingNames;
+        Dictionary<int, float> lodQualitySliders;
         bool hierarchyFoldout = true;
+        List<HierarchyDummy> hierarchyDummies;
 
-        // ── Split/Merge state ──
+        sealed class HierarchyDummy
+        {
+            public Transform dummy;          // container transform; equals root when flat
+            public bool isRoot;              // true when the prefab has no separate dummy container
+            public List<HierarchyLodRow> lods = new List<HierarchyLodRow>();
+            public List<HierarchyColRow> cols = new List<HierarchyColRow>();
+            public bool foldout = true;
+        }
+
+        sealed class HierarchyLodRow
+        {
+            public int lodIndex;
+            public Renderer renderer;
+            public Mesh mesh;
+        }
+
+        sealed class HierarchyColRow
+        {
+            public Transform colTransform;
+            public Mesh mesh;
+        }
+
+        // Accumulates which channels mutating operations touched since the last
+        // refresh. Drives the export pipeline (PR-3) so isolated re-save can be
+        // used when only data channels changed.
+        FbxExportIntent buildIntent = FbxExportIntent.None;
+
+        // ── Split/Merge state (legacy, migrates to right panel in PR-2) ──
         struct SplitCandidate
         {
             public MeshEntry entry;
@@ -58,33 +96,10 @@ namespace SashaRX.UnityMeshLab
         List<MergeGroup> mergeCandidates;
         bool splitMergeFoldout;
 
-        // ── LOD management state ──
-        bool lodFoldout = true;
-
-        // ── Build pipeline state ──
-        bool buildFoldout;
-        bool editInPrefabStage;
-        int buildLodCount = 2;
-        float[] buildLodRatios = { 0.5f, 0.25f, 0.125f, 0.0625f };
-        float buildTargetError = 0.2f;
-        float buildUv2Weight = 20f;
-        float buildNormalWeight = 1f;
-        bool buildLockBorder = false;
-        List<BuildValidator.Issue> buildIssues;
-        Dictionary<BuildValidator.IssueGroup, bool> buildIssueFoldouts =
-            new Dictionary<BuildValidator.IssueGroup, bool>();
-
-        // Accumulates which channels Build pipeline mutated since the last
-        // refresh / save. Drives ExecBuildSave's FbxExportIntent so the
-        // narrow isolated re-save core can be used when only data channels
-        // changed, falling back to wide path (intent=All) only when
-        // hierarchy / LODGroup / materials / collision were touched.
-        FbxExportIntent buildIntent = FbxExportIntent.None;
-
-        // ── Collision management state ──
+        // ── Collision state (legacy) ──
         bool collisionFoldout;
 
-        // ── Edge report cache ──
+        // ── Edge / problem report cache (legacy) ──
         struct MeshEdgeReport
         {
             public string meshName;
@@ -92,7 +107,6 @@ namespace SashaRX.UnityMeshLab
         }
         List<MeshEdgeReport> edgeReports;
 
-        // ── Problem scan cache ──
         struct ProblemSummary
         {
             public string meshName;
@@ -110,6 +124,7 @@ namespace SashaRX.UnityMeshLab
             this.canvas = canvas;
             if (preview == null) preview = new PrefabBuilderPreview();
             pendingNames = new Dictionary<int, string>();
+            lodQualitySliders = new Dictionary<int, float>();
         }
 
         public void OnDeactivate()
@@ -125,9 +140,10 @@ namespace SashaRX.UnityMeshLab
             edgeReports = null;
             problemSummaries = null;
             pendingNames?.Clear();
+            lodQualitySliders?.Clear();
+            hierarchyDummies = null;
             splitCandidates = null;
             mergeCandidates = null;
-            buildIssues = null;
             buildIntent = FbxExportIntent.None;
         }
 
@@ -149,8 +165,6 @@ namespace SashaRX.UnityMeshLab
 
             DrawPreviewModeToolbar();
             DrawHierarchySection();
-            DrawLodManagementSection();
-            DrawBuildPipelineSection();
             DrawCollisionSection();
             DrawSplitMergeSection();
             DrawMeshInfo();
@@ -165,7 +179,7 @@ namespace SashaRX.UnityMeshLab
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Preview mode toolbar
+        // Preview mode toolbar (PR-4 will move this to viewport top bar)
         // ═══════════════════════════════════════════════════════════
 
         void DrawPreviewModeToolbar()
@@ -173,7 +187,6 @@ namespace SashaRX.UnityMeshLab
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Scene Preview", EditorStyles.miniLabel);
 
-            // Row 1: Off, Vert Colors, Normals, Tangents
             EditorGUILayout.BeginHorizontal();
             DrawModeButton("Off", PreviewMode.None);
             DrawModeButton("Vert Colors", PreviewMode.VertexColors);
@@ -181,7 +194,6 @@ namespace SashaRX.UnityMeshLab
             DrawModeButton("Tangents", PreviewMode.Tangents);
             EditorGUILayout.EndHorizontal();
 
-            // Row 2: UV channels
             EditorGUILayout.BeginHorizontal();
             DrawModeButton("UV0", PreviewMode.UV0);
             DrawModeButton("UV1", PreviewMode.UV1);
@@ -189,7 +201,6 @@ namespace SashaRX.UnityMeshLab
             DrawModeButton("UV3", PreviewMode.UV3);
             EditorGUILayout.EndHorizontal();
 
-            // Row 3: Edges, Problems
             EditorGUILayout.BeginHorizontal();
             DrawModeButton("Edges", PreviewMode.EdgeWireframe);
             DrawModeButton("Problems", PreviewMode.ProblemAreas);
@@ -208,7 +219,6 @@ namespace SashaRX.UnityMeshLab
             {
                 if (previewMode == mode)
                 {
-                    // Toggle off
                     preview.Restore();
                     previewMode = PreviewMode.None;
                     edgeReports = null;
@@ -261,7 +271,21 @@ namespace SashaRX.UnityMeshLab
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Hierarchy section with inline name editing
+        // Hierarchy section (NEW, PR-1)
+        //
+        // Shape:
+        //   Root row: [name field] "Root"  [Apply Names (green)]
+        //   For each Dummy block:
+        //     Foldout header  [name field if non-root]
+        //     Per LOD row:
+        //       Row A: [name display]   [+ Add LOD]  [↻]  [✕]
+        //       Row B: LOD{N}  Vv / Tt   [channel badges]
+        //       Row C: LOD{N}  [— quality slider —]  value
+        //     "+ Add LOD" insert-row between LODs and at the bottom
+        //     COL rows (different colour) with [name] [✕]
+        //
+        // Per user spec: only Root + Dummy names are user-editable; child names
+        // (LOD / COL) are auto-derived on Apply Names. ↑↓ reorder removed.
         // ═══════════════════════════════════════════════════════════
 
         void DrawHierarchySection()
@@ -270,544 +294,678 @@ namespace SashaRX.UnityMeshLab
             hierarchyFoldout = EditorGUILayout.Foldout(hierarchyFoldout, "Hierarchy", true);
             if (!hierarchyFoldout) return;
 
-            if (ctx.LodGroup == null && !ctx.StandaloneMesh) return;
-
-            Transform root = ctx.LodGroup != null ? ctx.LodGroup.transform : null;
-            if (root == null) return;
-
-            var colSet = new HashSet<GameObject>(MeshHygieneUtility.FindCollisionObjects(root));
-
-            // Root name (no indent)
-            DrawEditableName(root.gameObject, "Root", 0);
-
-            // Draw hierarchy respecting group containers
-            var drawn = new HashSet<GameObject>();
-            foreach (Transform child in root)
+            if (ctx.LodGroup == null && !ctx.StandaloneMesh)
             {
-                if (child == null) continue;
-                if (colSet.Contains(child.gameObject)) continue;
-
-                var childMf = child.GetComponent<MeshFilter>();
-                bool isContainer = childMf == null && child.childCount > 0;
-
-                if (isContainer)
-                {
-                    // Group container node
-                    DrawEditableName(child.gameObject, "Group", 1);
-                    drawn.Add(child.gameObject);
-
-                    // Children inside container
-                    foreach (Transform gc in child)
-                    {
-                        if (gc == null) continue;
-                        var gcMf = gc.GetComponent<MeshFilter>();
-                        Mesh gcMesh = gcMf != null ? gcMf.sharedMesh : null;
-                        if (gcMesh == null) continue;
-
-                        int lodIdx = GetLodIndexFromName(gc.name);
-                        int verts = gcMesh.vertexCount;
-                        int tris = MeshHygieneUtility.GetTriangleCount(gcMesh);
-                        string suffix = lodIdx >= 0
-                            ? $"LOD{lodIdx}  {verts:N0}v / {tris:N0}t"
-                            : $"{verts:N0}v / {tris:N0}t";
-                        DrawEditableName(gc.gameObject, suffix, 2);
-                        drawn.Add(gc.gameObject);
-                    }
-                }
-                else if (childMf != null && childMf.sharedMesh != null)
-                {
-                    // Direct mesh child (no container)
-                    Mesh mesh = childMf.sharedMesh;
-                    int lodIdx = GetLodIndexFromName(child.name);
-                    int verts = mesh.vertexCount;
-                    int tris = MeshHygieneUtility.GetTriangleCount(mesh);
-                    string suffix = lodIdx >= 0
-                        ? $"LOD{lodIdx}  {verts:N0}v / {tris:N0}t"
-                        : $"{verts:N0}v / {tris:N0}t";
-                    DrawEditableName(child.gameObject, suffix, 1);
-                    drawn.Add(child.gameObject);
-                }
+                EditorGUILayout.HelpBox("No LODGroup selected.", MessageType.Info);
+                return;
             }
 
-            // Collision objects
-            foreach (var colGo in colSet)
+            if (ctx.LodGroup == null)
             {
-                if (colGo == null) continue;
-                var mf = colGo.GetComponent<MeshFilter>();
-                Mesh mesh = mf != null ? mf.sharedMesh : null;
-                int cverts = mesh != null ? mesh.vertexCount : 0;
-                string suffix = $"COL  {cverts:N0}v";
-                DrawEditableName(colGo, suffix, 1);
+                EditorGUILayout.HelpBox("Standalone mesh: hierarchy editing requires LODGroup.", MessageType.Info);
+                return;
             }
 
-            // Apply / Normalize buttons
-            EditorGUILayout.Space(4);
+            if (hierarchyDummies == null) RebuildHierarchyView();
+            if (hierarchyDummies == null) return;
+
+            DrawRootRow();
+
+            foreach (var dummy in hierarchyDummies)
+                DrawDummyBlock(dummy);
+        }
+
+        void DrawRootRow()
+        {
+            var rootGo = ctx.LodGroup.gameObject;
+
             EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Root", EditorStyles.miniLabel, GUILayout.Width(34));
+            DrawEditableNameField(rootGo, GUILayout.MinWidth(120));
+            GUILayout.FlexibleSpace();
 
+            // Apply Names commits pending edits AND rebuilds leaf names from the
+            // current Root + Dummy values. Stays enabled even when no pending
+            // edits exist so the user can resync names after Insert / Delete.
             bool hasPending = pendingNames != null && pendingNames.Count > 0;
             var bgc = GUI.backgroundColor;
-
-            GUI.backgroundColor = new Color(0.4f, 0.8f, 0.4f);
-            GUI.enabled = hasPending;
-            if (GUILayout.Button($"Apply Names ({(hasPending ? pendingNames.Count : 0)})", GUILayout.Height(22)))
+            GUI.backgroundColor = new Color(0.40f, 0.80f, 0.40f);
+            string label = hasPending ? $"Apply Names ({pendingNames.Count})" : "Apply Names";
+            if (GUILayout.Button(label, GUILayout.Height(20), GUILayout.Width(140)))
                 ApplyPendingNames();
-            GUI.enabled = true;
-
-            GUI.backgroundColor = new Color(0.7f, 0.4f, 0.95f);
-            if (GUILayout.Button("Normalize", GUILayout.Height(22)))
-                NormalizeHierarchy();
-
             GUI.backgroundColor = bgc;
             EditorGUILayout.EndHorizontal();
 
-            // Warnings
-            if (MeshHygieneUtility.HasLodOrColSuffix(root.name))
+            // Sanity warnings on root
+            if (MeshHygieneUtility.HasLodOrColSuffix(rootGo.name))
                 EditorGUILayout.HelpBox("Root name has LOD/COL suffix.", MessageType.Warning);
-
-            var rootMf = root.GetComponent<MeshFilter>();
+            var rootMf = rootGo.GetComponent<MeshFilter>();
             if (rootMf != null && rootMf.sharedMesh != null)
                 EditorGUILayout.HelpBox("Root has mesh — should be empty pivot.", MessageType.Warning);
+        }
 
-            // Scale warnings
-            if (root.localScale != Vector3.one)
-                EditorGUILayout.HelpBox(
-                    $"Root scale: {root.localScale} — should be (1,1,1). Click Normalize to fix.",
-                    MessageType.Warning);
-            foreach (Transform child in root)
+        void DrawDummyBlock(HierarchyDummy dummy)
+        {
+            if (dummy == null || dummy.dummy == null) return;
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+            // Header: small foldout arrow + dummy name (editable when not root) + summary.
+            // Use an explicit-rect Foldout so it occupies a fixed-width gutter and
+            // doesn't push the rest of the row to the next line.
+            EditorGUILayout.BeginHorizontal();
+            var foldoutRect = GUILayoutUtility.GetRect(14, 16, GUILayout.Width(14), GUILayout.Height(16));
+            dummy.foldout = EditorGUI.Foldout(foldoutRect, dummy.foldout, GUIContent.none, true);
+            if (dummy.isRoot)
+                EditorGUILayout.LabelField("Root group", EditorStyles.miniBoldLabel, GUILayout.MinWidth(100));
+            else
+                DrawEditableNameField(dummy.dummy.gameObject, GUILayout.MinWidth(100));
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.LabelField($"{dummy.lods.Count} LOD · {dummy.cols.Count} COL",
+                EditorStyles.miniLabel, GUILayout.Width(110));
+            EditorGUILayout.EndHorizontal();
+
+            if (!dummy.foldout) { EditorGUILayout.EndVertical(); return; }
+
+            EditorGUILayout.Space(2);
+
+            // LOD rows interleaved with insert buttons
+            for (int i = 0; i < dummy.lods.Count; i++)
             {
-                if (child.localScale != Vector3.one)
+                if (DrawLodRow(dummy, dummy.lods[i])) { EditorGUILayout.EndVertical(); return; }
+                int afterLodIndex = dummy.lods[i].lodIndex;
+                if (DrawAddLodButton(dummy, afterLodIndex)) { EditorGUILayout.EndVertical(); return; }
+            }
+
+            // No LODs yet — single Add at top
+            if (dummy.lods.Count == 0)
+            {
+                if (DrawAddLodButton(dummy, -1)) { EditorGUILayout.EndVertical(); return; }
+            }
+
+            // COL rows (different color tint)
+            if (dummy.cols.Count > 0)
+            {
+                EditorGUILayout.Space(2);
+                var colSep = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
+                EditorGUI.DrawRect(colSep, new Color(0.35f, 0.55f, 0.45f, 0.5f));
+                foreach (var col in dummy.cols)
                 {
-                    EditorGUILayout.HelpBox(
-                        $"{child.name}: scale {child.localScale} — not normalized.",
-                        MessageType.Warning);
-                    break; // show only first to avoid spam
+                    if (DrawColRow(dummy, col)) { EditorGUILayout.EndVertical(); return; }
                 }
             }
+
+            EditorGUILayout.EndVertical();
         }
 
-        static int GetLodIndexFromName(string name)
+        // Returns true when the operation invalidates the UI for this frame.
+        bool DrawLodRow(HierarchyDummy dummy, HierarchyLodRow lod)
         {
-            var match = System.Text.RegularExpressions.Regex.Match(
-                name, @"_LOD(\d+)$",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            return match.Success ? int.Parse(match.Groups[1].Value) : -1;
+            if (lod == null || lod.renderer == null) return false;
+
+            // Row A: name + actions
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(lod.renderer.gameObject.name,
+                EditorStyles.textField, GUILayout.MinWidth(120));
+            GUILayout.FlexibleSpace();
+
+            var bgc = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.60f, 0.75f, 0.90f);
+            if (GUILayout.Button(new GUIContent("↻", "Regenerate this LOD from LOD0 source with the current quality."),
+                    GUILayout.Width(22), GUILayout.Height(18)))
+            {
+                RegenerateLodWithQuality(dummy, lod);
+                GUI.backgroundColor = bgc;
+                EditorGUILayout.EndHorizontal();
+                return true;
+            }
+            GUI.backgroundColor = new Color(0.90f, 0.30f, 0.30f);
+            if (GUILayout.Button(new GUIContent("✕", "Remove this LOD level."),
+                    GUILayout.Width(22), GUILayout.Height(18)))
+            {
+                DeleteLodRow(dummy, lod);
+                GUI.backgroundColor = bgc;
+                EditorGUILayout.EndHorizontal();
+                return true;
+            }
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+
+            // Row B: stat + channel badges
+            int verts = lod.mesh != null ? lod.mesh.vertexCount : 0;
+            int tris = lod.mesh != null ? MeshHygieneUtility.GetTriangleCount(lod.mesh) : 0;
+            string stat = $"LOD{lod.lodIndex}  {verts:N0}v / {tris:N0}t";
+            string badges = ChannelBadges(lod.mesh);
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(stat, EditorStyles.miniLabel, GUILayout.Width(160));
+            GUILayout.FlexibleSpace();
+            if (!string.IsNullOrEmpty(badges))
+                EditorGUILayout.LabelField(badges, EditorStyles.miniLabel, GUILayout.Width(180));
+            EditorGUILayout.EndHorizontal();
+
+            // Row C: LOD label + quality slider
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField($"LOD{lod.lodIndex}", EditorStyles.miniLabel, GUILayout.Width(40));
+            int rid = lod.renderer.GetInstanceID();
+            if (!lodQualitySliders.TryGetValue(rid, out var quality))
+                quality = lod.lodIndex == 0 ? 1f : Mathf.Pow(0.5f, lod.lodIndex);
+            float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f);
+            if (Mathf.Abs(newQuality - quality) > 0.0001f)
+                lodQualitySliders[rid] = newQuality;
+            EditorGUILayout.EndHorizontal();
+
+            return false;
         }
 
-        void DrawEditableName(GameObject go, string suffix, int indent)
+        // Returns true on click (UI invalidated by insertion).
+        bool DrawAddLodButton(HierarchyDummy dummy, int afterLodIndex)
+        {
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(40);
+            var bgc = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.55f, 0.75f, 0.95f);
+            string label = afterLodIndex < 0 ? "+ Add LOD" : $"+ Add LOD after LOD{afterLodIndex}";
+            bool clicked = GUILayout.Button(label, GUILayout.Height(16));
+            GUI.backgroundColor = bgc;
+            GUILayout.Space(40);
+            EditorGUILayout.EndHorizontal();
+
+            if (clicked)
+            {
+                int insertAt = afterLodIndex + 1;
+                InsertLodAt(dummy, insertAt);
+                return true;
+            }
+            return false;
+        }
+
+        bool DrawColRow(HierarchyDummy dummy, HierarchyColRow col)
+        {
+            if (col == null || col.colTransform == null) return false;
+
+            EditorGUILayout.BeginHorizontal();
+            var bgc = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.45f, 0.75f, 0.55f, 0.85f);
+            EditorGUILayout.LabelField(col.colTransform.gameObject.name,
+                EditorStyles.textField, GUILayout.MinWidth(120));
+            GUI.backgroundColor = bgc;
+
+            int verts = col.mesh != null ? col.mesh.vertexCount : 0;
+            int tris = col.mesh != null ? MeshHygieneUtility.GetTriangleCount(col.mesh) : 0;
+            EditorGUILayout.LabelField($"COL  {verts:N0}v / {tris:N0}t",
+                EditorStyles.miniLabel, GUILayout.Width(160));
+
+            GUILayout.FlexibleSpace();
+            GUI.backgroundColor = new Color(0.90f, 0.30f, 0.30f);
+            if (GUILayout.Button(new GUIContent("✕", "Remove this collision object."),
+                    GUILayout.Width(22), GUILayout.Height(18)))
+            {
+                DeleteCol(dummy, col);
+                GUI.backgroundColor = bgc;
+                EditorGUILayout.EndHorizontal();
+                return true;
+            }
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+            return false;
+        }
+
+        // Editable text field bound to pendingNames keyed by GameObject instanceID.
+        // Callers receive a draggable change indicator on the right of the input.
+        void DrawEditableNameField(GameObject go, params GUILayoutOption[] options)
         {
             if (go == null) return;
             int id = go.GetInstanceID();
-
-            // Get current editing value or actual name
             if (!pendingNames.TryGetValue(id, out string editName))
                 editName = go.name;
 
-            EditorGUILayout.BeginHorizontal();
-
-            // Tree indent with visual connector
-            if (indent > 0)
+            string newName = EditorGUILayout.TextField(editName, options);
+            if (newName != editName)
             {
-                GUILayout.Space(indent * 16);
-                var lineRect = EditorGUILayout.GetControlRect(false, 18, GUILayout.Width(12));
-                if (Event.current.type == EventType.Repaint)
+                if (newName != go.name) pendingNames[id] = newName;
+                else pendingNames.Remove(id);
+            }
+
+            if (pendingNames.ContainsKey(id))
+            {
+                var dot = EditorGUILayout.GetControlRect(false, 14, GUILayout.Width(14));
+                EditorGUI.DrawRect(new Rect(dot.x + 2, dot.y + 2, 10, 10),
+                    new Color(1f, 0.7f, 0.2f));
+            }
+        }
+
+        // ── Hierarchy view rebuild ──
+
+        void RebuildHierarchyView()
+        {
+            hierarchyDummies = new List<HierarchyDummy>();
+            if (ctx == null || ctx.LodGroup == null) return;
+
+            var root = ctx.LodGroup.transform;
+            var lookup = new Dictionary<Transform, HierarchyDummy>();
+
+            // Group LOD renderers by their parent transform. A parent that equals
+            // root means the prefab is flat (no separate Dummy container) — in
+            // that case the root acts as the implicit single Dummy.
+            var lods = ctx.LodGroup.GetLODs();
+            for (int li = 0; li < lods.Length; li++)
+            {
+                if (lods[li].renderers == null) continue;
+                foreach (var r in lods[li].renderers)
                 {
-                    var c = new Color(0.5f, 0.5f, 0.5f, 0.5f);
-                    // Vertical line
-                    EditorGUI.DrawRect(new Rect(lineRect.x, lineRect.y, 1, lineRect.height), c);
-                    // Horizontal connector
-                    EditorGUI.DrawRect(new Rect(lineRect.x, lineRect.y + lineRect.height * 0.5f, 10, 1), c);
+                    if (r == null) continue;
+                    var parent = r.transform.parent;
+                    if (parent == null) continue;
+                    Transform key = parent == root ? root : parent;
+                    var dummy = GetOrCreateDummy(lookup, key, root);
+                    var mf = r.GetComponent<MeshFilter>();
+                    dummy.lods.Add(new HierarchyLodRow
+                    {
+                        lodIndex = li,
+                        renderer = r,
+                        mesh = mf != null ? mf.sharedMesh : null
+                    });
                 }
             }
 
-            // Editable name field
-            string newName = EditorGUILayout.TextField(editName, GUILayout.MinWidth(80));
-            if (newName != editName)
+            // Attach collision objects to whichever dummy contains them. COLs at
+            // root level land in the root dummy; nested COLs follow their parent.
+            foreach (var colGo in MeshHygieneUtility.FindCollisionObjects(root))
             {
-                if (newName != go.name)
-                    pendingNames[id] = newName;
-                else
-                    pendingNames.Remove(id);
+                if (colGo == null) continue;
+                var colT = colGo.transform;
+                var parent = colT.parent;
+                if (parent == null) continue;
+                Transform key = parent == root ? root : parent;
+                var dummy = GetOrCreateDummy(lookup, key, root);
+                var mf = colGo.GetComponent<MeshFilter>();
+                dummy.cols.Add(new HierarchyColRow
+                {
+                    colTransform = colT,
+                    mesh = mf != null ? mf.sharedMesh : null
+                });
             }
 
-            // Suffix label (LOD0, COL, etc.)
-            EditorGUILayout.LabelField(suffix, EditorStyles.miniLabel, GUILayout.Width(150));
-
-            // Changed indicator
-            if (pendingNames.ContainsKey(id))
-            {
-                var r = EditorGUILayout.GetControlRect(false, 14, GUILayout.Width(14));
-                EditorGUI.DrawRect(new Rect(r.x + 2, r.y + 2, 10, 10), new Color(1f, 0.7f, 0.2f));
-            }
-
-            EditorGUILayout.EndHorizontal();
+            hierarchyDummies = lookup.Values.ToList();
+            hierarchyDummies.Sort(CompareDummies);
+            foreach (var d in hierarchyDummies)
+                d.lods.Sort((a, b) => a.lodIndex.CompareTo(b.lodIndex));
         }
+
+        static HierarchyDummy GetOrCreateDummy(Dictionary<Transform, HierarchyDummy> lookup,
+            Transform key, Transform root)
+        {
+            if (!lookup.TryGetValue(key, out var dummy))
+            {
+                dummy = new HierarchyDummy
+                {
+                    dummy = key,
+                    isRoot = key == root
+                };
+                lookup[key] = dummy;
+            }
+            return dummy;
+        }
+
+        static int CompareDummies(HierarchyDummy a, HierarchyDummy b)
+        {
+            if (a.isRoot && !b.isRoot) return -1;
+            if (!a.isRoot && b.isRoot) return 1;
+            return string.Compare(a.dummy.name, b.dummy.name,
+                System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        // ── Apply Names: two-step commit. ──
+        // Step 1 commits pending edits on Root / Dummy nodes; Step 2 walks each
+        // dummy and rebuilds child LOD/COL names from the (possibly just-renamed)
+        // root or dummy prefix using the canonical `<prefix>_LOD{N}` and
+        // `<prefix>_COL[_Hull{N}]` patterns. Per spec the user only edits Root
+        // and Dummy names directly — leaf names are derived deterministically.
 
         void ApplyPendingNames()
         {
-            if (pendingNames == null || pendingNames.Count == 0) return;
-
-            Undo.SetCurrentGroupName("Prefab Builder: Rename");
-            int group = Undo.GetCurrentGroup();
-
-            foreach (var kvp in pendingNames)
-            {
-                var go = EditorUtility.InstanceIDToObject(kvp.Key) as GameObject;
-                if (go == null || go.name == kvp.Value) continue;
-
-                Undo.RecordObject(go, "Rename");
-                UvtLog.Info($"Renamed: {go.name} -> {kvp.Value}");
-                go.name = kvp.Value;
-            }
-
-            Undo.CollapseUndoOperations(group);
-            pendingNames.Clear();
-
-            buildIntent |= FbxExportIntent.Hierarchy;
-
-            // Refresh context since names changed
-            if (ctx.LodGroup != null) ctx.Refresh(ctx.LodGroup);
-            requestRepaint?.Invoke();
-        }
-
-        void NormalizeHierarchy()
-        {
             if (ctx.LodGroup == null) return;
 
-            Undo.SetCurrentGroupName("Prefab Builder: Normalize");
-            int group = Undo.GetCurrentGroup();
+            Undo.SetCurrentGroupName("Prefab Builder: Apply Names");
+            int undoGroup = Undo.GetCurrentGroup();
 
-            var root = ctx.LodGroup.transform;
-            string baseName = UvToolContext.ExtractGroupKey(root.name);
-            if (string.IsNullOrEmpty(baseName)) baseName = root.name;
-
-            // Sanitize root name
-            if (MeshHygieneUtility.HasInvalidChars(root.name))
+            // Step 1: commit pending edits.
+            if (pendingNames != null)
             {
-                string sanitized = MeshHygieneUtility.SanitizeName(root.name);
-                Undo.RecordObject(root.gameObject, "Sanitize Root");
-                root.name = sanitized;
-                baseName = UvToolContext.ExtractGroupKey(sanitized);
-            }
-
-            // Strip LOD/COL suffix from root
-            if (MeshHygieneUtility.HasLodOrColSuffix(root.name))
-            {
-                Undo.RecordObject(root.gameObject, "Strip Root Suffix");
-                root.name = baseName;
-            }
-
-            // Move root mesh to child if root has mesh
-            var rootMf = root.GetComponent<MeshFilter>();
-            if (rootMf != null && rootMf.sharedMesh != null)
-            {
-                var rootMr = root.GetComponent<MeshRenderer>();
-                var lod0Child = new GameObject(baseName + "_LOD0");
-                Undo.RegisterCreatedObjectUndo(lod0Child, "Move Root Mesh");
-                lod0Child.transform.SetParent(root, false);
-
-                var newMf = lod0Child.AddComponent<MeshFilter>();
-                newMf.sharedMesh = rootMf.sharedMesh;
-                if (rootMr != null)
+                foreach (var kvp in pendingNames)
                 {
-                    var newMr = lod0Child.AddComponent<MeshRenderer>();
-                    newMr.sharedMaterials = rootMr.sharedMaterials;
-                    newMr.shadowCastingMode = rootMr.shadowCastingMode;
-                    newMr.receiveShadows = rootMr.receiveShadows;
-                    GameObjectUtility.SetStaticEditorFlags(lod0Child,
-                        GameObjectUtility.GetStaticEditorFlags(root.gameObject));
-                    Undo.DestroyObjectImmediate(rootMr);
+                    var go = EditorUtility.InstanceIDToObject(kvp.Key) as GameObject;
+                    if (go == null || go.name == kvp.Value) continue;
+
+                    Undo.RecordObject(go, "Rename");
+                    UvtLog.Info($"[LightmapUV] Renamed: {go.name} → {kvp.Value}");
+                    go.name = kvp.Value;
                 }
-                Undo.DestroyObjectImmediate(rootMf);
+                pendingNames.Clear();
             }
 
-            // Normalize LOD child names.
-            // Strategy: group by polycount to detect LOD tiers, then ensure each
-            // child has a valid _LOD{N} suffix. Preserve existing descriptive names
-            // (e.g. material names from split) — only fix the LOD suffix.
-            var colSet = new HashSet<GameObject>(MeshHygieneUtility.FindCollisionObjects(root));
-            var meshChildren = new List<(Transform t, int polyCount)>();
-            foreach (Transform child in root)
+            // Step 2: rebuild leaf names from the current Root + Dummy names.
+            if (hierarchyDummies == null) RebuildHierarchyView();
+            string rootName = ctx.LodGroup.gameObject.name;
+            foreach (var dummy in hierarchyDummies)
             {
-                if (colSet.Contains(child.gameObject)) continue;
-                var mf = child.GetComponent<MeshFilter>();
-                if (mf == null || mf.sharedMesh == null) continue;
-                meshChildren.Add((child, MeshHygieneUtility.GetTriangleCount(mf.sharedMesh)));
-            }
+                if (dummy.dummy == null) continue;
+                string prefix = dummy.isRoot ? rootName : dummy.dummy.name;
+                if (string.IsNullOrEmpty(prefix)) prefix = "Group";
 
-            if (meshChildren.Count > 0)
-            {
-                // Group into LOD tiers by polycount (descending).
-                // Children with same or similar polycount are in the same LOD tier.
-                meshChildren.Sort((a, b) => b.polyCount.CompareTo(a.polyCount));
-
-                // If children already have valid _LOD{N} suffixes, just ensure suffix is correct
-                bool hasExistingLodNames = false;
-                foreach (var (t, _) in meshChildren)
+                for (int i = 0; i < dummy.lods.Count; i++)
                 {
-                    if (System.Text.RegularExpressions.Regex.IsMatch(
-                        t.name, @"_LOD\d+$",
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                    {
-                        hasExistingLodNames = true;
-                        break;
-                    }
+                    var lod = dummy.lods[i];
+                    if (lod.renderer == null) continue;
+                    string desired = $"{prefix}_LOD{lod.lodIndex}";
+                    if (lod.renderer.gameObject.name == desired) continue;
+                    Undo.RecordObject(lod.renderer.gameObject, "Rename LOD");
+                    lod.renderer.gameObject.name = desired;
                 }
 
-                if (hasExistingLodNames)
+                for (int i = 0; i < dummy.cols.Count; i++)
                 {
-                    // Multi-mesh LODs: preserve names, only fix missing LOD suffix.
-                    // Don't renumber — existing suffixes reflect the intended LOD level.
-                    foreach (var (t, _) in meshChildren)
-                    {
-                        if (!System.Text.RegularExpressions.Regex.IsMatch(
-                            t.name, @"_LOD\d+$",
-                            System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                        {
-                            // No LOD suffix — add _LOD0 as default
-                            Undo.RecordObject(t.gameObject, "Add LOD Suffix");
-                            t.name = t.name + "_LOD0";
-                        }
-                    }
-                }
-                else
-                {
-                    // Simple case: no existing LOD names. Single mesh per LOD tier.
-                    // Rename sequentially: baseName_LOD0, baseName_LOD1, etc.
-                    for (int i = 0; i < meshChildren.Count; i++)
-                    {
-                        string newName = baseName + "_LOD" + i;
-                        if (meshChildren[i].t.name != newName)
-                        {
-                            Undo.RecordObject(meshChildren[i].t.gameObject, "Rename LOD");
-                            meshChildren[i].t.name = newName;
-                        }
-                    }
+                    var col = dummy.cols[i];
+                    if (col.colTransform == null) continue;
+                    string desired = dummy.cols.Count == 1
+                        ? $"{prefix}_COL"
+                        : $"{prefix}_COL_Hull{i}";
+                    if (col.colTransform.gameObject.name == desired) continue;
+                    Undo.RecordObject(col.colTransform.gameObject, "Rename COL");
+                    col.colTransform.gameObject.name = desired;
                 }
             }
 
-            // Sanitize child names
-            foreach (Transform child in root)
-            {
-                if (MeshHygieneUtility.HasInvalidChars(child.name))
-                {
-                    string sanitized = MeshHygieneUtility.SanitizeName(child.name);
-                    Undo.RecordObject(child.gameObject, "Sanitize Name");
-                    child.name = sanitized;
-                }
-            }
-
-            // Normalize scale: bake non-identity transforms into mesh vertices.
-            // Common issue: FBX imported at scale 0.01 with 100x compensating
-            // scale on nodes, or vice versa. Bake into verts → set scale to 1,1,1.
-            NormalizeChildScales(root);
-
-            // Group multi-mesh LODs into container nodes by mesh group key.
-            // e.g. TubBig2_m_WoodenBoxes_LOD0 + _LOD1 → container "TubBig2_m_WoodenBoxes"
-            GroupMeshChildrenByMaterial(root);
-
-            // Rebuild LODGroup from hierarchy naming
-            RebuildLodGroupFromNames();
-
-            Undo.CollapseUndoOperations(group);
-            pendingNames?.Clear();
-
-            // NormalizeChildScales bakes node transforms into vertex
-            // positions, which moves verts (and re-derived normals) — both
-            // require wide intent. GroupMeshChildrenByMaterial reshuffles
-            // the hierarchy; RebuildLodGroupFromNames rebuilds the
-            // LODGroup component.
-            buildIntent |= FbxExportIntent.Hierarchy
-                           | FbxExportIntent.LodGroup
-                           | FbxExportIntent.Normals
-                           | FbxExportIntent.Tangents;
+            Undo.CollapseUndoOperations(undoGroup);
+            buildIntent |= FbxExportIntent.Hierarchy;
 
             ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
             requestRepaint?.Invoke();
-            UvtLog.Info("Normalized hierarchy.");
         }
 
-        /// <summary>
-        /// Group direct mesh children into container nodes by mesh group key.
-        /// When multiple meshes share the same base name (e.g. TubBig2_m_WoodenBoxes_LOD0,
-        /// TubBig2_m_WoodenBoxes_LOD1), they are moved under a container node named
-        /// with the group key (TubBig2_m_WoodenBoxes). Single-mesh groups stay flat.
-        /// Children already inside containers are skipped.
-        /// </summary>
-        void GroupMeshChildrenByMaterial(Transform root)
+        // ── LOD row operations ──
+
+        void RegenerateLodWithQuality(HierarchyDummy dummy, HierarchyLodRow lod)
         {
-            var colSet = new HashSet<GameObject>(MeshHygieneUtility.FindCollisionObjects(root));
+            if (ctx.LodGroup == null || dummy == null || lod == null || lod.renderer == null)
+                return;
 
-            // Collect direct mesh children (not collision, not containers)
-            var directMeshChildren = new List<Transform>();
-            foreach (Transform child in root)
+            int rid = lod.renderer.GetInstanceID();
+            float quality = lodQualitySliders.TryGetValue(rid, out var q) ? q
+                : Mathf.Pow(0.5f, lod.lodIndex);
+
+            // LOD0 source = matching renderer in this dummy's LOD0 row, or fall back
+            // to the first LOD0 renderer in the LODGroup. We match by stripped group
+            // key so renames mid-pipeline don't break the link.
+            var sourceMesh = ResolveLodSourceMesh(dummy, lod);
+            if (sourceMesh == null)
             {
-                if (colSet.Contains(child.gameObject)) continue;
-                var mf = child.GetComponent<MeshFilter>();
-                if (mf != null && mf.sharedMesh != null)
-                    directMeshChildren.Add(child);
+                UvtLog.Warn($"[LightmapUV] Regenerate LOD{lod.lodIndex}: no source mesh.");
+                return;
             }
 
-            // Group by mesh group key (name without LOD suffix)
-            var groups = new Dictionary<string, List<Transform>>();
-            foreach (var child in directMeshChildren)
+            var settings = new MeshSimplifier.SimplifySettings
             {
-                string groupKey = UvToolContext.ExtractGroupKey(child.name);
-                if (string.IsNullOrEmpty(groupKey)) groupKey = child.name;
-                if (!groups.ContainsKey(groupKey))
-                    groups[groupKey] = new List<Transform>();
-                groups[groupKey].Add(child);
-            }
+                targetRatio  = quality,
+                targetError  = 0.1f,
+                uv2Weight    = 0.5f,
+                normalWeight = 0.5f,
+                lockBorder   = true,
+                uvChannel    = 1
+            };
 
-            // Only create containers for groups with multiple LOD variants
-            // AND where the group key differs from the root base name
-            // (if all children share root's base name, keep flat)
-            string rootBase = UvToolContext.ExtractGroupKey(root.name);
-            int containerCount = 0;
-
-            foreach (var kvp in groups)
+            var res = MeshSimplifier.Simplify(sourceMesh, settings);
+            if (!res.ok)
             {
-                if (kvp.Value.Count <= 1) continue;
-                if (kvp.Key == rootBase && groups.Count == 1) continue; // single group = keep flat
-
-                // Check if container already exists
-                Transform existing = null;
-                foreach (Transform child in root)
-                {
-                    if (child.name == kvp.Key && child.GetComponent<MeshFilter>() == null)
-                    { existing = child; break; }
-                }
-
-                Transform container;
-                if (existing != null)
-                {
-                    container = existing;
-                }
-                else
-                {
-                    var containerGo = new GameObject(kvp.Key);
-                    Undo.RegisterCreatedObjectUndo(containerGo, "Group LODs");
-                    containerGo.transform.SetParent(root, false);
-                    container = containerGo.transform;
-                    containerCount++;
-                }
-
-                // Move children into container
-                foreach (var child in kvp.Value)
-                {
-                    if (child.parent == container) continue;
-                    Undo.SetTransformParent(child, container, "Group LODs");
-                    child.localPosition = Vector3.zero;
-                    child.localRotation = Quaternion.identity;
-                    child.localScale = Vector3.one;
-                }
+                UvtLog.Warn($"[LightmapUV] Simplify failed for '{sourceMesh.name}': {res.error}");
+                return;
             }
+            res.simplifiedMesh.name = sourceMesh.name + "_LOD" + lod.lodIndex;
 
-            if (containerCount > 0)
-                UvtLog.Info($"Created {containerCount} mesh group container(s).");
+            var mf = lod.renderer.GetComponent<MeshFilter>();
+            if (mf == null) return;
+            Undo.RecordObject(mf, "Regenerate LOD");
+            mf.sharedMesh = res.simplifiedMesh;
+
+            UvtLog.Info($"[LightmapUV] Regenerated LOD{lod.lodIndex} on '{lod.renderer.name}': "
+                + $"{res.originalTriCount} → {res.simplifiedTriCount} tris (target {quality:P0})");
+
+            buildIntent |= FbxExportIntent.AnyUv | FbxExportIntent.Normals
+                | FbxExportIntent.Tangents | FbxExportIntent.VertexColors;
+
+            ctx.LodGroup.RecalculateBounds();
+            ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
+            requestRepaint?.Invoke();
         }
 
-        /// <summary>
-        /// Bake non-identity transforms into mesh vertices for root and all children.
-        /// Handles the common case of FBX at scale 0.01 with 100x node compensation.
-        /// After this, all transforms are identity and vertex positions are in world-correct space.
-        /// </summary>
-        void NormalizeChildScales(Transform root)
+        Mesh ResolveLodSourceMesh(HierarchyDummy dummy, HierarchyLodRow lod)
         {
-            bool rootHasScale = root.localScale != Vector3.one;
-            Matrix4x4 rootScaleMatrix = rootHasScale
-                ? Matrix4x4.Scale(root.localScale)
-                : Matrix4x4.identity;
-
-            // Process each direct child: bake rootScale * childLocal into mesh, reset to identity
-            foreach (Transform child in root)
+            // Prefer this dummy's LOD0 entry sharing the same group key. The
+            // caller may pass a placeholder LodRow without a renderer (when
+            // inserting into an empty dummy) — in that case skip the key match
+            // and fall through to "first LOD0 mesh in the dummy".
+            string key = lod != null && lod.renderer != null
+                ? UvToolContext.ExtractGroupKey(lod.renderer.name)
+                : null;
+            if (key != null)
             {
-                var mf = child.GetComponent<MeshFilter>();
-                if (mf == null || mf.sharedMesh == null) continue;
-
-                bool childHasTransform = child.localPosition != Vector3.zero ||
-                                         child.localRotation != Quaternion.identity ||
-                                         child.localScale != Vector3.one;
-
-                if (!rootHasScale && !childHasTransform)
-                    continue;
-
-                if (!mf.sharedMesh.isReadable)
+                foreach (var candidate in dummy.lods)
                 {
-                    UvtLog.Warn($"Cannot normalize transform on '{child.name}' — mesh not readable.");
-                    continue;
+                    if (candidate == lod) continue;
+                    if (candidate.lodIndex != 0) continue;
+                    if (candidate.mesh == null) continue;
+                    string ck = UvToolContext.ExtractGroupKey(candidate.renderer != null ? candidate.renderer.name : "");
+                    if (string.Equals(ck, key, System.StringComparison.OrdinalIgnoreCase))
+                        return candidate.mesh;
                 }
-
-                // Combined matrix: root scale * child local transform
-                Matrix4x4 combined = rootHasScale
-                    ? rootScaleMatrix * Matrix4x4.TRS(child.localPosition, child.localRotation, child.localScale)
-                    : Matrix4x4.TRS(child.localPosition, child.localRotation, child.localScale);
-
-                BakeMatrixIntoMesh(mf, combined);
-
-                if (childHasTransform)
-                {
-                    Undo.RecordObject(child, "Normalize Transform");
-                    child.localPosition = Vector3.zero;
-                    child.localRotation = Quaternion.identity;
-                    child.localScale = Vector3.one;
-                }
-
-                UvtLog.Info($"Normalized transform on '{child.name}' → identity");
             }
-
-            // If root had mesh (shouldn't happen after earlier normalization), bake it too
-            if (rootHasScale)
-            {
-                var rootMf = root.GetComponent<MeshFilter>();
-                if (rootMf != null && rootMf.sharedMesh != null && rootMf.sharedMesh.isReadable)
-                    BakeMatrixIntoMesh(rootMf, rootScaleMatrix);
-
-                Undo.RecordObject(root, "Normalize Root Scale");
-                root.localScale = Vector3.one;
-                UvtLog.Info($"Normalized root scale → (1,1,1)");
-            }
+            // For LOD0 → reuse the renderer's own mesh (in-place simplify).
+            if (lod != null && lod.lodIndex == 0 && lod.mesh != null) return lod.mesh;
+            // Fallback: first LOD0 mesh in the dummy.
+            foreach (var candidate in dummy.lods)
+                if (candidate.lodIndex == 0 && candidate.mesh != null)
+                    return candidate.mesh;
+            return null;
         }
 
-        static void BakeMatrixIntoMesh(MeshFilter mf, Matrix4x4 matrix)
+        void InsertLodAt(HierarchyDummy dummy, int insertIndex)
         {
-            var mesh = mf.sharedMesh;
-            if (mesh == null || !mesh.isReadable) return;
+            if (ctx.LodGroup == null || dummy == null) return;
 
-            // Clone if it's an asset-backed mesh
-            if (!string.IsNullOrEmpty(UnityEditor.AssetDatabase.GetAssetPath(mesh)))
-            {
-                mesh = Object.Instantiate(mesh);
-                mesh.name = mf.sharedMesh.name;
-                Undo.RecordObject(mf, "Bake Transform");
-                mf.sharedMesh = mesh;
-            }
+            Undo.SetCurrentGroupName("Prefab Builder: Insert LOD");
+            int undoGroup = Undo.GetCurrentGroup();
 
-            var verts = mesh.vertices;
-            var normals = mesh.normals;
-            for (int i = 0; i < verts.Length; i++)
-            {
-                verts[i] = matrix.MultiplyPoint3x4(verts[i]);
-                if (normals != null && i < normals.Length)
-                    normals[i] = matrix.MultiplyVector(normals[i]).normalized;
-            }
-            mesh.SetVertices(verts);
-            if (normals != null && normals.Length > 0)
-                mesh.SetNormals(normals);
+            var lods = ctx.LodGroup.GetLODs();
+            int targetIdx = Mathf.Clamp(insertIndex, 0, lods.Length);
 
-            var tangents = mesh.tangents;
-            if (tangents != null && tangents.Length > 0)
+            // Compute transition height: midpoint between neighbours.
+            float prevTrans = targetIdx > 0
+                ? lods[targetIdx - 1].screenRelativeTransitionHeight : 1f;
+            float nextTrans = targetIdx < lods.Length
+                ? lods[targetIdx].screenRelativeTransitionHeight : 0.01f;
+            float newTrans = Mathf.Max(0.01f, (prevTrans + nextTrans) * 0.5f);
+
+            // Default quality: half the previous LOD slider (or 0.5 for the first
+            // inserted slot). The user can refine via the row slider after.
+            float quality = 0.5f;
+            if (targetIdx > 0)
             {
-                for (int i = 0; i < tangents.Length; i++)
+                foreach (var existing in dummy.lods)
                 {
-                    Vector3 tVec = matrix.MultiplyVector(
-                        new Vector3(tangents[i].x, tangents[i].y, tangents[i].z)).normalized;
-                    tangents[i] = new Vector4(tVec.x, tVec.y, tVec.z, tangents[i].w);
+                    if (existing.lodIndex != targetIdx - 1) continue;
+                    if (existing.renderer == null) break;
+                    int rid = existing.renderer.GetInstanceID();
+                    if (lodQualitySliders.TryGetValue(rid, out var prevQ))
+                        quality = Mathf.Max(0.01f, prevQ * 0.5f);
+                    break;
                 }
-                mesh.tangents = tangents;
             }
-            mesh.RecalculateBounds();
+
+            // Generate a new mesh and renderer GameObject from the dummy's LOD0.
+            var sourceMesh = ResolveLodSourceMesh(dummy,
+                dummy.lods.Count > 0 ? dummy.lods[0] : new HierarchyLodRow { lodIndex = 0 });
+            if (sourceMesh == null)
+            {
+                UvtLog.Warn("[LightmapUV] Insert LOD: no source mesh in this dummy group.");
+                return;
+            }
+
+            var settings = new MeshSimplifier.SimplifySettings
+            {
+                targetRatio  = quality,
+                targetError  = 0.1f,
+                uv2Weight    = 0.5f,
+                normalWeight = 0.5f,
+                lockBorder   = true,
+                uvChannel    = 1
+            };
+
+            var res = MeshSimplifier.Simplify(sourceMesh, settings);
+            if (!res.ok)
+            {
+                UvtLog.Warn($"[LightmapUV] Insert LOD simplify failed: {res.error}");
+                return;
+            }
+
+            string baseName = UvToolContext.ExtractGroupKey(sourceMesh.name);
+            if (string.IsNullOrEmpty(baseName)) baseName = sourceMesh.name;
+            res.simplifiedMesh.name = baseName + "_LOD" + targetIdx;
+
+            // Pick a parent: prefer the existing dummy container, else the LODGroup transform.
+            Transform parent = dummy.dummy != null ? dummy.dummy : ctx.LodGroup.transform;
+
+            var go = new GameObject(baseName + "_LOD" + targetIdx);
+            Undo.RegisterCreatedObjectUndo(go, "Insert LOD");
+            go.transform.SetParent(parent, false);
+
+            var mf = go.AddComponent<MeshFilter>();
+            mf.sharedMesh = res.simplifiedMesh;
+            var mr = go.AddComponent<MeshRenderer>();
+
+            // Copy renderer settings from the LOD0 source where possible.
+            Renderer sourceRenderer = null;
+            foreach (var candidate in dummy.lods)
+                if (candidate.lodIndex == 0 && candidate.renderer != null)
+                { sourceRenderer = candidate.renderer; break; }
+            if (sourceRenderer != null)
+                LightmapTransferTool.CopyRendererSettings(sourceRenderer, mr);
+
+            // Splice into LODs[]: shift renderers from targetIdx onward down a slot.
+            var newLods = new LOD[lods.Length + 1];
+            for (int i = 0; i < targetIdx; i++) newLods[i] = lods[i];
+            newLods[targetIdx] = new LOD(newTrans, new Renderer[] { mr });
+            for (int i = targetIdx; i < lods.Length; i++) newLods[i + 1] = lods[i];
+
+            LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
+
+            // Save the chosen quality on the new renderer slot so the slider
+            // reflects the value that was just used.
+            lodQualitySliders[mr.GetInstanceID()] = quality;
+
+            buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup
+                | FbxExportIntent.AnyUv | FbxExportIntent.Normals
+                | FbxExportIntent.Tangents | FbxExportIntent.VertexColors;
+
+            Undo.CollapseUndoOperations(undoGroup);
+
+            UvtLog.Info($"[LightmapUV] Inserted LOD{targetIdx} '{go.name}' (quality {quality:P0}, "
+                + $"{res.originalTriCount} → {res.simplifiedTriCount} tris)");
+
+            ctx.LodGroup.RecalculateBounds();
+            ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
+            requestRepaint?.Invoke();
         }
 
+        void DeleteLodRow(HierarchyDummy dummy, HierarchyLodRow lod)
+        {
+            if (ctx.LodGroup == null || dummy == null || lod == null) return;
+            var lods = ctx.LodGroup.GetLODs();
+            if (lod.lodIndex < 0 || lod.lodIndex >= lods.Length) return;
+
+            Undo.SetCurrentGroupName("Prefab Builder: Delete LOD");
+            int undoGroup = Undo.GetCurrentGroup();
+
+            // Remove the renderer GameObject and its slot.
+            // If the slot still has other renderers (multi-mesh per LOD), only
+            // strip this renderer; otherwise drop the slot entirely.
+            var slot = lods[lod.lodIndex];
+            var renderers = slot.renderers != null
+                ? new List<Renderer>(slot.renderers) : new List<Renderer>();
+            renderers.Remove(lod.renderer);
+
+            if (renderers.Count > 0)
+            {
+                lods[lod.lodIndex] = new LOD(slot.screenRelativeTransitionHeight, renderers.ToArray());
+                LodGroupUtility.ApplyLods(ctx.LodGroup, lods);
+            }
+            else
+            {
+                var newLods = new LOD[lods.Length - 1];
+                for (int i = 0, j = 0; i < lods.Length; i++)
+                {
+                    if (i == lod.lodIndex) continue;
+                    newLods[j++] = lods[i];
+                }
+                LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
+            }
+
+            if (lod.renderer != null && lod.renderer.gameObject != null)
+                Undo.DestroyObjectImmediate(lod.renderer.gameObject);
+
+            Undo.CollapseUndoOperations(undoGroup);
+
+            buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup;
+
+            UvtLog.Info($"[LightmapUV] Removed LOD{lod.lodIndex} from '{dummy.dummy.name}'.");
+
+            ctx.LodGroup.RecalculateBounds();
+            ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
+            requestRepaint?.Invoke();
+        }
+
+        void DeleteCol(HierarchyDummy dummy, HierarchyColRow col)
+        {
+            if (col == null || col.colTransform == null) return;
+
+            UvtLog.Info($"[LightmapUV] Removed COL '{col.colTransform.name}' from '{dummy.dummy.name}'.");
+            Undo.DestroyObjectImmediate(col.colTransform.gameObject);
+
+            buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.Collision;
+
+            if (ctx.LodGroup != null) ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
+            requestRepaint?.Invoke();
+        }
+
+        // ── Channel badges: compact summary of which mesh streams have data. ──
+
+        static string ChannelBadges(Mesh mesh)
+        {
+            if (mesh == null) return "";
+            var parts = new List<string>();
+            if (mesh.isReadable)
+            {
+                var tmp = new List<Vector2>();
+                for (int ch = 0; ch <= 3; ch++)
+                {
+                    mesh.GetUVs(ch, tmp);
+                    if (tmp.Count > 0) parts.Add("UV" + ch);
+                }
+                if (mesh.colors32 != null && mesh.colors32.Length > 0) parts.Add("VC");
+                if (mesh.normals != null && mesh.normals.Length > 0) parts.Add("N");
+                if (mesh.tangents != null && mesh.tangents.Length > 0) parts.Add("T");
+            }
+            return parts.Count == 0 ? "—" : string.Join("·", parts);
+        }
+
+        // Helper kept for use by FixSplitByMaterial, which still needs to rebuild
+        // the LODGroup after restructuring renderer GameObjects.
         void RebuildLodGroupFromNames()
         {
             if (ctx.LodGroup == null) return;
@@ -816,7 +974,6 @@ namespace SashaRX.UnityMeshLab
             var colSet = new HashSet<GameObject>(MeshHygieneUtility.FindCollisionObjects(root));
             var lodChildren = new SortedDictionary<int, List<Renderer>>();
 
-            // Search recursively — meshes can be inside group containers
             foreach (var r in root.GetComponentsInChildren<Renderer>(true))
             {
                 if (r == null || r.transform == root) continue;
@@ -828,7 +985,6 @@ namespace SashaRX.UnityMeshLab
                 if (!match.Success) continue;
 
                 int lodIdx = int.Parse(match.Groups[1].Value);
-
                 if (!lodChildren.ContainsKey(lodIdx))
                     lodChildren[lodIdx] = new List<Renderer>();
                 lodChildren[lodIdx].Add(r);
@@ -838,18 +994,14 @@ namespace SashaRX.UnityMeshLab
 
             Undo.RecordObject(ctx.LodGroup, "Rebuild LODGroup");
 
-            // Build contiguous LOD array from sorted keys.
-            // Transitions must be strictly descending for Unity's SetLODs.
             int lodCount = lodChildren.Count;
             var newLods = new LOD[lodCount];
             int idx = 0;
             foreach (var kvp in lodChildren)
             {
-                float screenHeight;
-                if (lodCount == 1)
-                    screenHeight = 0.01f;
-                else
-                    screenHeight = 1f - ((float)idx / (lodCount - 1)) * 0.99f; // 1.0 → 0.01
+                float screenHeight = lodCount == 1
+                    ? 0.01f
+                    : 1f - ((float)idx / (lodCount - 1)) * 0.99f;
                 newLods[idx] = new LOD(screenHeight, kvp.Value.ToArray());
                 idx++;
             }
@@ -858,553 +1010,7 @@ namespace SashaRX.UnityMeshLab
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Build Pipeline section: Open Prefab → Generate LODs (with
-        // progressive scaleInLightmap) → Validate → Save FBX.
-        // ═══════════════════════════════════════════════════════════
-
-        void DrawBuildPipelineSection()
-        {
-            EditorGUILayout.Space(8);
-            buildFoldout = EditorGUILayout.Foldout(buildFoldout, "Build Pipeline", true);
-            if (!buildFoldout) return;
-
-            if (ctx.LodGroup == null)
-            {
-                EditorGUILayout.HelpBox("No LODGroup selected.", MessageType.Info);
-                return;
-            }
-
-            DrawBuildOpenPrefab();
-            EditorGUILayout.Space(6);
-            DrawBuildGenerateLods();
-            EditorGUILayout.Space(6);
-            DrawBuildValidate();
-            EditorGUILayout.Space(6);
-            DrawBuildSave();
-        }
-
-        void DrawBuildOpenPrefab()
-        {
-            EditorGUILayout.LabelField("Open Prefab", EditorStyles.miniBoldLabel);
-
-            var stage = PrefabStageUtility.GetCurrentPrefabStage();
-            bool inStage = stage != null;
-            editInPrefabStage = inStage;
-
-            bool desired = EditorGUILayout.Toggle("Edit in isolated Prefab Stage", editInPrefabStage);
-
-            string prefabPath = ResolvePrefabPathForEdit();
-            using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(prefabPath) && !inStage))
-            {
-                string label = desired == inStage
-                    ? (inStage ? "Reload Prefab Stage" : "Open / Focus Prefab")
-                    : (desired ? "Open Prefab Stage" : "Return to Main Stage");
-                if (GUILayout.Button(label, GUILayout.Height(22)))
-                    ApplyPrefabStage(desired, prefabPath, inStage);
-            }
-
-            if (inStage)
-                EditorGUILayout.LabelField($"Stage: {System.IO.Path.GetFileName(stage.assetPath)}", EditorStyles.miniLabel);
-            else if (!string.IsNullOrEmpty(prefabPath))
-                EditorGUILayout.LabelField($"Source: {System.IO.Path.GetFileName(prefabPath)}", EditorStyles.miniLabel);
-        }
-
-        string ResolvePrefabPathForEdit()
-        {
-            if (ctx.LodGroup == null) return null;
-            var go = ctx.LodGroup.gameObject;
-            if (PrefabUtility.IsPartOfPrefabInstance(go))
-                return PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go);
-            if (PrefabUtility.IsPartOfPrefabAsset(go))
-                return AssetDatabase.GetAssetPath(go);
-            return null;
-        }
-
-        void ApplyPrefabStage(bool wantStage, string prefabPath, bool currentlyInStage)
-        {
-            if (!wantStage)
-            {
-                if (currentlyInStage) StageUtility.GoToMainStage();
-                UvtLog.Info("[LightmapUV] Switched to main stage.");
-                requestRepaint?.Invoke();
-                return;
-            }
-            if (string.IsNullOrEmpty(prefabPath))
-            {
-                UvtLog.Warn("[LightmapUV] No prefab asset path resolved for current LODGroup.");
-                return;
-            }
-            var stage = PrefabStageUtility.OpenPrefab(prefabPath);
-            if (stage == null) { UvtLog.Warn($"[LightmapUV] Failed to open {prefabPath}"); return; }
-            var root = stage.prefabContentsRoot;
-            var lg = root != null ? root.GetComponentInChildren<LODGroup>() : null;
-            if (lg != null) ctx.Refresh(lg);
-            UvtLog.Info($"[LightmapUV] Opened prefab {prefabPath}");
-            requestRepaint?.Invoke();
-        }
-
-        void DrawBuildGenerateLods()
-        {
-            EditorGUILayout.LabelField("Generate LODs", EditorStyles.miniBoldLabel);
-
-            buildLodCount = EditorGUILayout.IntSlider("Count (new)", buildLodCount, 1, 4);
-            for (int i = 0; i < buildLodCount && i < buildLodRatios.Length; i++)
-            {
-                float maxRatio = i == 0 ? 0.99f : buildLodRatios[i - 1] * 0.99f;
-                if (maxRatio < 0.001f) maxRatio = 0.001f;
-                if (buildLodRatios[i] > maxRatio) buildLodRatios[i] = maxRatio * 0.5f;
-                buildLodRatios[i] = EditorGUILayout.Slider($"  LOD{i + 1} ratio", buildLodRatios[i], 0.001f, maxRatio);
-            }
-
-            buildTargetError  = EditorGUILayout.Slider("Target Error", buildTargetError, 0.001f, 0.5f);
-            buildUv2Weight    = EditorGUILayout.Slider("UV2 Weight", buildUv2Weight, 0f, 500f);
-            buildNormalWeight = EditorGUILayout.Slider("Normal Weight", buildNormalWeight, 0f, 10f);
-            buildLockBorder   = EditorGUILayout.Toggle("Lock Border", buildLockBorder);
-
-            var preview = new System.Text.StringBuilder("scaleInLightmap: LOD0=inherit");
-            for (int i = 1; i <= buildLodCount; i++)
-                preview.Append($", LOD{i}={Mathf.Pow(0.5f, i):F3}");
-            EditorGUILayout.LabelField(preview.ToString(), EditorStyles.miniLabel);
-
-            var bg = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(.7f, .4f, .95f);
-            if (GUILayout.Button("Generate LODs", GUILayout.Height(26)))
-                ExecBuildGenerateLods();
-            GUI.backgroundColor = bg;
-        }
-
-        void ExecBuildGenerateLods()
-        {
-            int startLod = 1;
-            var lods = ctx.LodGroup.GetLODs();
-            for (int li = 0; li < lods.Length; li++)
-                if (lods[li].renderers != null && lods[li].renderers.Length > 0)
-                    startLod = li + 1;
-            if (startLod == 0) startLod = 1;
-
-            var opts = new LodPipelineOps.Options
-            {
-                count = buildLodCount,
-                ratios = buildLodRatios,
-                targetError = buildTargetError,
-                uv2Weight = buildUv2Weight,
-                normalWeight = buildNormalWeight,
-                lockBorder = buildLockBorder,
-                progressiveScaleInLightmap = true
-            };
-            var result = LodPipelineOps.Generate(ctx, startLod, opts);
-            if (!result.ok)
-            {
-                UvtLog.Error($"[Build] Generate failed: {result.error}");
-                return;
-            }
-            // Generated LODs add fresh meshes with their own UVs / colors /
-            // normals / tangents and grow the LODGroup component.
-            buildIntent |= FbxExportIntent.Hierarchy
-                           | FbxExportIntent.LodGroup
-                           | FbxExportIntent.AnyUv
-                           | FbxExportIntent.VertexColors
-                           | FbxExportIntent.Normals
-                           | FbxExportIntent.Tangents;
-            buildIssues = null;
-            requestRepaint?.Invoke();
-        }
-
-        void DrawBuildValidate()
-        {
-            EditorGUILayout.LabelField("Validate", EditorStyles.miniBoldLabel);
-
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Validate", GUILayout.Height(22)))
-                buildIssues = BuildValidator.Run(ctx);
-            using (new EditorGUI.DisabledScope(buildIssues == null || buildIssues.Count == 0))
-            {
-                if (GUILayout.Button("Clear", GUILayout.Width(80), GUILayout.Height(22)))
-                    buildIssues = null;
-            }
-            EditorGUILayout.EndHorizontal();
-
-            if (buildIssues == null) return;
-            if (buildIssues.Count == 0)
-            {
-                EditorGUILayout.HelpBox("No issues found.", MessageType.Info);
-                return;
-            }
-
-            int blockers = buildIssues.Count(i => BuildValidator.IsBlocker(i.group));
-            int warns = buildIssues.Count - blockers;
-            EditorGUILayout.LabelField($"Total: {buildIssues.Count}  (blockers: {blockers}, warnings: {warns})",
-                EditorStyles.miniLabel);
-
-            foreach (BuildValidator.IssueGroup grp in System.Enum.GetValues(typeof(BuildValidator.IssueGroup)))
-            {
-                var inGroup = buildIssues.Where(i => i.group == grp).ToList();
-                if (inGroup.Count == 0) continue;
-                if (!buildIssueFoldouts.TryGetValue(grp, out var open)) open = true;
-                string badge = BuildValidator.IsBlocker(grp) ? "✖" : "⚠";
-                open = EditorGUILayout.Foldout(open, $"  {badge} {grp} ({inGroup.Count})", true);
-                buildIssueFoldouts[grp] = open;
-                if (!open) continue;
-                foreach (var issue in inGroup)
-                {
-                    EditorGUILayout.BeginHorizontal();
-                    EditorGUILayout.LabelField($"    {issue.meshName}: {issue.detail}", EditorStyles.miniLabel);
-                    using (new EditorGUI.DisabledScope(issue.target == null))
-                    {
-                        if (GUILayout.Button("Ping", GUILayout.Width(40), GUILayout.Height(16)))
-                            EditorGUIUtility.PingObject(issue.target);
-                    }
-                    EditorGUILayout.EndHorizontal();
-                }
-            }
-        }
-
-        void DrawBuildSave()
-        {
-            EditorGUILayout.LabelField("Save", EditorStyles.miniBoldLabel);
-
-            EditorGUILayout.BeginHorizontal();
-            var bg = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(.4f, .8f, .4f);
-            if (GUILayout.Button("Overwrite Source FBX", GUILayout.Height(26)))
-                ExecBuildSave(overwriteSource: true);
-            GUI.backgroundColor = new Color(.3f, .7f, 1f);
-            if (GUILayout.Button("Save As New FBX…", GUILayout.Height(26)))
-                ExecBuildSave(overwriteSource: false);
-            GUI.backgroundColor = bg;
-            EditorGUILayout.EndHorizontal();
-        }
-
-        void ExecBuildSave(bool overwriteSource)
-        {
-            if (buildIssues == null) buildIssues = BuildValidator.Run(ctx);
-            var blockers = buildIssues.Where(i => BuildValidator.IsBlocker(i.group)).ToList();
-            if (blockers.Count > 0)
-            {
-                string msg = "Fix blocking issues first:\n\n" +
-                    string.Join("\n", blockers.Take(6).Select(b => $"• [{b.group}] {b.meshName}: {b.detail}"));
-                if (blockers.Count > 6) msg += $"\n… +{blockers.Count - 6} more";
-                EditorUtility.DisplayDialog("Build blocked", msg, "OK");
-                return;
-            }
-
-            var hubs = Resources.FindObjectsOfTypeAll<UvToolHub>();
-            var hub = hubs != null && hubs.Length > 0 ? hubs[0] : null;
-            var transferTool = hub != null ? hub.FindTool<LightmapTransferTool>() : null;
-            if (transferTool == null)
-            {
-                UvtLog.Error("[Build] UV2 Transfer tool not found — cannot export FBX.");
-                return;
-            }
-            // Build pipeline tracks which channels its operations touched
-            // since the last refresh. If nothing was tracked we conservatively
-            // fall back to the wide path (intent=All) — Save can be hit
-            // after edits made by other tools (UV2 transfer, vertex color
-            // baking, etc.) that we don't observe from here.
-            var intent = buildIntent != FbxExportIntent.None
-                ? buildIntent
-                : FbxExportIntent.All;
-            transferTool.ExportFbxPublic(overwriteSource, intent);
-            buildIntent = FbxExportIntent.None;
-            buildIssues = null;
-        }
-
-        // ═══════════════════════════════════════════════════════════
-        // LOD management section
-        // ═══════════════════════════════════════════════════════════
-
-        void DrawLodManagementSection()
-        {
-            EditorGUILayout.Space(8);
-            lodFoldout = EditorGUILayout.Foldout(lodFoldout, "LOD Levels", true);
-            if (!lodFoldout) return;
-
-            if (ctx.LodGroup == null)
-            {
-                EditorGUILayout.HelpBox("No LODGroup selected.", MessageType.Info);
-                return;
-            }
-
-            var lods = ctx.LodGroup.GetLODs();
-            bool changed = false;
-
-            for (int li = 0; li < lods.Length; li++)
-            {
-                var renderers = lods[li].renderers;
-                int rendCount = 0;
-                int totalVerts = 0;
-                if (renderers != null)
-                {
-                    foreach (var r in renderers)
-                    {
-                        if (r == null) continue;
-                        rendCount++;
-                        var mf = r.GetComponent<MeshFilter>();
-                        if (mf != null && mf.sharedMesh != null)
-                            totalVerts += mf.sharedMesh.vertexCount;
-                    }
-                }
-
-                EditorGUILayout.BeginHorizontal();
-
-                // LOD label
-                EditorGUILayout.LabelField($"LOD{li}", EditorStyles.boldLabel, GUILayout.Width(42));
-
-                // Transition slider
-                float oldTrans = lods[li].screenRelativeTransitionHeight;
-                float newTrans = EditorGUILayout.Slider(oldTrans, 0.001f, 1f);
-                if (Mathf.Abs(newTrans - oldTrans) > 0.0001f)
-                {
-                    lods[li].screenRelativeTransitionHeight = newTrans;
-                    changed = true;
-                }
-
-                // Stats
-                EditorGUILayout.LabelField($"{rendCount}r {totalVerts:N0}v",
-                    EditorStyles.miniLabel, GUILayout.Width(80));
-
-                // Per-row Regenerate button (LOD >= 1 only — LOD0 is the source).
-                if (li > 0)
-                {
-                    GUI.backgroundColor = new Color(.6f, .75f, .9f);
-                    if (GUILayout.Button(new GUIContent("\u21BB",
-                            "Regenerate this LOD mesh from LOD0 via mesh simplifier."),
-                            GUILayout.Width(22), GUILayout.Height(18)))
-                    {
-                        RegenerateLod(li);
-                        return; // UI invalidated
-                    }
-                    GUI.backgroundColor = Color.white;
-                }
-
-                // Remove LOD button
-                if (lods.Length > 1)
-                {
-                    GUI.backgroundColor = new Color(0.9f, 0.3f, 0.3f);
-                    if (GUILayout.Button("X", GUILayout.Width(22), GUILayout.Height(18)))
-                    {
-                        RemoveLodLevel(li);
-                        return; // UI is invalidated, exit early
-                    }
-                    GUI.backgroundColor = Color.white;
-                }
-
-                EditorGUILayout.EndHorizontal();
-
-                // Per-renderer list with move buttons
-                if (renderers != null)
-                {
-                    for (int ri = 0; ri < renderers.Length; ri++)
-                    {
-                        var r = renderers[ri];
-                        if (r == null) continue;
-
-                        EditorGUILayout.BeginHorizontal();
-                        GUILayout.Space(48);
-
-                        EditorGUILayout.LabelField(r.name, EditorStyles.miniLabel);
-
-                        // Move up (to previous LOD)
-                        GUI.enabled = li > 0;
-                        if (GUILayout.Button("\u25B2", GUILayout.Width(22), GUILayout.Height(16)))
-                        {
-                            MoveRendererBetweenLods(r, li, li - 1);
-                            return;
-                        }
-                        GUI.enabled = true;
-
-                        // Move down (to next LOD)
-                        GUI.enabled = li < lods.Length - 1;
-                        if (GUILayout.Button("\u25BC", GUILayout.Width(22), GUILayout.Height(16)))
-                        {
-                            MoveRendererBetweenLods(r, li, li + 1);
-                            return;
-                        }
-                        GUI.enabled = true;
-
-                        EditorGUILayout.EndHorizontal();
-                    }
-                }
-            }
-
-            if (changed)
-                LodGroupUtility.ApplyLods(ctx.LodGroup, lods);
-
-            // Add LOD button
-            EditorGUILayout.Space(4);
-            var bgc = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.6f, 0.75f, 0.9f);
-            if (GUILayout.Button("+ Add LOD Level", GUILayout.Height(22)))
-                AddLodLevel();
-            GUI.backgroundColor = bgc;
-        }
-
-        void AddLodLevel()
-        {
-            if (ctx.LodGroup == null) return;
-
-            var lods = ctx.LodGroup.GetLODs();
-            var newLods = new LOD[lods.Length + 1];
-            System.Array.Copy(lods, newLods, lods.Length);
-
-            float lastTrans = lods.Length > 0 ? lods[lods.Length - 1].screenRelativeTransitionHeight : 0.5f;
-            newLods[lods.Length] = new LOD(lastTrans * 0.5f, new Renderer[0]);
-
-            LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
-            ctx.Refresh(ctx.LodGroup);
-            requestRepaint?.Invoke();
-            UvtLog.Info($"Added LOD{lods.Length} (transition: {lastTrans * 0.5f:F3})");
-        }
-
-        void RemoveLodLevel(int lodIndex)
-        {
-            if (ctx.LodGroup == null) return;
-
-            var lods = ctx.LodGroup.GetLODs();
-            if (lodIndex < 0 || lodIndex >= lods.Length) return;
-
-            var newLods = new LOD[lods.Length - 1];
-            for (int i = 0, j = 0; i < lods.Length; i++)
-            {
-                if (i == lodIndex) continue;
-                newLods[j++] = lods[i];
-            }
-
-            LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
-            ctx.LodGroup.RecalculateBounds();
-            ctx.Refresh(ctx.LodGroup);
-            requestRepaint?.Invoke();
-            UvtLog.Info($"Removed LOD{lodIndex}");
-        }
-
-        // Regenerate a single LOD's meshes from the matching LOD0 source via
-        // mesh simplifier. Preserves existing LOD renderer GameObjects — we
-        // just swap mf.sharedMesh — so prefab-instance structure stays
-        // intact. Matches sources by stripped group key (UvToolContext.
-        // ExtractGroupKey), so LOD0 'Wall' pairs with LODN 'Wall_LOD2', etc.
-        void RegenerateLod(int lodIndex)
-        {
-            if (ctx.LodGroup == null) return;
-            if (lodIndex <= 0)
-            {
-                UvtLog.Warn("[LOD] Can't regenerate LOD0 — it is the source.");
-                return;
-            }
-            var lods = ctx.LodGroup.GetLODs();
-            if (lodIndex >= lods.Length)
-            {
-                UvtLog.Warn($"[LOD] Invalid LOD index {lodIndex}.");
-                return;
-            }
-
-            var lod0 = lods[0].renderers ?? new Renderer[0];
-            var lodN = lods[lodIndex].renderers ?? new Renderer[0];
-            if (lod0.Length == 0 || lodN.Length == 0)
-            {
-                UvtLog.Warn($"[LOD] Regenerate LOD{lodIndex}: empty source or target.");
-                return;
-            }
-
-            // Index LOD0 source meshes by stripped base name.
-            var sourceByKey = new System.Collections.Generic.Dictionary<string, Mesh>();
-            foreach (var r in lod0)
-            {
-                if (r == null) continue;
-                var mf = r.GetComponent<MeshFilter>();
-                if (mf == null || mf.sharedMesh == null) continue;
-                var key = UvToolContext.ExtractGroupKey(r.name);
-                if (!string.IsNullOrEmpty(key))
-                    sourceByKey[key] = mf.sharedMesh;
-            }
-
-            if (sourceByKey.Count == 0)
-            {
-                UvtLog.Warn($"[LOD] Regenerate LOD{lodIndex}: no LOD0 source meshes found.");
-                return;
-            }
-
-            // Ratio: 0.5^lodIndex against LOD0. Reasonable default for most
-            // pipelines; user can tweak via LodGen tab for finer control.
-            float ratio = Mathf.Clamp(Mathf.Pow(0.5f, lodIndex), 0.05f, 0.95f);
-            var settings = new MeshSimplifier.SimplifySettings
-            {
-                targetRatio  = ratio,
-                targetError  = 0.1f,
-                uv2Weight    = 0.5f,
-                normalWeight = 0.5f,
-                lockBorder   = true,
-                uvChannel    = 1,
-            };
-
-            int regenerated = 0;
-            try
-            {
-                foreach (var r in lodN)
-                {
-                    if (r == null) continue;
-                    var mf = r.GetComponent<MeshFilter>();
-                    if (mf == null) continue;
-                    var key = UvToolContext.ExtractGroupKey(r.name);
-                    if (string.IsNullOrEmpty(key)) continue;
-                    if (!sourceByKey.TryGetValue(key, out var sourceMesh)) continue;
-
-                    var res = MeshSimplifier.Simplify(sourceMesh, settings);
-                    if (!res.ok)
-                    {
-                        UvtLog.Warn($"[LOD] Simplify failed for '{sourceMesh.name}': {res.error}");
-                        continue;
-                    }
-                    res.simplifiedMesh.name = sourceMesh.name + "_LOD" + lodIndex;
-
-                    Undo.RecordObject(mf, "Regenerate LOD");
-                    mf.sharedMesh = res.simplifiedMesh;
-                    regenerated++;
-                }
-            }
-            finally
-            {
-                EditorUtility.ClearProgressBar();
-            }
-
-            if (regenerated > 0)
-            {
-                UvtLog.Info($"[LOD] Regenerated LOD{lodIndex}: {regenerated} mesh(es), ratio={ratio:P0}");
-                ctx.LodGroup.RecalculateBounds();
-                ctx.Refresh(ctx.LodGroup);
-                requestRepaint?.Invoke();
-            }
-            else
-            {
-                UvtLog.Warn($"[LOD] Regenerate LOD{lodIndex}: nothing matched (check that LODN renderer names share a base with LOD0).");
-            }
-        }
-
-        void MoveRendererBetweenLods(Renderer renderer, int fromLod, int toLod)
-        {
-            if (ctx.LodGroup == null) return;
-
-            Undo.RecordObject(ctx.LodGroup, "Move Renderer LOD");
-            var lods = ctx.LodGroup.GetLODs();
-            if (fromLod < 0 || fromLod >= lods.Length || toLod < 0 || toLod >= lods.Length) return;
-
-            // Remove from source LOD
-            var srcList = new List<Renderer>(lods[fromLod].renderers ?? new Renderer[0]);
-            srcList.Remove(renderer);
-            lods[fromLod].renderers = srcList.ToArray();
-
-            // Add to target LOD
-            var dstList = new List<Renderer>(lods[toLod].renderers ?? new Renderer[0]);
-            dstList.Add(renderer);
-            lods[toLod].renderers = dstList.ToArray();
-
-            ctx.LodGroup.SetLODs(lods);
-            ctx.Refresh(ctx.LodGroup);
-            requestRepaint?.Invoke();
-            UvtLog.Info($"Moved {renderer.name}: LOD{fromLod} -> LOD{toLod}");
-        }
-
-        // ═══════════════════════════════════════════════════════════
-        // Collision management section
+        // Collision section (legacy — migrates to right-panel Collider Settings in PR-2)
         // ═══════════════════════════════════════════════════════════
 
         void DrawCollisionSection()
@@ -1419,7 +1025,6 @@ namespace SashaRX.UnityMeshLab
             var colObjects = MeshHygieneUtility.FindCollisionObjects(root);
             var rootCollider = root.GetComponent<MeshCollider>();
 
-            // Current state
             if (rootCollider != null)
             {
                 Mesh colMesh = rootCollider.sharedMesh;
@@ -1443,7 +1048,6 @@ namespace SashaRX.UnityMeshLab
                 EditorGUILayout.LabelField("Root: no MeshCollider", EditorStyles.miniLabel);
             }
 
-            // Collision child objects
             if (colObjects.Count > 0)
             {
                 EditorGUILayout.Space(4);
@@ -1463,7 +1067,6 @@ namespace SashaRX.UnityMeshLab
                         EditorGUILayout.LabelField($"{mesh.vertexCount:N0}v",
                             EditorStyles.miniLabel, GUILayout.Width(60));
 
-                    // Toggle renderer visibility
                     if (mr != null)
                     {
                         bool vis = mr.enabled;
@@ -1475,7 +1078,6 @@ namespace SashaRX.UnityMeshLab
                         }
                     }
 
-                    // Assign to root button
                     if (mesh != null && (rootCollider == null || rootCollider.sharedMesh != mesh))
                     {
                         if (GUILayout.Button("Assign", GUILayout.Width(50), GUILayout.Height(16)))
@@ -1486,12 +1088,10 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // Action buttons
             EditorGUILayout.Space(4);
             var bgc = GUI.backgroundColor;
             EditorGUILayout.BeginHorizontal();
 
-            // Add MeshCollider from first _COL child
             if (rootCollider == null && colObjects.Count > 0)
             {
                 GUI.backgroundColor = new Color(0.4f, 0.8f, 0.4f);
@@ -1504,7 +1104,6 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // Use LOD0 mesh as collision (if no _COL exists)
             if (rootCollider == null && colObjects.Count == 0)
             {
                 GUI.backgroundColor = new Color(0.6f, 0.75f, 0.9f);
@@ -1520,7 +1119,6 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // Disable all COL renderers
             if (colObjects.Count > 0)
             {
                 GUI.backgroundColor = new Color(0.7f, 0.4f, 0.95f);
@@ -1560,7 +1158,7 @@ namespace SashaRX.UnityMeshLab
             if (mc == null)
             {
                 mc = Undo.AddComponent<MeshCollider>(root);
-                UvtLog.Info($"Added MeshCollider to {root.name}");
+                UvtLog.Info($"[LightmapUV] Added MeshCollider to {root.name}");
             }
             else
             {
@@ -1568,12 +1166,13 @@ namespace SashaRX.UnityMeshLab
             }
 
             mc.sharedMesh = mesh;
-            UvtLog.Info($"Assigned collision mesh: {mesh.name}");
+            buildIntent |= FbxExportIntent.Collision;
+            UvtLog.Info($"[LightmapUV] Assigned collision mesh: {mesh.name}");
             requestRepaint?.Invoke();
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Split / Merge section
+        // Split / Merge section (legacy — migrates in PR-2)
         // ═══════════════════════════════════════════════════════════
 
         void DrawSplitMergeSection()
@@ -1588,7 +1187,6 @@ namespace SashaRX.UnityMeshLab
                 ScanSplitMerge();
             GUI.backgroundColor = bgc;
 
-            // ── Split by Material ──
             if (splitCandidates != null)
             {
                 EditorGUILayout.Space(4);
@@ -1616,7 +1214,6 @@ namespace SashaRX.UnityMeshLab
                         EditorGUILayout.LabelField(info, EditorStyles.miniLabel);
                         EditorGUILayout.EndHorizontal();
 
-                        // Preview names
                         if (sc.include)
                         {
                             string srcName = sc.entry.renderer.name;
@@ -1640,7 +1237,6 @@ namespace SashaRX.UnityMeshLab
                         }
                     }
 
-                    // Split preview + apply buttons
                     EditorGUILayout.BeginHorizontal();
                     int splitSel = 0;
                     foreach (var s in splitCandidates) if (s.include) splitSel++;
@@ -1664,7 +1260,6 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // ── Merge Same-Material ──
             if (mergeCandidates != null)
             {
                 EditorGUILayout.Space(8);
@@ -1761,7 +1356,7 @@ namespace SashaRX.UnityMeshLab
                 if (kvp.Value.entries.Count > 1)
                     mergeCandidates.Add(kvp.Value);
 
-            UvtLog.Info($"Split/Merge scan: {splitCandidates.Count} split, {mergeCandidates.Count} merge.");
+            UvtLog.Info($"[LightmapUV] Split/Merge scan: {splitCandidates.Count} split, {mergeCandidates.Count} merge.");
         }
 
         void FixSplitByMaterial()
@@ -1798,7 +1393,6 @@ namespace SashaRX.UnityMeshLab
                     string matName = mats[s] != null ? mats[s].name : $"mat{s}";
                     string childName = $"{srcName}_{matName}{lodSuffix}";
 
-                    // Extract submesh
                     var subTris = mesh.GetTriangles(s);
                     var subMesh = MeshHygieneUtility.ExtractSubmesh(mesh, subTris);
                     if (subMesh == null) continue;
@@ -1820,7 +1414,7 @@ namespace SashaRX.UnityMeshLab
                         GameObjectUtility.GetStaticEditorFlags(sc.entry.renderer.gameObject));
                 }
 
-                UvtLog.Info($"Split: {sc.entry.renderer.name} -> {mesh.subMeshCount} children");
+                UvtLog.Info($"[LightmapUV] Split: {sc.entry.renderer.name} → {mesh.subMeshCount} children");
                 Undo.DestroyObjectImmediate(sc.entry.renderer.gameObject);
                 split++;
             }
@@ -1832,12 +1426,15 @@ namespace SashaRX.UnityMeshLab
                 ctx.Refresh(ctx.LodGroup);
                 RebuildLodGroupFromNames();
                 ctx.LodGroup.RecalculateBounds();
+                buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup
+                    | FbxExportIntent.Materials;
             }
 
             splitCandidates = null;
             mergeCandidates = null;
             preview?.Restore();
             previewMode = PreviewMode.None;
+            hierarchyDummies = null;
             requestRepaint?.Invoke();
         }
 
@@ -1856,10 +1453,8 @@ namespace SashaRX.UnityMeshLab
                 var firstEntry = g.entries[0];
                 if (firstEntry.renderer == null) continue;
 
-                var parent = firstEntry.renderer.transform.parent;
                 var baseMatrix = firstEntry.renderer.transform.worldToLocalMatrix;
 
-                // Combine meshes
                 var allPos = new List<Vector3>();
                 var allNormals = new List<Vector3>();
                 var allUvs = new List<Vector2>();
@@ -1906,7 +1501,6 @@ namespace SashaRX.UnityMeshLab
                 Undo.RecordObject(firstEntry.meshFilter, "Merge");
                 firstEntry.meshFilter.sharedMesh = mergedMesh;
 
-                // Update LODGroup renderers
                 var lods = ctx.LodGroup.GetLODs();
                 for (int li = 0; li < lods.Length; li++)
                 {
@@ -1937,7 +1531,7 @@ namespace SashaRX.UnityMeshLab
                 }
 
                 merged++;
-                UvtLog.Info($"Merged: {g.entries.Count} objects -> {firstEntry.renderer.name}");
+                UvtLog.Info($"[LightmapUV] Merged: {g.entries.Count} objects → {firstEntry.renderer.name}");
             }
 
             Undo.CollapseUndoOperations(undoGroup);
@@ -1946,17 +1540,19 @@ namespace SashaRX.UnityMeshLab
             {
                 ctx.Refresh(ctx.LodGroup);
                 ctx.LodGroup.RecalculateBounds();
+                buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup;
             }
 
             splitCandidates = null;
             mergeCandidates = null;
             preview?.Restore();
             previewMode = PreviewMode.None;
+            hierarchyDummies = null;
             requestRepaint?.Invoke();
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Mesh info section
+        // Mesh info / edge / problem report sections
         // ═══════════════════════════════════════════════════════════
 
         void DrawMeshInfo()
@@ -1986,10 +1582,6 @@ namespace SashaRX.UnityMeshLab
                     EditorStyles.miniLabel);
             }
         }
-
-        // ═══════════════════════════════════════════════════════════
-        // Edge report
-        // ═══════════════════════════════════════════════════════════
 
         void BuildEdgeReports()
         {
@@ -2034,10 +1626,6 @@ namespace SashaRX.UnityMeshLab
                     EditorStyles.miniLabel);
             }
         }
-
-        // ═══════════════════════════════════════════════════════════
-        // Problem summary
-        // ═══════════════════════════════════════════════════════════
 
         void BuildProblemSummaries()
         {
@@ -2093,10 +1681,6 @@ namespace SashaRX.UnityMeshLab
                     EditorStyles.miniLabel);
             }
         }
-
-        // ═══════════════════════════════════════════════════════════
-        // Edge legend (shown when Edge mode is active)
-        // ═══════════════════════════════════════════════════════════
 
         void DrawEdgeLegend()
         {
