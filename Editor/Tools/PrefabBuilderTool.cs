@@ -153,7 +153,15 @@ namespace SashaRX.UnityMeshLab
             problemSummaries = null;
             pendingNames?.Clear();
             lodQualitySliders?.Clear();
-            freshRendererIds?.Clear();
+            // Intentionally NOT clearing freshRendererIds here: the hub fires
+            // OnRefresh whenever LodCount changes — including changes WE just
+            // made via InsertLodAt / DeleteLodRow. Clearing the fresh-set
+            // here would erase the bright-orange "just inserted" highlight
+            // before the user ever sees it. The set is only cleared on
+            // explicit Rebuild Names (ApplyPendingNames).
+            // Stale instance-IDs left from previously-selected prefabs are
+            // harmless: a new renderer never gets a matching ID while old
+            // ones are still alive.
             hierarchyDummies = null;
             splitCandidates = null;
             mergeCandidates = null;
@@ -504,12 +512,19 @@ namespace SashaRX.UnityMeshLab
             GUILayout.Space(HierarchyRowIndent);
             DrawStatusMarker(fresh, stale);
 
+            // Prefix the displayed name with a loud text marker as a fallback
+            // when the bg-tint isn't visible enough in the user's Unity theme.
+            string nameLabel = fresh
+                ? "★ NEW  " + lod.renderer.gameObject.name
+                : (stale ? "⚠  " + lod.renderer.gameObject.name
+                         : lod.renderer.gameObject.name);
+
             var prevBg = GUI.backgroundColor;
             if (fresh)
                 GUI.backgroundColor = new Color(1.0f, 0.55f, 0.10f);    // bright orange — just inserted/regen
             else if (stale)
                 GUI.backgroundColor = new Color(0.95f, 0.78f, 0.30f);   // amber — name out of sync
-            EditorGUILayout.LabelField(lod.renderer.gameObject.name,
+            EditorGUILayout.LabelField(nameLabel,
                 EditorStyles.textField, GUILayout.MinWidth(120));
             GUI.backgroundColor = prevBg;
             GUILayout.FlexibleSpace();
