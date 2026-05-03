@@ -1368,7 +1368,7 @@ namespace SashaRX.UnityMeshLab
                 "Overwrite", "Cancel"))
                 return;
 
-            ExportVertexColorsToFbxCore(sourceFbxPath, ctx.MeshEntries, normalizeHierarchy: false);
+            ExportVertexColorsToFbxCore(sourceFbxPath, ctx.MeshEntries);
 #else
             UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
 #endif
@@ -1394,7 +1394,7 @@ namespace SashaRX.UnityMeshLab
             }
 
             RestoreAllPreviews();
-            ExportVertexColorsToFbxCore(sourceFbxPath, list, normalizeHierarchy: false, uvChannelOverride);
+            ExportVertexColorsToFbxCore(sourceFbxPath, list, uvChannelOverride);
 #else
             UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
 #endif
@@ -1424,14 +1424,14 @@ namespace SashaRX.UnityMeshLab
             }
 
             RestoreAllPreviews();
-            // normalizeHierarchy=false: VariantExportPipeline matches new-FBX
-            // sub-meshes to source-prefab MeshFilters by sub-asset name. Hierarchy
-            // normalization renames sub-meshes (LOD-style) and breaks that
-            // matching. The variant FBX must mirror the source FBX's sub-mesh
-            // naming so prefab clones can swap mesh refs cleanly.
+            // Vcolor shim never sets the Hierarchy bit: VariantExportPipeline
+            // matches new-FBX sub-meshes to source-prefab MeshFilters by
+            // sub-asset name, and hierarchy normalization (rename to
+            // baseName_LOD{N}) would break that matching. The variant FBX
+            // must mirror the source FBX's sub-mesh naming so prefab clones
+            // can swap mesh refs cleanly.
             return ExportVertexColorsToFbxCore(
                 sourceFbxPath, list,
-                normalizeHierarchy: false,
                 uvChannelOverride,
                 outputFbxPathOverride: outputFbxPath);
 #else
@@ -1440,229 +1440,37 @@ namespace SashaRX.UnityMeshLab
 #endif
         }
 
-        class VertexDataSnapshot
+        // Resolve the legacy vcolor flow's "AO target UV channel".
+        // Used by the vcolor wrappers to fold their args into a
+        // FbxExportIntent for the unified isolated-export core.
+        static int ResolveLegacyAoUvChannel(int uvChannelOverride)
         {
-            public int vertexCount;
-            public Color32[] colors32;
-            public Color[] colors;
-            public Vector2[] uvs;  // snapshot of aoUvIdx channel, if any
+            if (uvChannelOverride >= 0) return uvChannelOverride;
+            var aoChannel = VertexColorBakingTool.LastAppliedTargetChannel;
+            if (!aoChannel.HasValue) return -1;
+            int ch = (int)aoChannel.Value;
+            if (ch <= (int)AOTargetChannel.VertexColorA) return -1;
+            return (ch - (int)AOTargetChannel.UV0_X) / 2;
         }
 
-        bool ExportVertexColorsToFbxCore(string sourceFbxPath, IEnumerable<MeshEntry> entries, bool normalizeHierarchy, int uvChannelOverride = -1, string outputFbxPathOverride = null)
+        // Legacy shim. The implementation has been folded into
+        // ExportFbxIsolatedCore — this method only computes the
+        // FbxExportIntent for vcolor + optional AO-UV and delegates.
+        // Public wrappers (ExportVertexColorsToFbx*) keep their
+        // signatures so external callers (VariantExportPipeline,
+        // VertexColorBakingTool, UvPackHierarchyTool) are unaffected.
+        bool ExportVertexColorsToFbxCore(
+            string sourceFbxPath,
+            IEnumerable<MeshEntry> entries,
+            int uvChannelOverride = -1,
+            string outputFbxPathOverride = null)
         {
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
-            if (string.IsNullOrEmpty(sourceFbxPath) || entries == null) return false;
-
-            // Variant export writes to a NEW FBX next to (or anywhere relative
-            // to) the source. In that mode we never mutate the source importer,
-            // never relink scene mesh refs, and never restore working copies —
-            // the source asset and the live scene must stay untouched.
-            string targetFbxPath = string.IsNullOrEmpty(outputFbxPathOverride) ? sourceFbxPath : outputFbxPathOverride;
-            bool isVariantExport = !string.IsNullOrEmpty(outputFbxPathOverride)
-                && !string.Equals(outputFbxPathOverride, sourceFbxPath, StringComparison.OrdinalIgnoreCase);
-
-            // Determine target UV channel.
-            // - aoUvIdx == -1: no UV channel to copy (vertex color only)
-            // - aoUvIdx == 1:  Unity UV channel 1 (lightmap UV) → lock generateSecondaryUV
-            // - aoUvIdx >= 0:  also lock weld/compression/optimization so vertex order survives reimport
-            // Priority: explicit override > VertexColorBakingTool.LastAppliedTargetChannel (AO flow).
-            int aoUvIdx;
-            if (uvChannelOverride >= 0)
-            {
-                aoUvIdx = uvChannelOverride;
-            }
-            else
-            {
-                aoUvIdx = -1;
-                var aoChannel = VertexColorBakingTool.LastAppliedTargetChannel;
-                if (aoChannel.HasValue)
-                {
-                    int ch = (int)aoChannel.Value;
-                    if (ch > (int)AOTargetChannel.VertexColorA)
-                        aoUvIdx = (ch - (int)AOTargetChannel.UV0_X) / 2;
-                }
-            }
-
-            // Snapshot AO data BEFORE any reimport. Phase 1 can call
-            // SaveAndReimport which re-reads the FBX from disk — the native
-            // mesh buffer is reset, wiping the UV / color writes that
-            // ApplyToMesh made on the in-memory shared asset. Keying by
-            // sub-asset name (stable across reimport) lets
-            // CopyVertexDataToClone look up the pre-reimport data later.
-            var snapshots = new Dictionary<string, VertexDataSnapshot>(StringComparer.Ordinal);
-            foreach (var e in entries)
-            {
-                if (e == null || !e.include) continue;
-                Mesh sm = e.originalMesh ?? e.fbxMesh;
-                if (sm == null || string.IsNullOrEmpty(sm.name)) continue;
-
-                var snap = new VertexDataSnapshot { vertexCount = sm.vertexCount };
-                var c32 = sm.colors32;
-                if (c32 != null && c32.Length == sm.vertexCount)
-                    snap.colors32 = c32;
-                else
-                {
-                    var c = sm.colors;
-                    if (c != null && c.Length == sm.vertexCount)
-                        snap.colors = c;
-                }
-                if (aoUvIdx >= 0)
-                {
-                    var uvList = new List<Vector2>();
-                    sm.GetUVs(aoUvIdx, uvList);
-                    if (uvList.Count == sm.vertexCount)
-                        snap.uvs = uvList.ToArray();
-                }
-                snapshots[sm.name] = snap;
-            }
-
-            // ── Phase 1: Prepare importer (single reimport, scoped to AO target) ──
-            // Skipped for variant export — source FBX importer must stay as-is.
-            ModelImporter srcImporter = null;
-            bool madeReadable = false;
-            if (!isVariantExport)
-            {
-                srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
-                bool needsReimport = false;
-                if (srcImporter != null)
-                {
-                    // generateSecondaryUV writes to Unity UV channel 1 (mesh.uv2).
-                    // Only lock it when AO targets that specific channel.
-                    if (aoUvIdx == 1 && srcImporter.generateSecondaryUV)
-                        { srcImporter.generateSecondaryUV = false; needsReimport = true; }
-                    // weld/compression/optimization change vertex count or order —
-                    // break per-vertex UV data. Only lock when AO is in a UV channel.
-                    if (aoUvIdx >= 0)
-                    {
-                        if (srcImporter.weldVertices)          { srcImporter.weldVertices = false;        needsReimport = true; }
-                        if (srcImporter.meshCompression != ModelImporterMeshCompression.Off)
-                            { srcImporter.meshCompression = ModelImporterMeshCompression.Off; needsReimport = true; }
-                        if (srcImporter.meshOptimizationFlags != 0)
-                            { srcImporter.meshOptimizationFlags = 0; needsReimport = true; }
-                    }
-                    if (!srcImporter.isReadable)
-                        { srcImporter.isReadable = true; needsReimport = true; madeReadable = true; }
-                    if (needsReimport)
-                    {
-                        Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
-                        srcImporter.SaveAndReimport();
-                    }
-                }
-            }
-
-            // ── Phase 2: Build export hierarchy ──
-            var fbxAsset = AssetDatabase.LoadMainAssetAtPath(sourceFbxPath) as GameObject;
-            if (fbxAsset == null)
-            {
-                UvtLog.Error($"[FBX Export] Cannot load FBX asset at '{sourceFbxPath}'.");
-                return false;
-            }
-
-            var tempRoot = UnityEngine.Object.Instantiate(fbxAsset);
-            tempRoot.name = fbxAsset.name;
-
-            int updated = 0;
-            Dictionary<string, string> renameMap = null;
-            bool exported = false;
-            try
-            {
-                updated = CopyVertexDataToClone(tempRoot, snapshots, aoUvIdx);
-                if (updated == 0)
-                {
-                    UvtLog.Warn("[FBX Export] No vertex data found to export.");
-                    return false;
-                }
-
-                if (normalizeHierarchy)
-                {
-                    // LOD-pipeline path: rename / reset / bake transforms into
-                    // mesh vertices. NOT for in-place overwrite — the bake
-                    // mutates shared FBX sub-asset meshes (other scene
-                    // MeshFilters using them get displaced) and would freeze
-                    // one instance's transform into the FBX file.
-                    renameMap = NormalizeExportHierarchy(tempRoot);
-                    PrepareCollisionMaterials(tempRoot);
-                    TrimMaterialArrays(tempRoot);
-                }
-
-                // ── Phase 3: Export FBX ──
-                // Backup target's .meta only if it already exists (variant
-                // export to a fresh path skips this — nothing to back up).
-                string fullPath = System.IO.Path.GetFullPath(targetFbxPath);
-                // Hash the full path so two FBX files with the same filename
-                // (e.g. Assets/A/Chair.fbx and Assets/B/Chair.fbx) get distinct
-                // backup names and never overwrite each other.
-                string pathHash = Math.Abs(fullPath.GetHashCode()).ToString("X8");
-                string metaBak = System.IO.Path.Combine(
-                    System.IO.Path.GetTempPath(),
-                    System.IO.Path.GetFileName(fullPath) + "." + pathHash + ".meta.bak");
-                bool metaBackedUp = System.IO.File.Exists(fullPath + ".meta");
-                if (metaBackedUp)
-                    System.IO.File.Copy(fullPath + ".meta", metaBak, true);
-
-                var exportOptions = new UnityEditor.Formats.Fbx.Exporter.ExportModelOptions
-                    { ExportFormat = UnityEditor.Formats.Fbx.Exporter.ExportFormat.Binary };
-
-                // Signal the UV2 postprocessor to skip sidecar injection on the
-                // reimport triggered by this write. Without this, a stale
-                // `_uv2data.asset` would overwrite the freshly baked UV/colors
-                // we just wrote into the FBX (e.g. AO in UV2 gets nuked).
-                Uv2AssetPostprocessor.fbxOverwritePaths.Add(targetFbxPath);
-
-                UnityEditor.Formats.Fbx.Exporter.ModelExporter.ExportObjects(
-                    targetFbxPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
-
-                UvtLog.Info($"[FBX Export] Vertex data ({updated} updates) -> {targetFbxPath}");
-                exported = true;
-
-                if (metaBackedUp && System.IO.File.Exists(metaBak))
-                {
-                    System.IO.File.Copy(metaBak, fullPath + ".meta", true);
-                    System.IO.File.Delete(metaBak);
-                }
-            }
-            catch (Exception ex)
-            {
-                // Drop the overwrite marker — the export failed so no reimport
-                // will consume it, and a stale entry would skip sidecar UV2
-                // injection on the next normal reimport of the same FBX.
-                Uv2AssetPostprocessor.fbxOverwritePaths.Remove(targetFbxPath);
-                UvtLog.Error("[FBX Export] Vertex color export failed: " + ex);
-                return false;
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(tempRoot);
-            }
-
-            // ── Phase 4: Reimport (single refresh) ──
-            // Variant export skips scene relink — the live scene must keep
-            // showing source meshes; only the new FBX needs to be picked up.
-            AssetDatabase.Refresh();
-            if (!isVariantExport && ctx.LodGroup != null)
-            {
-                RelinkSceneMeshReferences(sourceFbxPath,
-                    renameMap != null && renameMap.Count > 0 ? renameMap : null, ctx.LodGroup);
-                ctx.Refresh(ctx.LodGroup);
-            }
-
-            // ── Phase 5: Restore isReadable and working copies ──
-            // Variant export skipped Phase 1 mutation, so nothing to restore.
-            if (!isVariantExport)
-            {
-                // Restore isReadable to its original value so we don't silently
-                // change project import settings for users who intentionally keep
-                // Read/Write disabled.
-                if (madeReadable && srcImporter != null)
-                {
-                    srcImporter.isReadable = false;
-                    Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
-                    srcImporter.SaveAndReimport();
-                }
-                // Must be last — SaveAndReimport above resets MeshFilters again.
-                RestoreWorkingCopiesToScene();
-            }
-            return exported;
+            var intent = FbxExportIntent.VertexColors;
+            int aoUvIdx = ResolveLegacyAoUvChannel(uvChannelOverride);
+            if (aoUvIdx >= 0 && aoUvIdx <= 7)
+                intent |= (FbxExportIntent)(1 << aoUvIdx);
+            return ExportFbxIsolatedCore(sourceFbxPath, entries, intent, outputFbxPathOverride);
 #else
             UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
             return false;
@@ -1807,14 +1615,20 @@ namespace SashaRX.UnityMeshLab
                 return false;
             }
             RestoreAllPreviews();
-            return ExportIsolatedChannelsToFbxCore(sourceFbxPath, list, intent, outputFbxPathOverride: null);
+            return ExportFbxIsolatedCore(sourceFbxPath, list, intent, outputFbxPathOverride: null);
 #else
             UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
             return false;
 #endif
         }
 
-        bool ExportIsolatedChannelsToFbxCore(
+        // Unified isolated-channel export core. EVERY in-tool FBX-write
+        // path goes through here — there is no parallel "destructive"
+        // pipeline. Hierarchy / Materials / Collision mutations are
+        // expressed as wider <see cref="FbxExportIntent"/> bits, gated
+        // inside this method. Adding a new caller-side ModelExporter.
+        // ExportObjects invocation is a checklist violation (§12).
+        bool ExportFbxIsolatedCore(
             string sourceFbxPath,
             IEnumerable<MeshEntry> entries,
             FbxExportIntent intent,
@@ -1898,13 +1712,34 @@ namespace SashaRX.UnityMeshLab
 
             int updated = 0;
             bool exported = false;
+            Dictionary<string, string> renameMap = null;
             try
             {
                 updated = CopyIsolatedSnapshotsToClone(tempRoot, snapshots);
-                if (updated == 0)
+                if (updated == 0 && (intent & (FbxExportIntent.Hierarchy | FbxExportIntent.Materials)) == 0)
                 {
+                    // Per-vertex-only intent with no matching meshes — nothing to write.
+                    // Hierarchy / Materials intents are still meaningful with zero
+                    // mesh updates (they restructure the FBX without per-vertex changes).
                     UvtLog.Warn($"[FBX Export] No matching meshes in clone for intent {intent}.");
                     return false;
+                }
+
+                // Hierarchy mutations — gated on Hierarchy bit. Renames children
+                // to baseName_LOD{N}, resets root to identity, bakes collision
+                // transforms into vertices. Returns oldName→newName map for
+                // post-reimport scene relink.
+                if ((intent & FbxExportIntent.Hierarchy) != 0)
+                    renameMap = NormalizeExportHierarchy(tempRoot);
+
+                // Material mutations — gated on Materials bit. PrepareCollisionMaterials
+                // copies a real material onto _COL renderers (avoids stale "Lit"
+                // default in the FBX). TrimMaterialArrays prunes sharedMaterials
+                // to subMeshCount.
+                if ((intent & FbxExportIntent.Materials) != 0)
+                {
+                    PrepareCollisionMaterials(tempRoot);
+                    TrimMaterialArrays(tempRoot);
                 }
 
                 // ── Phase 3: Export FBX ──
@@ -1955,10 +1790,13 @@ namespace SashaRX.UnityMeshLab
             AssetDatabase.Refresh();
             if (!isVariantExport && ctx?.LodGroup != null)
             {
-                // No node renames — isolated export never restructures the
-                // hierarchy. Pass null so RelinkSceneMeshReferences re-binds
-                // by sub-asset name without consulting a rename map.
-                RelinkSceneMeshReferences(sourceFbxPath, null, ctx.LodGroup);
+                // renameMap is non-null only when the intent included
+                // Hierarchy and NormalizeExportHierarchy renamed nodes —
+                // for narrow per-vertex intents we re-bind purely by
+                // sub-asset name.
+                RelinkSceneMeshReferences(sourceFbxPath,
+                    renameMap != null && renameMap.Count > 0 ? renameMap : null,
+                    ctx.LodGroup);
                 ctx.Refresh(ctx.LodGroup);
             }
 
@@ -1992,62 +1830,6 @@ namespace SashaRX.UnityMeshLab
                     return p;
             }
             return null;
-        }
-
-        int CopyVertexDataToClone(
-            GameObject tempRoot,
-            Dictionary<string, VertexDataSnapshot> snapshots,
-            int aoUvIdx)
-        {
-            if (snapshots == null) return 0;
-
-            int updated = 0;
-            int visitedCloneMfs = 0;
-            int matchedCloneMfs = 0;
-            int uvWrites = 0;
-            foreach (var cloneMf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
-            {
-                if (cloneMf == null || cloneMf.sharedMesh == null) continue;
-                visitedCloneMfs++;
-                if (!snapshots.TryGetValue(cloneMf.sharedMesh.name, out var snap))
-                    continue;
-                matchedCloneMfs++;
-
-                if (snap.vertexCount != cloneMf.sharedMesh.vertexCount)
-                {
-                    UvtLog.Warn($"[FBX Export] Skip '{cloneMf.sharedMesh.name}': vertex count mismatch (scene={snap.vertexCount}, clone={cloneMf.sharedMesh.vertexCount}).");
-                    continue;
-                }
-
-                var cloneMesh = UnityEngine.Object.Instantiate(cloneMf.sharedMesh);
-                cloneMesh.name = cloneMf.sharedMesh.name;
-
-                if (snap.colors32 != null)
-                {
-                    cloneMesh.colors32 = snap.colors32;
-                    updated++;
-                }
-                else if (snap.colors != null)
-                {
-                    cloneMesh.colors = snap.colors;
-                    updated++;
-                }
-
-                if (aoUvIdx >= 0 && snap.uvs != null && snap.uvs.Length == cloneMesh.vertexCount)
-                {
-                    cloneMesh.SetUVs(aoUvIdx, snap.uvs);
-                    updated++;
-                    uvWrites++;
-                }
-                else if (aoUvIdx >= 0 && snap.uvs == null)
-                {
-                    UvtLog.Warn($"[FBX Export] Skip UV{aoUvIdx} copy on '{cloneMesh.name}': no pre-reimport snapshot (Apply didn't write this channel).");
-                }
-
-                cloneMf.sharedMesh = cloneMesh;
-            }
-            UvtLog.Verbose($"[FBX Export] CopyVertexDataToClone: visited={visitedCloneMfs}, matched={matchedCloneMfs}, uv{(aoUvIdx >= 0 ? aoUvIdx.ToString() : "-")}Writes={uvWrites}, totalUpdates={updated}.");
-            return updated;
         }
 
         void PrepareCollisionMaterials(GameObject tempRoot)
