@@ -46,9 +46,13 @@ namespace SashaRX.UnityMeshLab
         // ── Hierarchy view state ──
         // pendingNames: instanceID → edited name (uncommitted; committed by Apply Names).
         // lodQualitySliders: renderer instanceID → simplification target ratio.
+        // freshRendererIds: renderer instanceID set freshly created or regenerated
+        // since the last Apply Names. Drives the bright-orange "this is new"
+        // highlight so the user can spot just-inserted LODs in a busy hierarchy.
         // hierarchyDummies: cached view model rebuilt from ctx; null = needs rebuild.
         Dictionary<int, string> pendingNames;
         Dictionary<int, float> lodQualitySliders;
+        HashSet<int> freshRendererIds;
         bool hierarchyFoldout = true;
         List<HierarchyDummy> hierarchyDummies;
 
@@ -125,6 +129,7 @@ namespace SashaRX.UnityMeshLab
             if (preview == null) preview = new PrefabBuilderPreview();
             pendingNames = new Dictionary<int, string>();
             lodQualitySliders = new Dictionary<int, float>();
+            freshRendererIds = new HashSet<int>();
         }
 
         public void OnDeactivate()
@@ -141,6 +146,7 @@ namespace SashaRX.UnityMeshLab
             problemSummaries = null;
             pendingNames?.Clear();
             lodQualitySliders?.Clear();
+            freshRendererIds?.Clear();
             hierarchyDummies = null;
             splitCandidates = null;
             mergeCandidates = null;
@@ -349,11 +355,18 @@ namespace SashaRX.UnityMeshLab
             if (dummy == null || dummy.dummy == null) return;
 
             EditorGUILayout.Space(4);
-            var blockRect = EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+            // Tint the helpBox per Dummy via GUI.backgroundColor — green for the
+            // implicit root group, blue for explicit Dummy containers. Visually
+            // separates multiple Dummy groups in a busy hierarchy.
+            var prevBg = GUI.backgroundColor;
+            GUI.backgroundColor = dummy.isRoot
+                ? new Color(0.75f, 1.05f, 0.75f)
+                : new Color(0.78f, 0.92f, 1.10f);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            GUI.backgroundColor = prevBg;
 
             // Header: small foldout arrow + dummy name (editable when not root) + summary.
-            // Use an explicit-rect Foldout so it occupies a fixed-width gutter and
-            // doesn't push the rest of the row to the next line.
             EditorGUILayout.BeginHorizontal();
             var foldoutRect = GUILayoutUtility.GetRect(14, 16, GUILayout.Width(14), GUILayout.Height(16));
             dummy.foldout = EditorGUI.Foldout(foldoutRect, dummy.foldout, GUIContent.none, true);
@@ -369,7 +382,6 @@ namespace SashaRX.UnityMeshLab
             if (!dummy.foldout)
             {
                 EditorGUILayout.EndVertical();
-                PaintDummyAccent(blockRect, dummy);
                 return;
             }
 
@@ -381,14 +393,12 @@ namespace SashaRX.UnityMeshLab
                 if (DrawLodRow(dummy, dummy.lods[i]))
                 {
                     EditorGUILayout.EndVertical();
-                    PaintDummyAccent(blockRect, dummy);
                     return;
                 }
                 int afterLodIndex = dummy.lods[i].lodIndex;
                 if (DrawAddLodButton(dummy, afterLodIndex))
                 {
                     EditorGUILayout.EndVertical();
-                    PaintDummyAccent(blockRect, dummy);
                     return;
                 }
             }
@@ -399,7 +409,6 @@ namespace SashaRX.UnityMeshLab
                 if (DrawAddLodButton(dummy, -1))
                 {
                     EditorGUILayout.EndVertical();
-                    PaintDummyAccent(blockRect, dummy);
                     return;
                 }
             }
@@ -415,7 +424,6 @@ namespace SashaRX.UnityMeshLab
                     if (DrawColRow(dummy, dummy.cols[i], i, dummy.cols.Count))
                     {
                         EditorGUILayout.EndVertical();
-                        PaintDummyAccent(blockRect, dummy);
                         return;
                     }
                 }
@@ -431,19 +439,6 @@ namespace SashaRX.UnityMeshLab
             }
 
             EditorGUILayout.EndVertical();
-            PaintDummyAccent(blockRect, dummy);
-        }
-
-        // Paint a 3-px coloured bar along the left edge of the dummy block so
-        // multiple Dummy groups read as separate, indented containers rather
-        // than a flat list of rows.
-        static void PaintDummyAccent(Rect blockRect, HierarchyDummy dummy)
-        {
-            if (Event.current.type != EventType.Repaint) return;
-            var color = dummy.isRoot
-                ? new Color(0.45f, 0.75f, 0.45f, 1f)
-                : new Color(0.40f, 0.60f, 1f,    1f);
-            EditorGUI.DrawRect(new Rect(blockRect.x + 1, blockRect.y + 1, 3, blockRect.height - 2), color);
         }
 
         const float HierarchyRowIndent = 10f;
@@ -453,25 +448,32 @@ namespace SashaRX.UnityMeshLab
         {
             if (lod == null || lod.renderer == null) return false;
 
-            bool stale = IsLodRowStale(dummy, lod);
-            var rowRect = EditorGUILayout.BeginVertical();
+            int rid = lod.renderer.GetInstanceID();
+            bool fresh = freshRendererIds != null && freshRendererIds.Contains(rid);
+            bool stale = !fresh && IsLodRowStale(dummy, lod);
+
+            string nameLabel = (fresh ? "● " : "") + lod.renderer.gameObject.name;
 
             // Row A: name + actions
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
-            EditorGUILayout.LabelField(lod.renderer.gameObject.name,
-                EditorStyles.textField, GUILayout.MinWidth(120));
+
+            var prevBg = GUI.backgroundColor;
+            if (fresh)
+                GUI.backgroundColor = new Color(1.55f, 0.85f, 0.30f);   // bright orange — just inserted/regen
+            else if (stale)
+                GUI.backgroundColor = new Color(1.30f, 1.05f, 0.55f);   // pale amber — name out of sync
+            EditorGUILayout.LabelField(nameLabel, EditorStyles.textField, GUILayout.MinWidth(120));
+            GUI.backgroundColor = prevBg;
             GUILayout.FlexibleSpace();
 
-            var bgc = GUI.backgroundColor;
             GUI.backgroundColor = new Color(0.60f, 0.75f, 0.90f);
             if (GUILayout.Button(new GUIContent("↻", "Regenerate this LOD from LOD0 source with the current quality."),
                     GUILayout.Width(22), GUILayout.Height(18)))
             {
                 RegenerateLodWithQuality(dummy, lod);
-                GUI.backgroundColor = bgc;
+                GUI.backgroundColor = prevBg;
                 EditorGUILayout.EndHorizontal();
-                EditorGUILayout.EndVertical();
                 return true;
             }
             GUI.backgroundColor = new Color(0.90f, 0.30f, 0.30f);
@@ -479,12 +481,11 @@ namespace SashaRX.UnityMeshLab
                     GUILayout.Width(22), GUILayout.Height(18)))
             {
                 DeleteLodRow(dummy, lod);
-                GUI.backgroundColor = bgc;
+                GUI.backgroundColor = prevBg;
                 EditorGUILayout.EndHorizontal();
-                EditorGUILayout.EndVertical();
                 return true;
             }
-            GUI.backgroundColor = bgc;
+            GUI.backgroundColor = prevBg;
             EditorGUILayout.EndHorizontal();
 
             // Row B: stat + channel badges
@@ -505,19 +506,12 @@ namespace SashaRX.UnityMeshLab
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
             EditorGUILayout.LabelField($"LOD{lod.lodIndex}", EditorStyles.miniLabel, GUILayout.Width(40));
-            int rid = lod.renderer.GetInstanceID();
             if (!lodQualitySliders.TryGetValue(rid, out var quality))
                 quality = lod.lodIndex == 0 ? 1f : Mathf.Pow(0.5f, lod.lodIndex);
             float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f);
             if (Mathf.Abs(newQuality - quality) > 0.0001f)
                 lodQualitySliders[rid] = newQuality;
             EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.EndVertical();
-
-            if (stale && Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(new Rect(rowRect.x + HierarchyRowIndent - 6, rowRect.y, 3, rowRect.height),
-                    new Color(1f, 0.65f, 0.15f));
 
             return false;
         }
@@ -549,15 +543,18 @@ namespace SashaRX.UnityMeshLab
             if (col == null || col.colTransform == null) return false;
 
             bool stale = IsColRowStale(dummy, col, index, totalCols);
-            var rowRect = EditorGUILayout.BeginVertical();
 
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
-            var bgc = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.45f, 0.75f, 0.55f, 0.85f);
+            var prevBg = GUI.backgroundColor;
+            // Stale COL → amber. Otherwise tint subtly green to match the
+            // collision palette already used in Hierarchy.
+            GUI.backgroundColor = stale
+                ? new Color(1.30f, 1.05f, 0.55f)
+                : new Color(0.70f, 1.05f, 0.85f);
             EditorGUILayout.LabelField(col.colTransform.gameObject.name,
                 EditorStyles.textField, GUILayout.MinWidth(120));
-            GUI.backgroundColor = bgc;
+            GUI.backgroundColor = prevBg;
 
             int verts = col.mesh != null ? col.mesh.vertexCount : 0;
             int tris = col.mesh != null ? MeshHygieneUtility.GetTriangleCount(col.mesh) : 0;
@@ -570,19 +567,12 @@ namespace SashaRX.UnityMeshLab
                     GUILayout.Width(22), GUILayout.Height(18)))
             {
                 DeleteCol(dummy, col);
-                GUI.backgroundColor = bgc;
+                GUI.backgroundColor = prevBg;
                 EditorGUILayout.EndHorizontal();
-                EditorGUILayout.EndVertical();
                 return true;
             }
-            GUI.backgroundColor = bgc;
+            GUI.backgroundColor = prevBg;
             EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.EndVertical();
-
-            if (stale && Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(new Rect(rowRect.x + HierarchyRowIndent - 6, rowRect.y, 3, rowRect.height),
-                    new Color(1f, 0.65f, 0.15f));
 
             return false;
         }
@@ -755,6 +745,7 @@ namespace SashaRX.UnityMeshLab
 
             Undo.CollapseUndoOperations(undoGroup);
             buildIntent |= FbxExportIntent.Hierarchy;
+            freshRendererIds?.Clear();
 
             ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
@@ -804,6 +795,8 @@ namespace SashaRX.UnityMeshLab
             if (mf == null) return;
             Undo.RecordObject(mf, "Regenerate LOD");
             mf.sharedMesh = res.simplifiedMesh;
+
+            freshRendererIds?.Add(rid);
 
             UvtLog.Info($"[LightmapUV] Regenerated LOD{lod.lodIndex} on '{lod.renderer.name}': "
                 + $"{res.originalTriCount} → {res.simplifiedTriCount} tris (target {quality:P0})");
@@ -938,8 +931,12 @@ namespace SashaRX.UnityMeshLab
             LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
 
             // Save the chosen quality on the new renderer slot so the slider
-            // reflects the value that was just used.
-            lodQualitySliders[mr.GetInstanceID()] = quality;
+            // reflects the value that was just used. Mark the renderer as
+            // "fresh" so the row picks up the bright-orange highlight until
+            // Apply Names is clicked.
+            int newRid = mr.GetInstanceID();
+            lodQualitySliders[newRid] = quality;
+            freshRendererIds?.Add(newRid);
 
             buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup
                 | FbxExportIntent.AnyUv | FbxExportIntent.Normals
