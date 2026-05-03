@@ -1581,6 +1581,139 @@ namespace SashaRX.UnityMeshLab
             return updated;
         }
 
+        // ─────────────────────────────────────────────────────────────────
+        // Pre-export preflight — flags FBX-pipeline-checklist violations
+        // on the cloned hierarchy before export. Soft by design: every
+        // finding is logged via UvtLog.Warn, none block the export.
+        // The export is still atomic (write-to-tmp + File.Replace), so a
+        // logged violation that doesn't block here can be diagnosed and
+        // re-fixed without ever leaving a corrupt FBX on disk.
+        // ─────────────────────────────────────────────────────────────────
+
+        static bool IsGenericMeshName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return true;
+            switch (name)
+            {
+                case "Scene":
+                case "Geometry":
+                case "Default":
+                case "Mesh":
+                case "Combined Mesh":
+                    return true;
+                default:
+                    return name.StartsWith("Combined Mesh", StringComparison.Ordinal);
+            }
+        }
+
+        static bool IsPlaceholderMaterialName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return true;
+            switch (name)
+            {
+                case "Lit":
+                case "Default":
+                case "Material":
+                case "DefaultMaterial":
+                case "Default-Material":
+                case "No Name":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        static void RunPreflight(
+            GameObject tempRoot,
+            FbxExportIntent intent,
+            Dictionary<string, IsolatedExportSnapshot> snapshots)
+        {
+            if (tempRoot == null) return;
+
+            // §5.5 + §8: node + mesh names. Generic names (`Scene`,
+            // `Geometry`) are flagged because Max FBX importer auto-resets
+            // mesh attributes to `Scene` on round-trip — a name like that
+            // is a strong signal the source went through a metadata-
+            // stripping tool. Invalid characters break Addressables /
+            // asset bundles / filesystem rules.
+            int badNodeNames = 0;
+            int badMeshNames = 0;
+            foreach (var t in tempRoot.GetComponentsInChildren<Transform>(true))
+            {
+                if (string.IsNullOrEmpty(t.name) || MeshHygieneUtility.HasInvalidChars(t.name))
+                    badNodeNames++;
+            }
+            foreach (var mf in tempRoot.GetComponentsInChildren<MeshFilter>(true))
+            {
+                var m = mf.sharedMesh;
+                if (m != null && IsGenericMeshName(m.name)) badMeshNames++;
+            }
+            foreach (var smr in tempRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                var m = smr.sharedMesh;
+                if (m != null && IsGenericMeshName(m.name)) badMeshNames++;
+            }
+            if (badNodeNames > 0)
+                UvtLog.Warn($"[FBX Preflight] {badNodeNames} node name(s) are empty or contain invalid characters (see §5.5/§8).");
+            if (badMeshNames > 0)
+                UvtLog.Warn($"[FBX Preflight] {badMeshNames} mesh(es) have a generic name (Scene/Geometry/Default/empty); see §5.5.");
+
+            // §1.5: placeholder material names. Soft because they may be
+            // intentional during an early authoring pass; warning surfaces
+            // them so they don't ship.
+            int placeholderMats = 0;
+            foreach (var mr in tempRoot.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                var mats = mr.sharedMaterials;
+                if (mats == null) continue;
+                foreach (var mat in mats)
+                {
+                    if (mat == null || IsPlaceholderMaterialName(mat.name))
+                        placeholderMats++;
+                }
+            }
+            if (placeholderMats > 0)
+                UvtLog.Warn($"[FBX Preflight] {placeholderMats} placeholder material slot(s) (Lit/Default/null); see §1.5.");
+
+            // §4.2: vertex colors RGBA outside [0,1]. Only checked when the
+            // intent overwrites VertexColors — otherwise the channel comes
+            // straight from the source FBX and is the source's problem.
+            if ((intent & FbxExportIntent.VertexColors) != 0 && snapshots != null)
+            {
+                int outOfRangeMeshes = 0;
+                foreach (var snap in snapshots.Values)
+                {
+                    bool hit = false;
+                    var c = snap.colors;
+                    if (c != null)
+                    {
+                        for (int i = 0; i < c.Length && !hit; i++)
+                        {
+                            var v = c[i];
+                            if (v.r < 0f || v.r > 1f || v.g < 0f || v.g > 1f ||
+                                v.b < 0f || v.b > 1f || v.a < 0f || v.a > 1f) hit = true;
+                        }
+                    }
+                    // colors32 is byte-clamped by definition; nothing to check.
+                    if (hit) outOfRangeMeshes++;
+                }
+                if (outOfRangeMeshes > 0)
+                    UvtLog.Warn($"[FBX Preflight] {outOfRangeMeshes} mesh(es) have vertex colors outside [0,1]; see §4.2.");
+            }
+
+            // §7.8: negative-determinant accumulated scale. Unity reads
+            // inverted normals as backface-culled — mesh appears
+            // transparent from the front.
+            int negScaleNodes = 0;
+            foreach (var t in tempRoot.GetComponentsInChildren<Transform>(true))
+            {
+                var s = t.lossyScale;
+                if (s.x * s.y * s.z < 0f) negScaleNodes++;
+            }
+            if (negScaleNodes > 0)
+                UvtLog.Warn($"[FBX Preflight] {negScaleNodes} node(s) have negative-determinant accumulated scale (mesh will render transparent from front); see §7.8.");
+        }
+
         /// <summary>
         /// Re-save the FBX at <paramref name="sourceFbxPath"/> overwriting
         /// only the per-vertex channels listed in <paramref name="intent"/>.
@@ -1742,7 +1875,18 @@ namespace SashaRX.UnityMeshLab
                     TrimMaterialArrays(tempRoot);
                 }
 
-                // ── Phase 3: Export FBX ──
+                // Pre-export preflight — surfaces FBX-pipeline-checklist
+                // violations on tempRoot before we commit to disk. Soft
+                // by design (logged, never blocks): collateral mutations
+                // we can't catch from snapshots show up here as warnings.
+                RunPreflight(tempRoot, intent, snapshots);
+
+                // ── Phase 3: Export FBX (atomic) ──
+                // Write to <target>.tmp first, verify, then File.Replace
+                // for atomic rename. If ModelExporter throws or writes a
+                // zero-byte file, the source FBX on disk is untouched —
+                // unlike direct overwrite, which leaves a corrupt FBX
+                // and a stale .meta when the exporter mid-faults.
                 string fullPath = System.IO.Path.GetFullPath(targetFbxPath);
                 string pathHash = Math.Abs(fullPath.GetHashCode()).ToString("X8");
                 string metaBak = System.IO.Path.Combine(
@@ -1752,17 +1896,60 @@ namespace SashaRX.UnityMeshLab
                 if (metaBackedUp)
                     System.IO.File.Copy(fullPath + ".meta", metaBak, true);
 
+                string tmpRelPath = targetFbxPath + ".tmp";
+                string tmpAbsPath = System.IO.Path.GetFullPath(tmpRelPath);
+                // Strip any leftover tmp from a prior crashed run.
+                if (System.IO.File.Exists(tmpAbsPath))
+                    System.IO.File.Delete(tmpAbsPath);
+
                 var exportOptions = new UnityEditor.Formats.Fbx.Exporter.ExportModelOptions
                     { ExportFormat = UnityEditor.Formats.Fbx.Exporter.ExportFormat.Binary };
 
                 // Signal the UV2 postprocessor to skip sidecar UV2 injection
-                // on the reimport triggered by this write — otherwise an
-                // isolated UV2 export would be immediately overwritten by
+                // on the reimport triggered by the rename below — otherwise
+                // an isolated UV2 export would be immediately overwritten by
                 // stale sidecar data.
                 Uv2AssetPostprocessor.fbxOverwritePaths.Add(targetFbxPath);
 
                 UnityEditor.Formats.Fbx.Exporter.ModelExporter.ExportObjects(
-                    targetFbxPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
+                    tmpRelPath, new UnityEngine.Object[] { tempRoot }, exportOptions);
+
+                // Verify tmp file is sane before we commit.
+                var tmpInfo = new System.IO.FileInfo(tmpAbsPath);
+                if (!tmpInfo.Exists || tmpInfo.Length == 0)
+                {
+                    if (System.IO.File.Exists(tmpAbsPath))
+                        System.IO.File.Delete(tmpAbsPath);
+                    throw new System.IO.IOException(
+                        $"FBX Exporter produced an empty/missing file at '{tmpRelPath}'.");
+                }
+
+                // Atomic commit. File.Replace requires the target to exist
+                // (overwrite + backup). For a fresh write (variant export
+                // to a new path), File.Move is used.
+                if (System.IO.File.Exists(fullPath))
+                {
+                    string fbxBak = System.IO.Path.Combine(
+                        System.IO.Path.GetTempPath(),
+                        System.IO.Path.GetFileName(fullPath) + "." + pathHash + ".fbx.bak");
+                    System.IO.File.Replace(tmpAbsPath, fullPath, fbxBak);
+                    // Backup served its purpose (rollback window during
+                    // the rename itself). The .meta backup is still our
+                    // primary safety net for the import settings.
+                    if (System.IO.File.Exists(fbxBak))
+                        System.IO.File.Delete(fbxBak);
+                }
+                else
+                {
+                    System.IO.File.Move(tmpAbsPath, fullPath);
+                }
+
+                // ModelExporter may have generated a .meta for the .tmp
+                // sidecar entry — strip it so AssetDatabase doesn't pick
+                // up a ghost asset on the next refresh.
+                string tmpMetaPath = tmpAbsPath + ".meta";
+                if (System.IO.File.Exists(tmpMetaPath))
+                    System.IO.File.Delete(tmpMetaPath);
 
                 UvtLog.Info($"[FBX Export] Isolated channels {intent} ({updated} updates) -> {targetFbxPath}");
                 exported = true;
@@ -1776,6 +1963,16 @@ namespace SashaRX.UnityMeshLab
             catch (Exception ex)
             {
                 Uv2AssetPostprocessor.fbxOverwritePaths.Remove(targetFbxPath);
+                // Best-effort: drop a leftover .tmp so a retry isn't blocked
+                // by the "Strip any leftover tmp" sweep above logging into
+                // a misleading state.
+                try
+                {
+                    string tmpAbsPath = System.IO.Path.GetFullPath(targetFbxPath + ".tmp");
+                    if (System.IO.File.Exists(tmpAbsPath))
+                        System.IO.File.Delete(tmpAbsPath);
+                }
+                catch { /* swallow — original error matters */ }
                 UvtLog.Error("[FBX Export] Isolated channel export failed: " + ex);
                 return false;
             }
