@@ -237,3 +237,88 @@ If the tool produces a file that flags ANY category in
 `patch_fbx_materials --report-file`, the tool is wrong, not the
 patcher. The patcher is the regression net, not the authoring
 contract.
+
+---
+
+## 12. Isolated re-save (the only sanctioned in-tool path)
+
+Every FBX-writing path in UnityMeshLab MUST go through the
+single isolated-export core in
+`Editor/Tools/LightmapTransferTool.cs`. There is no separate
+"safe" pipeline parallel to the destructive one — the core
+itself is the safe path, and "destructive" operations are
+expressed as a wider `FbxExportIntent`.
+
+### The contract
+
+A re-save mutates ONLY the per-vertex channels listed in the
+caller's `FbxExportIntent`. Everything else — node names,
+hierarchy, transforms, material assignments, untouched UV
+channels, vertex colors, normals, tangents — is inherited
+byte-identical from the source FBX clone (modulo what the
+Unity FBX Exporter itself rewrites at the FBX-document level;
+see §9).
+
+### `FbxExportIntent` flags
+
+| Flag | When to set |
+|---|---|
+| `UV0` / `UV1` / `UV2` / `UV3` … `UV7` | Tool overwrote the corresponding `Mesh.uv*` channel |
+| `VertexColors` | Tool wrote `Mesh.colors` / `colors32` |
+| `Normals` | Tool wrote `Mesh.normals` |
+| `Tangents` | Tool wrote `Mesh.tangents` |
+| `Hierarchy` | Tool added/removed/renamed nodes (LOD gen, collision injection, root pivot reset) |
+| `Materials` | Tool reassigned `Renderer.sharedMaterials` |
+| `Collision` | Tool changed `_COL` children (V-HACD, sidecar inject) |
+| `LodGroup` | Tool added/removed LOD entries on the source LODGroup |
+| `All` | LOD-rebuild scenario — every aspect changed |
+| `None` | No-op (logged + early-return) |
+
+### Per-tool intent recipe
+
+| Tool | Intent it produces |
+|---|---|
+| `UvPackHierarchyTool` (atlas pack) | `UV2` |
+| `LightmapTransferTool` UV2 transfer | `UV2` |
+| `VertexColorBakingTool` (AO bake to vcolor) | `VertexColors` |
+| `VertexColorBakingTool` (AO bake to UV channel N) | `VertexColors \| UV<N>` |
+| `Uv0Analyzer` / UV0 Optimize | `UV0` |
+| `LodGenerationTool` (new LODs) | `Hierarchy \| LodGroup \| AnyUv \| VertexColors \| Normals \| Tangents \| Materials` |
+| `CollisionMeshTool` (V-HACD into sidecar) | `Collision` |
+| `LightmapTransferTool` "Rebuild LOD chain" | `All` |
+
+### Hard rules for every FBX-write path
+
+1. **No new public `Export*` methods.** Adding a parallel
+   write path duplicates the importer-prep / .meta-backup /
+   postprocessor coordination. Add an intent + delegate to
+   the existing core.
+2. **Write to `*.fbx.tmp` first**, then `File.Replace` for
+   atomicity. The core handles this — never call
+   `ModelExporter.ExportObjects` directly on the source path.
+3. **Pre-export preflight runs inside the core**, not at
+   call sites. Every caller benefits automatically.
+4. **`.meta` survives the round-trip** via temp backup and
+   conditional restore — the core handles this too.
+5. **Postprocessor coordination** (`Uv2AssetPostprocessor.bypassPaths`
+   on importer-prep reimport, `fbxOverwritePaths` on the
+   write itself) is the core's responsibility. Call sites
+   never touch these sets directly.
+
+### What "rework, not parallel" means in code review
+
+Reject PRs that:
+
+* Add a new method named `Export*Fbx*` on any tool other
+  than `LightmapTransferTool`. Tools push their changes
+  into mesh entries / sidecars and call the existing core
+  with the appropriate intent.
+* Call `UnityEditor.Formats.Fbx.Exporter.ModelExporter.ExportObjects`
+  outside the core.
+* Bypass intent (e.g. always passing `FbxExportIntent.All`
+  when the operation only changed one channel) — this
+  defeats the safe-resave contract and risks collateral
+  mutation of unrelated mesh data.
+* Add `if (myToolDidThing) NormalizeExportHierarchy(...)`
+  branches at call sites — that pass belongs in the core,
+  gated by `intent.HasFlag(Hierarchy)`.
