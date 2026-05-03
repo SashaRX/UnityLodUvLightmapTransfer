@@ -53,6 +53,11 @@ namespace SashaRX.UnityMeshLab
         Dictionary<int, string> pendingNames;
         Dictionary<int, float> lodQualitySliders;
         HashSet<int> freshRendererIds;
+        // Tracks the LODGroup the fresh-set is scoped to. When the user
+        // selects a different prefab the hub fires OnRefresh; we then know
+        // to discard the highlight from the previous prefab. Structural
+        // mutations on the SAME LODGroup (Insert/Delete) keep the set.
+        LODGroup freshTrackedLodGroup;
         bool hierarchyFoldout = true;
         List<HierarchyDummy> hierarchyDummies;
 
@@ -153,15 +158,18 @@ namespace SashaRX.UnityMeshLab
             problemSummaries = null;
             pendingNames?.Clear();
             lodQualitySliders?.Clear();
-            // Intentionally NOT clearing freshRendererIds here: the hub fires
-            // OnRefresh whenever LodCount changes — including changes WE just
-            // made via InsertLodAt / DeleteLodRow. Clearing the fresh-set
-            // here would erase the bright-orange "just inserted" highlight
-            // before the user ever sees it. The set is only cleared on
-            // explicit Rebuild Names (ApplyPendingNames).
-            // Stale instance-IDs left from previously-selected prefabs are
-            // harmless: a new renderer never gets a matching ID while old
-            // ones are still alive.
+
+            // Clear the ★ NEW highlight set ONLY when the selected prefab's
+            // LODGroup itself has changed. Hub.OnGUI also fires OnRefresh on
+            // structural mutations within the same prefab (LodCount delta);
+            // those should keep the highlight so the user can spot the row
+            // they just added even after a Rebuild Names.
+            if (ctx == null || ctx.LodGroup != freshTrackedLodGroup)
+            {
+                freshRendererIds?.Clear();
+                freshTrackedLodGroup = ctx?.LodGroup;
+            }
+
             hierarchyDummies = null;
             splitCandidates = null;
             mergeCandidates = null;
@@ -441,9 +449,13 @@ namespace SashaRX.UnityMeshLab
 
             EditorGUILayout.Space(2);
 
-            // LOD rows interleaved with insert buttons
+            // LOD rows interleaved with insert buttons. A horizontal divider
+            // between every row makes the table read as discrete entries
+            // instead of one tall block of similar-looking labels.
             for (int i = 0; i < dummy.lods.Count; i++)
             {
+                if (i > 0)
+                    DrawRowDivider();
                 if (DrawLodRow(dummy, dummy.lods[i]))
                 {
                     EditorGUILayout.EndVertical();
@@ -848,7 +860,11 @@ namespace SashaRX.UnityMeshLab
 
             Undo.CollapseUndoOperations(undoGroup);
             buildIntent |= FbxExportIntent.Hierarchy;
-            freshRendererIds?.Clear();
+            // Do NOT clear freshRendererIds here. The ★ NEW marker is meant
+            // to signal "added in this editing session"; clearing on every
+            // Rebuild Names made it disappear immediately after the user
+            // committed a rename. The set is now cleared only when the
+            // selected prefab's LODGroup itself changes (see OnRefresh).
 
             ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
@@ -967,6 +983,12 @@ namespace SashaRX.UnityMeshLab
             Undo.SetCurrentGroupName("Prefab Builder: Insert LOD");
             int undoGroup = Undo.GetCurrentGroup();
 
+            // Drop any pre-existing empty LOD slots in the LODGroup before
+            // splicing — otherwise a phantom gap left over from earlier edits
+            // pushes the new slot past it (e.g. user sees LOD0, LOD1, LOD2,
+            // LOD4 with slot 3 unrendered).
+            UvToolContext.CompactLodArray(ctx.LodGroup, removeEmptySlots: true);
+
             var lods = ctx.LodGroup.GetLODs();
             int targetIdx = Mathf.Clamp(insertIndex, 0, lods.Length);
 
@@ -1029,6 +1051,37 @@ namespace SashaRX.UnityMeshLab
             var go = new GameObject(baseName + "_LOD" + targetIdx);
             Undo.RegisterCreatedObjectUndo(go, "Insert LOD");
             go.transform.SetParent(parent, false);
+
+            // Slot the new GameObject into the scene hierarchy right after the
+            // previous LOD's transform sibling so it doesn't get appended at
+            // the very end of the parent's children. Falls back to the natural
+            // append when the previous LOD lives under a different parent.
+            int desiredSibling = -1;
+            if (targetIdx > 0)
+            {
+                foreach (var candidate in dummy.lods)
+                {
+                    if (candidate == null || candidate.renderer == null) continue;
+                    if (candidate.lodIndex != targetIdx - 1) continue;
+                    if (candidate.renderer.transform.parent != parent) continue;
+                    desiredSibling = candidate.renderer.transform.GetSiblingIndex() + 1;
+                    break;
+                }
+            }
+            if (desiredSibling < 0 && dummy.lods.Count > 0)
+            {
+                // No previous LOD in this parent — slot before the next LOD if any.
+                foreach (var candidate in dummy.lods)
+                {
+                    if (candidate == null || candidate.renderer == null) continue;
+                    if (candidate.lodIndex < targetIdx) continue;
+                    if (candidate.renderer.transform.parent != parent) continue;
+                    desiredSibling = candidate.renderer.transform.GetSiblingIndex();
+                    break;
+                }
+            }
+            if (desiredSibling >= 0)
+                go.transform.SetSiblingIndex(desiredSibling);
 
             var mf = go.AddComponent<MeshFilter>();
             mf.sharedMesh = res.simplifiedMesh;
@@ -1228,6 +1281,16 @@ namespace SashaRX.UnityMeshLab
                     col.colTransform.gameObject.name = desired;
                 }
             }
+        }
+
+        // ── Visual divider between LOD rows so the table reads as discrete entries. ──
+        static void DrawRowDivider()
+        {
+            EditorGUILayout.Space(2);
+            var rect = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
+            if (Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(rect, new Color(0.30f, 0.30f, 0.30f, 0.55f));
+            EditorGUILayout.Space(2);
         }
 
         // ── Status marker: small coloured square painted at the start of a row. ──
