@@ -89,64 +89,78 @@ namespace SashaRX.UnityMeshLab
             EditorGUILayout.LabelField("LOD Generation", EditorStyles.boldLabel);
             EditorGUILayout.Space(4);
 
-            if (ctx.LodGroup == null)
+            DrawDetectAndCreate(ctx);
+            if (ctx.LodGroup == null) return;
+
+            DrawWorkflowHint();
+            DrawExistingLodTable(out int sourceTris, out int lastExistingLod);
+            DrawSettingsPanel(ctx, sourceTris, lastExistingLod);
+            DrawResultsAndClear();
+        }
+
+        // ── Detect / create LODGroup section ──
+        // Used by both the standalone LOD Gen tab AND Prefab Builder's right
+        // panel (when no LODGroup is selected, both surfaces should show the
+        // "Create LODGroup" affordance instead of an empty Settings panel).
+        internal void DrawDetectAndCreate(UvToolContext sharedCtx)
+        {
+            if (sharedCtx == null) return;
+            ctx = sharedCtx;
+            if (sharedCtx.LodGroup != null) return;
+
+            var selected = Selection.activeGameObject;
+            var siblings = FindLodSiblings(selected);
+            if (siblings != null && siblings.Count > 0)
             {
-                // Try to detect LOD siblings from the current selection
-                var selected = Selection.activeGameObject;
-                var siblings = FindLodSiblings(selected);
-
-                if (siblings != null && siblings.Count > 0)
+                RefreshDetectedLodCache(selected, siblings);
+                EditorGUILayout.HelpBox("LOD objects detected — create a LODGroup to continue.", MessageType.Info);
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField("Detected LODs", EditorStyles.boldLabel);
+                foreach (var (go, lodIndex, rendererCount, triangleCount) in cachedDetectedLods)
                 {
-                    RefreshDetectedLodCache(selected, siblings);
-                    EditorGUILayout.HelpBox("LOD objects detected — create a LODGroup to continue.", MessageType.Info);
-                    EditorGUILayout.Space(4);
-                    EditorGUILayout.LabelField("Detected LODs", EditorStyles.boldLabel);
-                    foreach (var (go, lodIndex, rendererCount, triangleCount) in cachedDetectedLods)
-                    {
-                        EditorGUILayout.LabelField(
-                            $"  LOD{lodIndex}: {go.name}  ({rendererCount} renderer{(rendererCount != 1 ? "s" : "")}, {triangleCount:N0} tris)",
-                            EditorStyles.miniLabel);
-                    }
-
-                    EditorGUILayout.Space(6);
-                    var bgc = GUI.backgroundColor;
-                    GUI.backgroundColor = new Color(.4f, .8f, .4f);
-                    if (GUILayout.Button("Create LODGroup", GUILayout.Height(28)))
-                        CreateLodGroup(siblings);
-                    GUI.backgroundColor = bgc;
+                    EditorGUILayout.LabelField(
+                        $"  LOD{lodIndex}: {go.name}  ({rendererCount} renderer{(rendererCount != 1 ? "s" : "")}, {triangleCount:N0} tris)",
+                        EditorStyles.miniLabel);
                 }
-                else if (selected != null && SelectionHasRenderers(selected))
-                {
-                    EditorGUILayout.HelpBox(
-                        "No LOD naming detected, but child renderers found.\n" +
-                        "Create a LODGroup with all renderers as LOD0.",
-                        MessageType.Info);
-                    EditorGUILayout.Space(6);
-                    var bgc = GUI.backgroundColor;
-                    GUI.backgroundColor = new Color(.4f, .8f, .4f);
-                    if (GUILayout.Button("Add LOD Group", GUILayout.Height(28)))
-                    {
-                        var lodGroup = CreateLodGroupFromRenderers(selected);
-                        if (lodGroup != null)
-                        {
-                            ctx.Refresh(lodGroup);
-                            requestRepaint?.Invoke();
-                            UvtLog.Info($"[LOD Gen] Created LODGroup on '{selected.name}' with all renderers as LOD0.");
-                        }
-                    }
-                    GUI.backgroundColor = bgc;
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox(
-                        "Assign a LODGroup in the UV2 Transfer tab first.\n" +
-                        "Or select a GameObject with a LOD suffix (e.g. MyObject_LOD0) to auto-detect LOD siblings.",
-                        MessageType.Info);
-                }
-                return;
+                EditorGUILayout.Space(6);
+                var bgc = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(.4f, .8f, .4f);
+                if (GUILayout.Button("Create LODGroup", GUILayout.Height(28)))
+                    CreateLodGroup(siblings);
+                GUI.backgroundColor = bgc;
             }
+            else if (selected != null && SelectionHasRenderers(selected))
+            {
+                EditorGUILayout.HelpBox(
+                    "No LOD naming detected, but child renderers found.\n" +
+                    "Create a LODGroup with all renderers as LOD0.",
+                    MessageType.Info);
+                EditorGUILayout.Space(6);
+                var bgc = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(.4f, .8f, .4f);
+                if (GUILayout.Button("Add LOD Group", GUILayout.Height(28)))
+                {
+                    var lodGroup = CreateLodGroupFromRenderers(selected);
+                    if (lodGroup != null)
+                    {
+                        ctx.Refresh(lodGroup);
+                        requestRepaint?.Invoke();
+                        UvtLog.Info($"[LOD Gen] Created LODGroup on '{selected.name}' with all renderers as LOD0.");
+                    }
+                }
+                GUI.backgroundColor = bgc;
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "Assign a LODGroup in the UV2 Transfer tab first.\n" +
+                    "Or select a GameObject with a LOD suffix (e.g. MyObject_LOD0) to auto-detect LOD siblings.",
+                    MessageType.Info);
+            }
+        }
 
-            // ── Workflow hint ──
+        void DrawWorkflowHint()
+        {
             bool hasRepack = ctx.MeshEntries.Any(e => e.repackedMesh != null);
             if (!hasRepack)
             {
@@ -157,11 +171,13 @@ namespace SashaRX.UnityMeshLab
                     "3. UV2 Transfer: Overwrite Source FBX (saves everything)",
                     MessageType.Info);
             }
+        }
 
-            // ── LOD Polycount Table ──
+        void DrawExistingLodTable(out int sourceTris, out int lastExistingLod)
+        {
+            sourceTris = 0;
+            lastExistingLod = -1;
             EditorGUILayout.LabelField("Existing LODs", EditorStyles.boldLabel);
-            int sourceTris = 0;
-            int lastExistingLod = -1;
             for (int li = 0; li < ctx.LodCount; li++)
             {
                 var ee = ctx.ForLod(li);
@@ -183,13 +199,53 @@ namespace SashaRX.UnityMeshLab
                     $"{prefix}LOD{li}: {lodTris:N0} tris  {lodVerts:N0} verts  ({pct:F0}%)",
                     isSrc ? EditorStyles.boldLabel : EditorStyles.miniLabel);
             }
+        }
+
+        // ── Settings panel ──
+        // Renders the LOD-count slider, per-target ratio sliders, simplifier
+        // weights, and the Generate button. Designed for embedding into the
+        // standalone LOD Gen tab AND Prefab Builder's right column.
+        // The caller passes the active context so the tool's own ctx
+        // reference is retargeted before the Generate action fires.
+        internal void DrawSettingsPanel(UvToolContext sharedCtx)
+        {
+            if (sharedCtx == null) return;
+            ctx = sharedCtx;
+            if (ctx.LodGroup == null)
+            {
+                DrawDetectAndCreate(ctx);
+                return;
+            }
+            int sourceTris = 0, lastExistingLod = -1;
+            // Recompute source/last so the panel works without the stat table.
+            for (int li = 0; li < ctx.LodCount; li++)
+            {
+                var ee = ctx.ForLod(li);
+                if (ee.Count == 0) continue;
+                lastExistingLod = li;
+                if (li == ctx.SourceLodIndex)
+                {
+                    int t = 0;
+                    foreach (var e in ee)
+                    {
+                        Mesh m = e.repackedMesh ?? e.originalMesh ?? e.fbxMesh;
+                        if (m != null) t += GetTriangleCount(m);
+                    }
+                    sourceTris = t;
+                }
+            }
+            DrawSettingsPanel(sharedCtx, sourceTris, lastExistingLod);
+        }
+
+        void DrawSettingsPanel(UvToolContext sharedCtx, int sourceTris, int lastExistingLod)
+        {
+            ctx = sharedCtx;
 
             int startLod = lastExistingLod + 1;
 
             EditorGUILayout.Space(8);
             EditorGUILayout.LabelField($"Generate LOD{startLod}+", EditorStyles.boldLabel);
 
-            // ── Settings ──
             generateLodCount = EditorGUILayout.IntSlider("Count", generateLodCount, 1, 4);
 
             float lastRatio = 1f;
@@ -243,36 +299,48 @@ namespace SashaRX.UnityMeshLab
             if (GUILayout.Button($"Generate LOD{startLod}–LOD{startLod + generateLodCount - 1}", GUILayout.Height(30)))
                 ExecGenerateLods(startLod);
             GUI.backgroundColor = bg;
+        }
 
-            // ── Results ──
-            if (lastResults.Count > 0 || generatedObjects.Count > 0)
+        void DrawResultsAndClear()
+        {
+            if (lastResults.Count == 0 && generatedObjects.Count == 0) return;
+
+            int sourceTris = 0;
+            for (int li = 0; li < ctx.LodCount; li++)
             {
-                if (lastResults.Count > 0)
+                if (li != ctx.SourceLodIndex) continue;
+                foreach (var e in ctx.ForLod(li))
                 {
-                    EditorGUILayout.Space(6);
-                    EditorGUILayout.LabelField("Generated", EditorStyles.boldLabel);
-                    foreach (var r in lastResults)
-                    {
-                        float pct = sourceTris > 0 ? (float)r.simplifiedTris / sourceTris * 100f : 0;
-                        string warn = r.hitErrorLimit ? " ⚠" : "";
-                        EditorGUILayout.LabelField(
-                            $"  LOD{r.lodLevel}: {r.meshName} — {r.simplifiedTris:N0} tris ({pct:F0}%){warn}",
-                            EditorStyles.miniLabel);
-                        if (r.hitErrorLimit)
-                            EditorGUILayout.LabelField(
-                                $"      target {r.targetRatio:P0}, got {r.actualRatio:P0} — increase Target Error",
-                                EditorStyles.miniLabel);
-                    }
+                    Mesh m = e.repackedMesh ?? e.originalMesh ?? e.fbxMesh;
+                    if (m != null) sourceTris += GetTriangleCount(m);
                 }
-
-                EditorGUILayout.Space(4);
-                var bgClear = GUI.backgroundColor;
-                GUI.backgroundColor = new Color(.9f, .3f, .3f);
-                string clearLabel = lastResults.Count > 0 ? "Clear Results" : "Clear Generated LODs";
-                if (GUILayout.Button(clearLabel, GUILayout.Height(20)))
-                    ClearGeneratedLods();
-                GUI.backgroundColor = bgClear;
             }
+
+            if (lastResults.Count > 0)
+            {
+                EditorGUILayout.Space(6);
+                EditorGUILayout.LabelField("Generated", EditorStyles.boldLabel);
+                foreach (var r in lastResults)
+                {
+                    float pct = sourceTris > 0 ? (float)r.simplifiedTris / sourceTris * 100f : 0;
+                    string warn = r.hitErrorLimit ? " ⚠" : "";
+                    EditorGUILayout.LabelField(
+                        $"  LOD{r.lodLevel}: {r.meshName} — {r.simplifiedTris:N0} tris ({pct:F0}%){warn}",
+                        EditorStyles.miniLabel);
+                    if (r.hitErrorLimit)
+                        EditorGUILayout.LabelField(
+                            $"      target {r.targetRatio:P0}, got {r.actualRatio:P0} — increase Target Error",
+                            EditorStyles.miniLabel);
+                }
+            }
+
+            EditorGUILayout.Space(4);
+            var bgClear = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(.9f, .3f, .3f);
+            string clearLabel = lastResults.Count > 0 ? "Clear Results" : "Clear Generated LODs";
+            if (GUILayout.Button(clearLabel, GUILayout.Height(20)))
+                ClearGeneratedLods();
+            GUI.backgroundColor = bgClear;
         }
 
 

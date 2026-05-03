@@ -1004,7 +1004,7 @@ namespace SashaRX.UnityMeshLab
             if (Event.current.type == EventType.MouseDown && r.Contains(Event.current.mousePosition))
             { GUIUtility.hotControl = id; sideDragging = true; Event.current.Use(); }
             if (sideDragging && Event.current.type == EventType.MouseDrag)
-            { sideW = Mathf.Clamp(Event.current.mousePosition.x, 200, 520); Event.current.Use(); Repaint(); }
+            { sideW = Mathf.Clamp(Event.current.mousePosition.x, 200, 900); Event.current.Use(); Repaint(); }
             if (Event.current.rawType == EventType.MouseUp && sideDragging)
             { sideDragging = false; Event.current.Use(); }
         }

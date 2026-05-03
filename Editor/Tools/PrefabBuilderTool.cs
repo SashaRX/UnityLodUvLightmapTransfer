@@ -70,6 +70,20 @@ namespace SashaRX.UnityMeshLab
         bool hierarchyFoldout = true;
         List<HierarchyDummy> hierarchyDummies;
 
+        // ── Right panel state ──
+        // The Prefab Builder sidebar is split into two columns: hierarchy on
+        // the left, a collapsible Settings stack on the right. The right
+        // panel hosts deferred regenerate parameters (LOD), collider config,
+        // UV2 transfer, vertex-color bake — each section is sourced from the
+        // existing tool's instance via UvToolHub.FindTool<T>(). Tools are
+        // not duplicated — we just call into their existing settings UI.
+        float leftColumnWidth = 320f;
+        bool draggingColumnDivider;
+        bool rightPanelLodFoldout = true;
+        bool rightPanelColliderFoldout;
+        bool rightPanelTransferFoldout;
+        bool rightPanelVcBakeFoldout;
+
         // ── Pending changes (deferred until "Apply Changes") ──
         // Pending Insert: the user clicked "+ Add LOD after LODN" but the
         // GameObject + simplified mesh aren't created until Apply Changes.
@@ -230,18 +244,121 @@ namespace SashaRX.UnityMeshLab
             }
 
             DrawPreviewModeToolbar();
+
+            // Two-column layout: hierarchy on the left, Settings stack on the
+            // right. Drag the divider to reapportion. Drag the Hub's outer
+            // sidebar resize handle if you need more total width.
+            EditorGUILayout.BeginHorizontal();
+
+            EditorGUILayout.BeginVertical(GUILayout.Width(leftColumnWidth));
             DrawHierarchySection();
             DrawCollisionSection();
             DrawSplitMergeSection();
             DrawMeshInfo();
-
-            if (edgeReports != null)
-                DrawEdgeReportSection();
-
-            if (problemSummaries != null)
-                DrawProblemSummarySection();
-
+            if (edgeReports != null) DrawEdgeReportSection();
+            if (problemSummaries != null) DrawProblemSummarySection();
             DrawEdgeLegend();
+            EditorGUILayout.EndVertical();
+
+            DrawColumnDivider();
+
+            EditorGUILayout.BeginVertical();
+            DrawRightPanel();
+            EditorGUILayout.EndVertical();
+
+            EditorGUILayout.EndHorizontal();
+        }
+
+        // ── Resize divider between Hierarchy and Settings columns. ──
+        // Drag horizontally to reapportion. Clamps to a sensible range so
+        // neither column collapses below ~200 px or grows past ~700.
+        void DrawColumnDivider()
+        {
+            var rect = GUILayoutUtility.GetRect(4, 4, GUILayout.Width(4), GUILayout.ExpandHeight(true));
+            if (Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(rect, new Color(0.13f, 0.13f, 0.13f));
+            EditorGUIUtility.AddCursorRect(rect, MouseCursor.ResizeHorizontal);
+            int id = GUIUtility.GetControlID(FocusType.Passive);
+            if (Event.current.type == EventType.MouseDown && rect.Contains(Event.current.mousePosition))
+            {
+                GUIUtility.hotControl = id;
+                draggingColumnDivider = true;
+                Event.current.Use();
+            }
+            if (draggingColumnDivider && Event.current.type == EventType.MouseDrag)
+            {
+                leftColumnWidth = Mathf.Clamp(Event.current.mousePosition.x, 200f, 700f);
+                Event.current.Use();
+                requestRepaint?.Invoke();
+            }
+            if (Event.current.rawType == EventType.MouseUp && draggingColumnDivider)
+            {
+                draggingColumnDivider = false;
+                Event.current.Use();
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // Right panel — Settings stack. Each foldout pulls its UI from the
+        // matching tool instance via UvToolHub.FindTool<T>() so we don't
+        // duplicate the per-tool state. PR-2 lights up LOD Settings; the
+        // remaining sections are placeholders pending migration.
+        // ═══════════════════════════════════════════════════════════
+
+        void DrawRightPanel()
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Tool Settings", EditorStyles.boldLabel);
+            EditorGUILayout.Space(2);
+
+            DrawRightPanelSection(ref rightPanelLodFoldout, "LOD Settings", DrawLodSettingsContent);
+            DrawRightPanelSection(ref rightPanelColliderFoldout, "Collider Settings",
+                () => EditorGUILayout.HelpBox("To be migrated from Collision tool in a follow-up commit.", MessageType.None));
+            DrawRightPanelSection(ref rightPanelTransferFoldout, "Transfer Settings",
+                () => EditorGUILayout.HelpBox("To be migrated from UV2 Transfer tool in a follow-up commit.", MessageType.None));
+            DrawRightPanelSection(ref rightPanelVcBakeFoldout, "Vertex Color Bake",
+                () => EditorGUILayout.HelpBox("To be migrated from Vertex Color Baking tool in a follow-up commit.", MessageType.None));
+        }
+
+        void DrawRightPanelSection(ref bool foldout, string title, System.Action drawContent)
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            foldout = EditorGUILayout.Foldout(foldout, title, true, EditorStyles.foldoutHeader);
+            if (foldout)
+            {
+                EditorGUILayout.Space(2);
+                drawContent?.Invoke();
+            }
+            EditorGUILayout.EndVertical();
+        }
+
+        void DrawLodSettingsContent()
+        {
+            var lodGen = FindLodGenerationTool();
+            if (lodGen == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "LodGenerationTool instance not found in the hub.",
+                    MessageType.Info);
+                return;
+            }
+            lodGen.DrawSettingsPanel(ctx);
+        }
+
+        // Resolve the singleton LodGenerationTool instance the Hub created
+        // when it discovered IUvTool implementations on activation. Iterating
+        // open windows is cheap; the hub is a single dockable EditorWindow.
+        static LodGenerationTool FindLodGenerationTool()
+        {
+            var hubs = Resources.FindObjectsOfTypeAll<UvToolHub>();
+            if (hubs == null) return null;
+            foreach (var hub in hubs)
+            {
+                var t = hub != null ? hub.FindTool<LodGenerationTool>() : null;
+                if (t != null) return t;
+            }
+            return null;
         }
 
         // ═══════════════════════════════════════════════════════════
