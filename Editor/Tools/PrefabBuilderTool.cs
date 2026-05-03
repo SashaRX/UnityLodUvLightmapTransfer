@@ -349,7 +349,7 @@ namespace SashaRX.UnityMeshLab
             if (dummy == null || dummy.dummy == null) return;
 
             EditorGUILayout.Space(4);
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            var blockRect = EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 
             // Header: small foldout arrow + dummy name (editable when not root) + summary.
             // Use an explicit-rect Foldout so it occupies a fixed-width gutter and
@@ -358,7 +358,7 @@ namespace SashaRX.UnityMeshLab
             var foldoutRect = GUILayoutUtility.GetRect(14, 16, GUILayout.Width(14), GUILayout.Height(16));
             dummy.foldout = EditorGUI.Foldout(foldoutRect, dummy.foldout, GUIContent.none, true);
             if (dummy.isRoot)
-                EditorGUILayout.LabelField("Root group", EditorStyles.miniBoldLabel, GUILayout.MinWidth(100));
+                EditorGUILayout.LabelField("Root group", EditorStyles.boldLabel, GUILayout.MinWidth(100));
             else
                 DrawEditableNameField(dummy.dummy.gameObject, GUILayout.MinWidth(100));
             GUILayout.FlexibleSpace();
@@ -366,22 +366,42 @@ namespace SashaRX.UnityMeshLab
                 EditorStyles.miniLabel, GUILayout.Width(110));
             EditorGUILayout.EndHorizontal();
 
-            if (!dummy.foldout) { EditorGUILayout.EndVertical(); return; }
+            if (!dummy.foldout)
+            {
+                EditorGUILayout.EndVertical();
+                PaintDummyAccent(blockRect, dummy);
+                return;
+            }
 
             EditorGUILayout.Space(2);
 
             // LOD rows interleaved with insert buttons
             for (int i = 0; i < dummy.lods.Count; i++)
             {
-                if (DrawLodRow(dummy, dummy.lods[i])) { EditorGUILayout.EndVertical(); return; }
+                if (DrawLodRow(dummy, dummy.lods[i]))
+                {
+                    EditorGUILayout.EndVertical();
+                    PaintDummyAccent(blockRect, dummy);
+                    return;
+                }
                 int afterLodIndex = dummy.lods[i].lodIndex;
-                if (DrawAddLodButton(dummy, afterLodIndex)) { EditorGUILayout.EndVertical(); return; }
+                if (DrawAddLodButton(dummy, afterLodIndex))
+                {
+                    EditorGUILayout.EndVertical();
+                    PaintDummyAccent(blockRect, dummy);
+                    return;
+                }
             }
 
             // No LODs yet — single Add at top
             if (dummy.lods.Count == 0)
             {
-                if (DrawAddLodButton(dummy, -1)) { EditorGUILayout.EndVertical(); return; }
+                if (DrawAddLodButton(dummy, -1))
+                {
+                    EditorGUILayout.EndVertical();
+                    PaintDummyAccent(blockRect, dummy);
+                    return;
+                }
             }
 
             // COL rows (different color tint)
@@ -390,22 +410,55 @@ namespace SashaRX.UnityMeshLab
                 EditorGUILayout.Space(2);
                 var colSep = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
                 EditorGUI.DrawRect(colSep, new Color(0.35f, 0.55f, 0.45f, 0.5f));
-                foreach (var col in dummy.cols)
+                for (int i = 0; i < dummy.cols.Count; i++)
                 {
-                    if (DrawColRow(dummy, col)) { EditorGUILayout.EndVertical(); return; }
+                    if (DrawColRow(dummy, dummy.cols[i], i, dummy.cols.Count))
+                    {
+                        EditorGUILayout.EndVertical();
+                        PaintDummyAccent(blockRect, dummy);
+                        return;
+                    }
                 }
             }
 
+            // Hint when any child is out of sync with the canonical name pattern.
+            if (DummyHasStale(dummy))
+            {
+                EditorGUILayout.Space(2);
+                EditorGUILayout.HelpBox(
+                    "Pending rename — child names don't match Root/Dummy. Click Apply Names to commit.",
+                    MessageType.None);
+            }
+
             EditorGUILayout.EndVertical();
+            PaintDummyAccent(blockRect, dummy);
         }
+
+        // Paint a 3-px coloured bar along the left edge of the dummy block so
+        // multiple Dummy groups read as separate, indented containers rather
+        // than a flat list of rows.
+        static void PaintDummyAccent(Rect blockRect, HierarchyDummy dummy)
+        {
+            if (Event.current.type != EventType.Repaint) return;
+            var color = dummy.isRoot
+                ? new Color(0.45f, 0.75f, 0.45f, 1f)
+                : new Color(0.40f, 0.60f, 1f,    1f);
+            EditorGUI.DrawRect(new Rect(blockRect.x + 1, blockRect.y + 1, 3, blockRect.height - 2), color);
+        }
+
+        const float HierarchyRowIndent = 10f;
 
         // Returns true when the operation invalidates the UI for this frame.
         bool DrawLodRow(HierarchyDummy dummy, HierarchyLodRow lod)
         {
             if (lod == null || lod.renderer == null) return false;
 
+            bool stale = IsLodRowStale(dummy, lod);
+            var rowRect = EditorGUILayout.BeginVertical();
+
             // Row A: name + actions
             EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(HierarchyRowIndent);
             EditorGUILayout.LabelField(lod.renderer.gameObject.name,
                 EditorStyles.textField, GUILayout.MinWidth(120));
             GUILayout.FlexibleSpace();
@@ -418,6 +471,7 @@ namespace SashaRX.UnityMeshLab
                 RegenerateLodWithQuality(dummy, lod);
                 GUI.backgroundColor = bgc;
                 EditorGUILayout.EndHorizontal();
+                EditorGUILayout.EndVertical();
                 return true;
             }
             GUI.backgroundColor = new Color(0.90f, 0.30f, 0.30f);
@@ -427,6 +481,7 @@ namespace SashaRX.UnityMeshLab
                 DeleteLodRow(dummy, lod);
                 GUI.backgroundColor = bgc;
                 EditorGUILayout.EndHorizontal();
+                EditorGUILayout.EndVertical();
                 return true;
             }
             GUI.backgroundColor = bgc;
@@ -439,6 +494,7 @@ namespace SashaRX.UnityMeshLab
             string badges = ChannelBadges(lod.mesh);
 
             EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(HierarchyRowIndent);
             EditorGUILayout.LabelField(stat, EditorStyles.miniLabel, GUILayout.Width(160));
             GUILayout.FlexibleSpace();
             if (!string.IsNullOrEmpty(badges))
@@ -447,6 +503,7 @@ namespace SashaRX.UnityMeshLab
 
             // Row C: LOD label + quality slider
             EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(HierarchyRowIndent);
             EditorGUILayout.LabelField($"LOD{lod.lodIndex}", EditorStyles.miniLabel, GUILayout.Width(40));
             int rid = lod.renderer.GetInstanceID();
             if (!lodQualitySliders.TryGetValue(rid, out var quality))
@@ -455,6 +512,12 @@ namespace SashaRX.UnityMeshLab
             if (Mathf.Abs(newQuality - quality) > 0.0001f)
                 lodQualitySliders[rid] = newQuality;
             EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.EndVertical();
+
+            if (stale && Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(new Rect(rowRect.x + HierarchyRowIndent - 6, rowRect.y, 3, rowRect.height),
+                    new Color(1f, 0.65f, 0.15f));
 
             return false;
         }
@@ -481,11 +544,15 @@ namespace SashaRX.UnityMeshLab
             return false;
         }
 
-        bool DrawColRow(HierarchyDummy dummy, HierarchyColRow col)
+        bool DrawColRow(HierarchyDummy dummy, HierarchyColRow col, int index, int totalCols)
         {
             if (col == null || col.colTransform == null) return false;
 
+            bool stale = IsColRowStale(dummy, col, index, totalCols);
+            var rowRect = EditorGUILayout.BeginVertical();
+
             EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(HierarchyRowIndent);
             var bgc = GUI.backgroundColor;
             GUI.backgroundColor = new Color(0.45f, 0.75f, 0.55f, 0.85f);
             EditorGUILayout.LabelField(col.colTransform.gameObject.name,
@@ -505,10 +572,18 @@ namespace SashaRX.UnityMeshLab
                 DeleteCol(dummy, col);
                 GUI.backgroundColor = bgc;
                 EditorGUILayout.EndHorizontal();
+                EditorGUILayout.EndVertical();
                 return true;
             }
             GUI.backgroundColor = bgc;
             EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.EndVertical();
+
+            if (stale && Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(new Rect(rowRect.x + HierarchyRowIndent - 6, rowRect.y, 3, rowRect.height),
+                    new Color(1f, 0.65f, 0.15f));
+
             return false;
         }
 
@@ -941,6 +1016,41 @@ namespace SashaRX.UnityMeshLab
             if (ctx.LodGroup != null) ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
             requestRepaint?.Invoke();
+        }
+
+        // ── Pre-Apply staleness detection ──
+        // After Insert / Delete / Regenerate the LOD slot indices and the
+        // renderer GameObject names drift apart (e.g. inserting a slot at
+        // index 1 leaves the old `_LOD1` GameObject sitting in slot 2). Apply
+        // Names rebuilds the canonical names; until then the row is "stale".
+
+        bool IsLodRowStale(HierarchyDummy dummy, HierarchyLodRow lod)
+        {
+            if (dummy == null || lod == null || lod.renderer == null || ctx.LodGroup == null)
+                return false;
+            string prefix = dummy.isRoot ? ctx.LodGroup.gameObject.name : dummy.dummy.name;
+            if (string.IsNullOrEmpty(prefix)) return false;
+            return lod.renderer.gameObject.name != $"{prefix}_LOD{lod.lodIndex}";
+        }
+
+        bool IsColRowStale(HierarchyDummy dummy, HierarchyColRow col, int index, int totalCols)
+        {
+            if (dummy == null || col == null || col.colTransform == null || ctx.LodGroup == null)
+                return false;
+            string prefix = dummy.isRoot ? ctx.LodGroup.gameObject.name : dummy.dummy.name;
+            if (string.IsNullOrEmpty(prefix)) return false;
+            string expected = totalCols == 1 ? $"{prefix}_COL" : $"{prefix}_COL_Hull{index}";
+            return col.colTransform.gameObject.name != expected;
+        }
+
+        bool DummyHasStale(HierarchyDummy dummy)
+        {
+            if (dummy == null) return false;
+            foreach (var lod in dummy.lods)
+                if (IsLodRowStale(dummy, lod)) return true;
+            for (int i = 0; i < dummy.cols.Count; i++)
+                if (IsColRowStale(dummy, dummy.cols[i], i, dummy.cols.Count)) return true;
+            return false;
         }
 
         // ── Channel badges: compact summary of which mesh streams have data. ──
