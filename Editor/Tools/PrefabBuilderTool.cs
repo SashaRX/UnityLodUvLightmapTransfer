@@ -324,18 +324,40 @@ namespace SashaRX.UnityMeshLab
 
             DrawRootRow();
 
+            // Re-check: DrawRootRow's Rebuild Names button can mutate state
+            // and null hierarchyDummies mid-frame.
+            if (hierarchyDummies == null) return;
+
             // Indent each Dummy block so the hierarchy reads as a tree
             // (Root at the left edge → Dummy children visually nested under
-            // it). Without this the helpBoxes float at the same x as Root
-            // and the structure looks flat.
+            // it). The 20-px gutter on the left of each block holds an
+            // L-shaped connector that explicitly anchors the dummy back to
+            // Root, so the parent/child relationship is unmistakable even
+            // when the helpBox borders blend in with the inspector.
             foreach (var dummy in hierarchyDummies)
             {
+                if (dummy == null || dummy.dummy == null) continue;
+
                 EditorGUILayout.BeginHorizontal();
-                GUILayout.Space(HierarchyDummyIndent);
+                var gutter = GUILayoutUtility.GetRect(HierarchyDummyIndent, 22,
+                    GUILayout.Width(HierarchyDummyIndent), GUILayout.Height(22));
+                if (Event.current.type == EventType.Repaint)
+                {
+                    var line = new Color(0.55f, 0.55f, 0.55f);
+                    float xMid = gutter.x + HierarchyDummyIndent * 0.5f;
+                    // Vertical drop from top of gutter to the elbow.
+                    EditorGUI.DrawRect(new Rect(xMid, gutter.y, 1, 14), line);
+                    // Horizontal stub from the elbow into the helpBox.
+                    EditorGUI.DrawRect(new Rect(xMid, gutter.y + 14,
+                        HierarchyDummyIndent * 0.5f + 2, 1), line);
+                }
+
                 EditorGUILayout.BeginVertical();
                 DrawDummyBlock(dummy);
                 EditorGUILayout.EndVertical();
                 EditorGUILayout.EndHorizontal();
+
+                if (hierarchyDummies == null) break;
             }
         }
 
@@ -357,9 +379,10 @@ namespace SashaRX.UnityMeshLab
             GUI.backgroundColor = new Color(0.40f, 0.80f, 0.40f);
             string label = hasPending ? $"Rebuild Names ({pendingNames.Count})" : "Rebuild Names";
             var tooltip = new GUIContent(label,
-                "Commit pending Root/Dummy renames AND rebuild every child name from "
-                + "<Root>/<Dummy>_LOD{slot} (and _COL / _COL_Hull{N}). Use this to fix "
-                + "duplicate _LOD{N} names that appear after inserting or deleting LODs.");
+                "Commit pending Root/Dummy renames AND fix the trailing _LOD{N} / _COL "
+                + "suffix on every child so the index matches its slot. Each child keeps "
+                + "its existing base — \"Stove_Base_LOD0\" stays \"Stove_Base_LOD0\". "
+                + "Use this to clean up duplicate suffixes after Insert / Delete.");
             if (GUILayout.Button(tooltip, GUILayout.Height(20), GUILayout.Width(140)))
                 ApplyPendingNames();
             GUI.backgroundColor = bgc;
@@ -452,12 +475,12 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // Hint when any child is out of sync with the canonical name pattern.
+            // Hint when any child's _LOD/_COL suffix doesn't match its slot.
             if (DummyHasStale(dummy))
             {
                 EditorGUILayout.Space(2);
                 EditorGUILayout.HelpBox(
-                    "Child names don't match Root/Dummy. Click Rebuild Names to renumber.",
+                    "Trailing _LOD/_COL suffix doesn't match the slot. Click Rebuild Names to renumber.",
                     MessageType.None);
             }
 
@@ -1103,11 +1126,13 @@ namespace SashaRX.UnityMeshLab
             requestRepaint?.Invoke();
         }
 
-        // ── Leaf rename: rebuild every LOD/COL GameObject name from the
-        // canonical "<prefix>_LOD{N}" / "<prefix>_COL[_Hull{N}]" pattern.
-        // Caller is responsible for the surrounding Undo group; the rename
-        // ops are recorded with Undo.RecordObject so they collapse cleanly
-        // alongside the structural mutation that triggered them.
+        // ── Leaf rename: only fix the trailing _LOD{N} / _COL[_Hull{N}] suffix.
+        // Each leaf keeps its existing base name (e.g. "Stove_Base_LOD0" stays
+        // "Stove_Base_LOD0", not "Stove_LOD0") — the user controls the base by
+        // editing GameObject names directly; we just renumber slots so that
+        // Insert / Delete don't leave duplicates like two "*_LOD2"s.
+        // Caller owns the surrounding Undo group; rename ops are recorded with
+        // Undo.RecordObject so they collapse with the triggering mutation.
         void RebuildLeafNamesNoUndoGroup()
         {
             if (ctx?.LodGroup == null) return;
@@ -1118,22 +1143,23 @@ namespace SashaRX.UnityMeshLab
             foreach (var dummy in hierarchyDummies)
             {
                 if (dummy.dummy == null) continue;
-                string prefix = dummy.isRoot ? rootName : dummy.dummy.name;
-                if (string.IsNullOrEmpty(prefix)) prefix = "Group";
+                string fallbackBase = dummy.isRoot ? rootName : dummy.dummy.name;
+                if (string.IsNullOrEmpty(fallbackBase)) fallbackBase = "Group";
 
                 for (int i = 0; i < dummy.lods.Count; i++)
                 {
                     var lod = dummy.lods[i];
                     if (lod.renderer == null) continue;
-                    string desired = $"{prefix}_LOD{lod.lodIndex}";
-                    if (lod.renderer.gameObject.name == desired) continue;
+                    string current = lod.renderer.gameObject.name;
+                    string baseName = UvToolContext.ExtractGroupKey(current);
+                    if (string.IsNullOrEmpty(baseName)) baseName = fallbackBase;
+                    string desired = $"{baseName}_LOD{lod.lodIndex}";
+                    if (current == desired) continue;
                     Undo.RecordObject(lod.renderer.gameObject, "Rename LOD");
                     lod.renderer.gameObject.name = desired;
                 }
 
-                // Count only standalone _COL GameObjects when picking the
-                // single-vs-Hull{N} naming convention; component-only rows
-                // (collider on the dummy itself) skip rename entirely.
+                // Count standalone _COL GameObjects to pick single vs Hull{N}.
                 int standaloneCount = 0;
                 foreach (var c in dummy.cols)
                     if (!c.isComponentOnly) standaloneCount++;
@@ -1143,11 +1169,14 @@ namespace SashaRX.UnityMeshLab
                     var col = dummy.cols[i];
                     if (col.colTransform == null) continue;
                     if (col.isComponentOnly) continue;
-                    string desired = standaloneCount == 1
-                        ? $"{prefix}_COL"
-                        : $"{prefix}_COL_Hull{hullIndex}";
+                    string current = col.colTransform.gameObject.name;
+                    string baseName = UvToolContext.ExtractGroupKey(current);
+                    if (string.IsNullOrEmpty(baseName)) baseName = fallbackBase;
+                    string desired = standaloneCount <= 1
+                        ? $"{baseName}_COL"
+                        : $"{baseName}_COL_Hull{hullIndex}";
                     hullIndex++;
-                    if (col.colTransform.gameObject.name == desired) continue;
+                    if (current == desired) continue;
                     Undo.RecordObject(col.colTransform.gameObject, "Rename COL");
                     col.colTransform.gameObject.name = desired;
                 }
@@ -1181,9 +1210,11 @@ namespace SashaRX.UnityMeshLab
         {
             if (dummy == null || lod == null || lod.renderer == null || ctx.LodGroup == null)
                 return false;
-            string prefix = dummy.isRoot ? ctx.LodGroup.gameObject.name : dummy.dummy.name;
-            if (string.IsNullOrEmpty(prefix)) return false;
-            return lod.renderer.gameObject.name != $"{prefix}_LOD{lod.lodIndex}";
+            string current = lod.renderer.gameObject.name;
+            string baseName = UvToolContext.ExtractGroupKey(current);
+            if (string.IsNullOrEmpty(baseName))
+                baseName = dummy.isRoot ? ctx.LodGroup.gameObject.name : dummy.dummy.name;
+            return current != $"{baseName}_LOD{lod.lodIndex}";
         }
 
         bool IsColRowStale(HierarchyDummy dummy, HierarchyColRow col, int index, int totalCols)
@@ -1193,10 +1224,27 @@ namespace SashaRX.UnityMeshLab
             // Component-only rows live ON the dummy/root and can't be renamed
             // independently — never report them as stale.
             if (col.isComponentOnly) return false;
-            string prefix = dummy.isRoot ? ctx.LodGroup.gameObject.name : dummy.dummy.name;
-            if (string.IsNullOrEmpty(prefix)) return false;
-            string expected = totalCols == 1 ? $"{prefix}_COL" : $"{prefix}_COL_Hull{index}";
-            return col.colTransform.gameObject.name != expected;
+            // Compute base from the existing name so custom prefixes
+            // (e.g. "Stove_Base_COL") are preserved through Rebuild.
+            string current = col.colTransform.gameObject.name;
+            string baseName = UvToolContext.ExtractGroupKey(current);
+            if (string.IsNullOrEmpty(baseName))
+                baseName = dummy.isRoot ? ctx.LodGroup.gameObject.name : dummy.dummy.name;
+            // Count standalone _COL siblings to choose single vs Hull{N} convention.
+            int standaloneCount = 0;
+            int hullIdx = -1;
+            int hullPos = 0;
+            foreach (var c in dummy.cols)
+            {
+                if (c.isComponentOnly) continue;
+                if (ReferenceEquals(c, col)) hullIdx = hullPos;
+                hullPos++;
+                standaloneCount++;
+            }
+            string expected = standaloneCount <= 1
+                ? $"{baseName}_COL"
+                : $"{baseName}_COL_Hull{hullIdx}";
+            return current != expected;
         }
 
         bool DummyHasStale(HierarchyDummy dummy)
