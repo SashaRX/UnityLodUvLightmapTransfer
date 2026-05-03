@@ -1335,7 +1335,8 @@ namespace SashaRX.UnityMeshLab
             }
         }
 
-        public void ExportFbxPublic(bool overwriteSource) => ExportFbx(overwriteSource);
+        public void ExportFbxPublic(bool overwriteSource) => ExportFbx(overwriteSource, FbxExportIntent.All);
+        public void ExportFbxPublic(bool overwriteSource, FbxExportIntent intent) => ExportFbx(overwriteSource, intent);
         public void ApplyUv2Public() => ApplyUv2ToFbx();
         public void SaveAllPublic() => SaveAll();
 
@@ -1721,6 +1722,64 @@ namespace SashaRX.UnityMeshLab
         /// untouched per-vertex channels are preserved from the source FBX.
         /// </summary>
         /// <param name="sourceFbxPath">Project path to the FBX to overwrite.</param>
+        // Narrow-intent group dispatcher for ExportFbx. One core call
+        // per source FBX, reusing the standard "overwrite vs save-as"
+        // dialog flow but routing the actual write through the safe
+        // atomic core. Save-as without a project-relative path
+        // gracefully degrades to the absolute path the user picked
+        // (Unity's FBX exporter accepts both).
+        void ExportNarrowIntentGroups(
+            Dictionary<string, List<(MeshEntry entry, Mesh resultMesh)>> fbxGroups,
+            FbxExportIntent intent,
+            bool overwriteSource)
+        {
+#if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            int okCount = 0;
+            int totalCount = 0;
+            foreach (var kv in fbxGroups)
+            {
+                totalCount++;
+                string sourceFbxPath = kv.Key;
+                var entries = kv.Value.Select(p => p.entry).ToList();
+                string outputFbxPath = null;
+
+                if (overwriteSource)
+                {
+                    if (!EditorUtility.DisplayDialog(
+                            "Overwrite Source FBX",
+                            $"Re-save '{System.IO.Path.GetFileName(sourceFbxPath)}' with intent {intent}?\n\n" +
+                            "Channels not in the intent are preserved from the source FBX. " +
+                            "Atomic write — original is untouched if export fails.",
+                            "Overwrite", "Cancel"))
+                        continue;
+                }
+                else
+                {
+                    string dir = System.IO.Path.GetDirectoryName(sourceFbxPath);
+                    string baseName = System.IO.Path.GetFileNameWithoutExtension(sourceFbxPath);
+                    string suffix = (intent & FbxExportIntent.AnyUv) != 0 ? "_uv" :
+                                    (intent & FbxExportIntent.VertexColors) != 0 ? "_vcolor" :
+                                    "_isolated";
+                    string picked = EditorUtility.SaveFilePanel(
+                        "Export FBX (isolated)", dir, baseName + suffix + ".fbx", "fbx");
+                    if (string.IsNullOrEmpty(picked)) continue;
+                    string dataPath = Application.dataPath;
+                    if (picked.StartsWith(dataPath, StringComparison.OrdinalIgnoreCase))
+                        outputFbxPath = "Assets" + picked.Substring(dataPath.Length);
+                    else
+                        outputFbxPath = picked;
+                }
+
+                RestoreAllPreviews();
+                if (ExportFbxIsolatedCore(sourceFbxPath, entries, intent, outputFbxPath))
+                    okCount++;
+            }
+            UvtLog.Info($"[FBX Export] Narrow-intent export: {okCount}/{totalCount} group(s) succeeded.");
+#else
+            UvtLog.Error("[FBX Export] FBX Exporter package not installed.");
+#endif
+        }
+
         /// <param name="entries">Mesh entries supplying source data. Matched
         /// against the FBX clone by sub-asset name.</param>
         /// <param name="intent">Channels the caller is allowed to write.
@@ -2081,9 +2140,26 @@ namespace SashaRX.UnityMeshLab
             }
         }
 
-        void ExportFbx(bool overwriteSource)
+        void ExportFbx(bool overwriteSource) => ExportFbx(overwriteSource, FbxExportIntent.All);
+
+        // ExportFbx with intent. Narrow intent (no Hierarchy and no
+        // LodGroup bits) delegates per-group to ExportFbxIsolatedCore —
+        // the safe atomic-write + preflight path. Wide intent (Hierarchy
+        // or LodGroup set) keeps the LOD-rebuild pipeline below: mesh
+        // replacement by name, stale-child pruning, NormalizeExport-
+        // Hierarchy, collision injection from sidecar. Migrating the
+        // wide path to atomic write is a follow-up — for now the LOD-
+        // rebuild scenario keeps direct overwrite for backwards
+        // compatibility with existing tooling that depends on its
+        // sequencing.
+        void ExportFbx(bool overwriteSource, FbxExportIntent intent)
         {
 #if LIGHTMAP_UV_TOOL_FBX_EXPORTER
+            if (intent == FbxExportIntent.None)
+            {
+                UvtLog.Warn("[FBX Export] ExportFbx called with FbxExportIntent.None — nothing to write.");
+                return;
+            }
             if (ctx?.MeshEntries == null || ctx.MeshEntries.Count == 0)
             {
                 UvtLog.Error("[FBX Export] No meshes loaded.");
@@ -2149,6 +2225,21 @@ namespace SashaRX.UnityMeshLab
                 fbxGroups[fbxPath].Add((e, resultMesh));
             }
             if (fbxGroups.Count == 0) { UvtLog.Error("[FBX Export] No processed meshes to export."); return; }
+
+            // Narrow-intent fast path. When the caller is not asking for
+            // hierarchy / LOD-chain mutations, every group is exported
+            // through the safe core (atomic write, preflight, no
+            // NormalizeExportHierarchy, no material trim, no collision
+            // injection from sidecar). This is the path UV2 transfer /
+            // UV pack / vertex color baking should take — it preserves
+            // node names, transforms, materials and untouched per-vertex
+            // channels byte-for-byte (modulo what Unity's FBX Exporter
+            // itself rewrites at the FBX-document level).
+            if ((intent & (FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup)) == 0)
+            {
+                ExportNarrowIntentGroups(fbxGroups, intent, overwriteSource);
+                return;
+            }
 
             bool allGroupsSucceeded = true;
             var overwrittenFbxPaths = new HashSet<string>();
