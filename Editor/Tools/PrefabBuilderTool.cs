@@ -74,8 +74,15 @@ namespace SashaRX.UnityMeshLab
 
         sealed class HierarchyColRow
         {
-            public Transform colTransform;
-            public Mesh mesh;
+            public Transform colTransform;     // GameObject the collider is on (dummy itself or a _COL child).
+            public Collider collider;          // Component reference (Mesh / Box / Capsule / Sphere…).
+            public Mesh mesh;                  // sharedMesh for MeshCollider, or sharedMesh of a _COL GO MeshFilter.
+            public string typeLabel;           // "Mesh" / "Box" / "Capsule" / "Sphere" / fallback type name.
+            // True when this row represents a Collider component attached to the
+            // Dummy/Root GameObject itself (not a separate _COL child). Component
+            // rows can't be renamed by Rebuild Names and ✕ removes only the
+            // component instead of destroying the whole GameObject.
+            public bool isComponentOnly;
         }
 
         // Accumulates which channels mutating operations touched since the last
@@ -559,29 +566,33 @@ namespace SashaRX.UnityMeshLab
         {
             if (col == null || col.colTransform == null) return false;
 
-            bool stale = IsColRowStale(dummy, col, index, totalCols);
+            // Component-only rows (collider on the dummy itself) are never
+            // renamed — the host GameObject is the dummy, not a leaf.
+            bool stale = !col.isComponentOnly && IsColRowStale(dummy, col, index, totalCols);
 
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
             DrawStatusMarker(false, stale);
+
             var prevBg = GUI.backgroundColor;
-            // Stale COL → amber. Otherwise tint green to match the collision
-            // palette used elsewhere.
             GUI.backgroundColor = stale
                 ? new Color(0.95f, 0.78f, 0.30f)
                 : new Color(0.55f, 0.95f, 0.70f);
-            EditorGUILayout.LabelField(col.colTransform.gameObject.name,
-                EditorStyles.textField, GUILayout.MinWidth(120));
+            string display = col.isComponentOnly
+                ? $"{col.colTransform.gameObject.name}  [{col.typeLabel}]"
+                : col.colTransform.gameObject.name;
+            EditorGUILayout.LabelField(display, EditorStyles.textField, GUILayout.MinWidth(120));
             GUI.backgroundColor = prevBg;
 
-            int verts = col.mesh != null ? col.mesh.vertexCount : 0;
-            int tris = col.mesh != null ? MeshHygieneUtility.GetTriangleCount(col.mesh) : 0;
-            EditorGUILayout.LabelField($"COL  {verts:N0}v / {tris:N0}t",
-                EditorStyles.miniLabel, GUILayout.Width(160));
+            EditorGUILayout.LabelField(BuildColStatLabel(col),
+                EditorStyles.miniLabel, GUILayout.Width(180));
 
             GUILayout.FlexibleSpace();
+            string removeTooltip = col.isComponentOnly
+                ? $"Remove the {col.typeLabel}Collider component from '{col.colTransform.name}'."
+                : "Remove this collision GameObject.";
             GUI.backgroundColor = new Color(0.90f, 0.30f, 0.30f);
-            if (GUILayout.Button(new GUIContent("✕", "Remove this collision object."),
+            if (GUILayout.Button(new GUIContent("✕", removeTooltip),
                     GUILayout.Width(22), GUILayout.Height(18)))
             {
                 DeleteCol(dummy, col);
@@ -593,6 +604,28 @@ namespace SashaRX.UnityMeshLab
             EditorGUILayout.EndHorizontal();
 
             return false;
+        }
+
+        static string BuildColStatLabel(HierarchyColRow col)
+        {
+            if (col.collider is MeshCollider)
+            {
+                int verts = col.mesh != null ? col.mesh.vertexCount : 0;
+                int tris = col.mesh != null ? MeshHygieneUtility.GetTriangleCount(col.mesh) : 0;
+                string meshName = col.mesh != null ? col.mesh.name : "(none)";
+                return $"Mesh  {verts:N0}v / {tris:N0}t  · {meshName}";
+            }
+            if (col.collider is BoxCollider bc)
+                return $"Box  {bc.size.x:F2}×{bc.size.y:F2}×{bc.size.z:F2}";
+            if (col.collider is CapsuleCollider cc)
+                return $"Capsule  r={cc.radius:F2}  h={cc.height:F2}";
+            if (col.collider is SphereCollider sc)
+                return $"Sphere  r={sc.radius:F2}";
+            if (col.collider != null)
+                return col.typeLabel ?? col.collider.GetType().Name;
+            int v = col.mesh != null ? col.mesh.vertexCount : 0;
+            int t = col.mesh != null ? MeshHygieneUtility.GetTriangleCount(col.mesh) : 0;
+            return $"COL  {v:N0}v / {t:N0}t";
         }
 
         // Editable text field bound to pendingNames keyed by GameObject instanceID.
@@ -653,8 +686,32 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // Attach collision objects to whichever dummy contains them. COLs at
-            // root level land in the root dummy; nested COLs follow their parent.
+            // Two collision sources flow into each dummy block:
+            //  1) Collider components attached to the dummy/root GameObject itself
+            //     (e.g. a MeshCollider on the prefab root pointing at a *_COL mesh
+            //     asset). These are "component-only" rows.
+            //  2) Standalone _COL named child GameObjects (legacy convention).
+            // The first is the case the user just flagged — meshes referenced by a
+            // root-level MeshCollider were invisible in the tree.
+            foreach (var dummy in lookup.Values)
+            {
+                if (dummy.dummy == null) continue;
+                foreach (var c in dummy.dummy.GetComponents<Collider>())
+                {
+                    if (c == null) continue;
+                    Mesh m = null;
+                    if (c is MeshCollider mc) m = mc.sharedMesh;
+                    dummy.cols.Add(new HierarchyColRow
+                    {
+                        colTransform   = dummy.dummy,
+                        collider       = c,
+                        mesh           = m,
+                        typeLabel      = ColliderTypeLabel(c),
+                        isComponentOnly = true,
+                    });
+                }
+            }
+
             foreach (var colGo in MeshHygieneUtility.FindCollisionObjects(root))
             {
                 if (colGo == null) continue;
@@ -664,10 +721,15 @@ namespace SashaRX.UnityMeshLab
                 Transform key = parent == root ? root : parent;
                 var dummy = GetOrCreateDummy(lookup, key, root);
                 var mf = colGo.GetComponent<MeshFilter>();
+                var c = colGo.GetComponent<Collider>();
                 dummy.cols.Add(new HierarchyColRow
                 {
-                    colTransform = colT,
-                    mesh = mf != null ? mf.sharedMesh : null
+                    colTransform   = colT,
+                    collider       = c,
+                    mesh           = (c is MeshCollider mc2) ? mc2.sharedMesh
+                                       : (mf != null ? mf.sharedMesh : null),
+                    typeLabel      = c != null ? ColliderTypeLabel(c) : "Mesh",
+                    isComponentOnly = false,
                 });
             }
 
@@ -690,6 +752,20 @@ namespace SashaRX.UnityMeshLab
                 lookup[key] = dummy;
             }
             return dummy;
+        }
+
+        static string ColliderTypeLabel(Collider c)
+        {
+            switch (c)
+            {
+                case MeshCollider _:    return "Mesh";
+                case BoxCollider _:     return "Box";
+                case CapsuleCollider _: return "Capsule";
+                case SphereCollider _:  return "Sphere";
+                case WheelCollider _:   return "Wheel";
+                case TerrainCollider _: return "Terrain";
+                default:                return c.GetType().Name.Replace("Collider", "");
+            }
         }
 
         static int CompareDummies(HierarchyDummy a, HierarchyDummy b)
@@ -1005,10 +1081,20 @@ namespace SashaRX.UnityMeshLab
 
         void DeleteCol(HierarchyDummy dummy, HierarchyColRow col)
         {
-            if (col == null || col.colTransform == null) return;
+            if (col == null) return;
 
-            UvtLog.Info($"[LightmapUV] Removed COL '{col.colTransform.name}' from '{dummy.dummy.name}'.");
-            Undo.DestroyObjectImmediate(col.colTransform.gameObject);
+            if (col.isComponentOnly)
+            {
+                if (col.collider == null) return;
+                UvtLog.Info($"[LightmapUV] Removed {col.typeLabel}Collider from '{col.colTransform.name}'.");
+                Undo.DestroyObjectImmediate(col.collider);
+            }
+            else
+            {
+                if (col.colTransform == null) return;
+                UvtLog.Info($"[LightmapUV] Removed COL '{col.colTransform.name}' from '{dummy.dummy.name}'.");
+                Undo.DestroyObjectImmediate(col.colTransform.gameObject);
+            }
 
             buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.Collision;
 
@@ -1045,13 +1131,22 @@ namespace SashaRX.UnityMeshLab
                     lod.renderer.gameObject.name = desired;
                 }
 
+                // Count only standalone _COL GameObjects when picking the
+                // single-vs-Hull{N} naming convention; component-only rows
+                // (collider on the dummy itself) skip rename entirely.
+                int standaloneCount = 0;
+                foreach (var c in dummy.cols)
+                    if (!c.isComponentOnly) standaloneCount++;
+                int hullIndex = 0;
                 for (int i = 0; i < dummy.cols.Count; i++)
                 {
                     var col = dummy.cols[i];
                     if (col.colTransform == null) continue;
-                    string desired = dummy.cols.Count == 1
+                    if (col.isComponentOnly) continue;
+                    string desired = standaloneCount == 1
                         ? $"{prefix}_COL"
-                        : $"{prefix}_COL_Hull{i}";
+                        : $"{prefix}_COL_Hull{hullIndex}";
+                    hullIndex++;
                     if (col.colTransform.gameObject.name == desired) continue;
                     Undo.RecordObject(col.colTransform.gameObject, "Rename COL");
                     col.colTransform.gameObject.name = desired;
@@ -1095,6 +1190,9 @@ namespace SashaRX.UnityMeshLab
         {
             if (dummy == null || col == null || col.colTransform == null || ctx.LodGroup == null)
                 return false;
+            // Component-only rows live ON the dummy/root and can't be renamed
+            // independently — never report them as stale.
+            if (col.isComponentOnly) return false;
             string prefix = dummy.isRoot ? ctx.LodGroup.gameObject.name : dummy.dummy.name;
             if (string.IsNullOrEmpty(prefix)) return false;
             string expected = totalCols == 1 ? $"{prefix}_COL" : $"{prefix}_COL_Hull{index}";
