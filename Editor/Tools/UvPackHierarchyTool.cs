@@ -570,7 +570,11 @@ namespace SashaRX.UnityMeshLab
                     UvtLog.Warn($"[UV1] No hierarchy entries map to '{path}', skipping.");
                     continue;
                 }
-                transferTool.ExportVertexColorsToFbx(path, entriesForPath, uvChannelOverride: 1);
+                // UV1-only re-save: ExportVertexColorsToFbx unconditionally
+                // seeds VertexColors into the intent and would clobber any
+                // authored vertex colors in the source FBX. Use the explicit
+                // isolated-channel API instead.
+                transferTool.ExportIsolatedChannelsToFbx(path, entriesForPath, FbxExportIntent.UV1);
             }
         }
 

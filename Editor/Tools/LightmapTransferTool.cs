@@ -1855,6 +1855,16 @@ namespace SashaRX.UnityMeshLab
             // ── Phase 1: Prepare importer (single reimport, scoped to intent) ──
             ModelImporter srcImporter = null;
             bool madeReadable = false;
+            // Snapshot importer toggles we lock for the snapshot+export pass
+            // so Phase 5 can put them back; otherwise a single isolated
+            // re-save permanently disables the user's weld / compression /
+            // optimization / secondary-UV settings on the source FBX.
+            bool restoreGenerateSecondaryUV = false;
+            bool restoreWeldVertices = false;
+            bool restoreMeshCompression = false;
+            bool restoreMeshOptimization = false;
+            ModelImporterMeshCompression originalMeshCompression = ModelImporterMeshCompression.Off;
+            int originalMeshOptimizationFlags = 0;
             if (!isVariantExport)
             {
                 srcImporter = AssetImporter.GetAtPath(sourceFbxPath) as ModelImporter;
@@ -1864,18 +1874,28 @@ namespace SashaRX.UnityMeshLab
                     // generateSecondaryUV writes Unity UV channel 1.
                     // Lock only when the intent overwrites that channel.
                     if (intent.IncludesUv(1) && srcImporter.generateSecondaryUV)
-                        { srcImporter.generateSecondaryUV = false; needsReimport = true; }
+                        { srcImporter.generateSecondaryUV = false; needsReimport = true; restoreGenerateSecondaryUV = true; }
                     // weld / compression / optimization renumber vertices →
                     // break per-vertex data. Lock when intent writes any
                     // per-vertex channel.
                     if (intent.TouchesPerVertex())
                     {
                         if (srcImporter.weldVertices)
-                            { srcImporter.weldVertices = false; needsReimport = true; }
+                            { srcImporter.weldVertices = false; needsReimport = true; restoreWeldVertices = true; }
                         if (srcImporter.meshCompression != ModelImporterMeshCompression.Off)
-                            { srcImporter.meshCompression = ModelImporterMeshCompression.Off; needsReimport = true; }
+                            {
+                                originalMeshCompression = srcImporter.meshCompression;
+                                srcImporter.meshCompression = ModelImporterMeshCompression.Off;
+                                needsReimport = true;
+                                restoreMeshCompression = true;
+                            }
                         if (srcImporter.meshOptimizationFlags != 0)
-                            { srcImporter.meshOptimizationFlags = 0; needsReimport = true; }
+                            {
+                                originalMeshOptimizationFlags = srcImporter.meshOptimizationFlags;
+                                srcImporter.meshOptimizationFlags = 0;
+                                needsReimport = true;
+                                restoreMeshOptimization = true;
+                            }
                     }
                     if (!srcImporter.isReadable)
                         { srcImporter.isReadable = true; needsReimport = true; madeReadable = true; }
@@ -2059,11 +2079,24 @@ namespace SashaRX.UnityMeshLab
             // ── Phase 5: Restore importer settings + working copies ──
             if (!isVariantExport)
             {
-                if (madeReadable && srcImporter != null)
+                if (srcImporter != null)
                 {
-                    srcImporter.isReadable = false;
-                    Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
-                    srcImporter.SaveAndReimport();
+                    bool needsRestoreReimport = false;
+                    if (madeReadable)
+                        { srcImporter.isReadable = false; needsRestoreReimport = true; }
+                    if (restoreGenerateSecondaryUV)
+                        { srcImporter.generateSecondaryUV = true; needsRestoreReimport = true; }
+                    if (restoreWeldVertices)
+                        { srcImporter.weldVertices = true; needsRestoreReimport = true; }
+                    if (restoreMeshCompression)
+                        { srcImporter.meshCompression = originalMeshCompression; needsRestoreReimport = true; }
+                    if (restoreMeshOptimization)
+                        { srcImporter.meshOptimizationFlags = originalMeshOptimizationFlags; needsRestoreReimport = true; }
+                    if (needsRestoreReimport)
+                    {
+                        Uv2AssetPostprocessor.bypassPaths.Add(sourceFbxPath);
+                        srcImporter.SaveAndReimport();
+                    }
                 }
                 RestoreWorkingCopiesToScene();
             }
