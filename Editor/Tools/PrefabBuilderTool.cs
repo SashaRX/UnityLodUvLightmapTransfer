@@ -900,10 +900,11 @@ namespace SashaRX.UnityMeshLab
 
         Mesh ResolveLodSourceMesh(HierarchyDummy dummy, HierarchyLodRow lod)
         {
-            // Prefer this dummy's LOD0 entry sharing the same group key. The
-            // caller may pass a placeholder LodRow without a renderer (when
-            // inserting into an empty dummy) — in that case skip the key match
-            // and fall through to "first LOD0 mesh in the dummy".
+            // Always prefer the import-time fbxMesh from MeshEntries over the
+            // currently-bound sharedMesh. Otherwise re-running simplify on
+            // LOD0 would replace its mesh with a degraded copy and every
+            // downstream regenerate (LOD1 → LODN) would start from that
+            // already-simplified geometry instead of the original FBX.
             string key = lod != null && lod.renderer != null
                 ? UvToolContext.ExtractGroupKey(lod.renderer.name)
                 : null;
@@ -916,16 +917,32 @@ namespace SashaRX.UnityMeshLab
                     if (candidate.mesh == null) continue;
                     string ck = UvToolContext.ExtractGroupKey(candidate.renderer != null ? candidate.renderer.name : "");
                     if (string.Equals(ck, key, System.StringComparison.OrdinalIgnoreCase))
-                        return candidate.mesh;
+                        return PreferOriginalMesh(candidate.renderer, candidate.mesh);
                 }
             }
-            // For LOD0 → reuse the renderer's own mesh (in-place simplify).
-            if (lod != null && lod.lodIndex == 0 && lod.mesh != null) return lod.mesh;
+            // For LOD0 → reuse the renderer's own mesh, but always go through
+            // the original-mesh lookup so we don't simplify a simplified mesh.
+            if (lod != null && lod.lodIndex == 0)
+                return PreferOriginalMesh(lod.renderer, lod.mesh);
             // Fallback: first LOD0 mesh in the dummy.
             foreach (var candidate in dummy.lods)
                 if (candidate.lodIndex == 0 && candidate.mesh != null)
-                    return candidate.mesh;
+                    return PreferOriginalMesh(candidate.renderer, candidate.mesh);
             return null;
+        }
+
+        // Look up the import-time mesh (fbxMesh) for a renderer via the
+        // shared MeshEntries cache. Falls back to the supplied current
+        // sharedMesh when the entry doesn't carry an FBX-source reference.
+        Mesh PreferOriginalMesh(Renderer r, Mesh fallback)
+        {
+            if (r == null || ctx?.MeshEntries == null) return fallback;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (e.renderer != r) continue;
+                return e.fbxMesh ?? e.originalMesh ?? fallback;
+            }
+            return fallback;
         }
 
         void InsertLodAt(HierarchyDummy dummy, int insertIndex)
@@ -1054,13 +1071,28 @@ namespace SashaRX.UnityMeshLab
             var lods = ctx.LodGroup.GetLODs();
             if (lod.lodIndex < 0 || lod.lodIndex >= lods.Length) return;
 
+            // Guard: refuse to delete if it would leave the LODGroup with zero
+            // slots. Without this, RebuildHierarchyView produces no Dummy at all
+            // and the Hierarchy UI loses every "+ Add LOD" entry point — the
+            // user has to undo or switch tools to recover.
+            var slot = lods[lod.lodIndex];
+            int slotRendererCount = 0;
+            if (slot.renderers != null)
+                foreach (var r in slot.renderers) if (r != null) slotRendererCount++;
+            bool isLastSlot = lods.Length == 1;
+            bool wouldEmptySlot = slotRendererCount <= 1;
+            if (isLastSlot && wouldEmptySlot)
+            {
+                UvtLog.Warn("[LightmapUV] Can't delete the last LOD level. Add another LOD first.");
+                return;
+            }
+
             Undo.SetCurrentGroupName("Prefab Builder: Delete LOD");
             int undoGroup = Undo.GetCurrentGroup();
 
             // Remove the renderer GameObject and its slot.
             // If the slot still has other renderers (multi-mesh per LOD), only
             // strip this renderer; otherwise drop the slot entirely.
-            var slot = lods[lod.lodIndex];
             var renderers = slot.renderers != null
                 ? new List<Renderer>(slot.renderers) : new List<Renderer>();
             renderers.Remove(lod.renderer);
