@@ -78,10 +78,16 @@ namespace SashaRX.UnityMeshLab
         // Pending Delete: the user clicked ✕ on an existing LOD row. The
         // renderer is marked for destruction but not actually removed
         // until Apply Changes; clicking ✕ again reverts the mark.
+        // Pending inserts are slot-scoped (apply to the LODGroup as a whole, not
+        // to a single Dummy). Clicking "+ Add LOD after LOD{N}" in any Dummy
+        // block queues one entry; on Apply Changes we create a renderer in
+        // EVERY Dummy that has a LOD0 source mesh and splice them all into the
+        // new slot together. Otherwise inserting in Stove_Base alone would
+        // leave Stove_Cap with no coverage at the new slot, and Stove_Cap
+        // would silently disappear at that camera distance.
         sealed class PendingInsert
         {
-            public Transform dummyTransform;   // identifies the dummy this pending lives in
-            public Renderer afterRenderer;     // the existing renderer to insert after, or null = at the start
+            public int afterLodIndex;          // slot to insert after (-1 = at the very start)
             public float quality;              // simplification target ratio chosen by the user
         }
         List<PendingInsert> pendingInserts;
@@ -600,8 +606,13 @@ namespace SashaRX.UnityMeshLab
                 GUI.backgroundColor = new Color(1.0f, 0.55f, 0.10f);    // bright orange — just inserted/regen
             else if (stale)
                 GUI.backgroundColor = new Color(0.95f, 0.78f, 0.30f);   // amber — name out of sync
-            EditorGUILayout.LabelField(nameLabel,
-                EditorStyles.textField, GUILayout.MinWidth(120));
+            // Click on the name pings the renderer's GameObject in the
+            // Hierarchy window so the user can locate it quickly.
+            if (GUILayout.Button(nameLabel,
+                    EditorStyles.textField, GUILayout.MinWidth(120)))
+            {
+                EditorGUIUtility.PingObject(lod.renderer.gameObject);
+            }
             GUI.backgroundColor = prevBg;
             GUILayout.FlexibleSpace();
 
@@ -700,24 +711,41 @@ namespace SashaRX.UnityMeshLab
 
             if (clicked)
             {
-                EnqueuePendingInsert(dummy, afterLodIndex);
+                EnqueuePendingInsert(afterLodIndex);
                 return true;
             }
             return false;
         }
 
         // ── Pending insert row ──
-        // Render every pending insert whose afterRenderer matches the given
-        // sibling. Returns true when a row mutated state (UI invalidated).
+        // Render every pending insert whose afterLodIndex matches the slot
+        // currently occupied by the given anchor renderer. Pending entries
+        // are slot-scoped, so the row is shown in EVERY Dummy block at the
+        // same slot — that's the visible counterpart of the synced commit
+        // (every dummy gets a renderer at the new slot on Apply Changes).
+        // Returns true when a row mutated state (UI invalidated).
         bool DrawPendingInsertsForAfter(HierarchyDummy dummy, Renderer afterRenderer)
         {
             if (pendingInserts == null || pendingInserts.Count == 0) return false;
+            int anchorSlot = -1;
+            if (afterRenderer != null)
+            {
+                // Anchor is one of THIS dummy's renderers — its lodIndex was
+                // already cached on the matching HierarchyLodRow, but find it
+                // explicitly here so the helper is self-contained.
+                foreach (var lr in dummy.lods)
+                {
+                    if (lr == null || lr.renderer != afterRenderer) continue;
+                    anchorSlot = lr.lodIndex;
+                    break;
+                }
+                if (anchorSlot < 0) return false;
+            }
             for (int i = 0; i < pendingInserts.Count; i++)
             {
                 var p = pendingInserts[i];
                 if (p == null) continue;
-                if (p.dummyTransform != dummy.dummy) continue;
-                if (p.afterRenderer != afterRenderer) continue;
+                if (p.afterLodIndex != anchorSlot) continue;
                 DrawRowDivider();
                 if (DrawPendingInsertRow(p))
                 {
@@ -775,30 +803,34 @@ namespace SashaRX.UnityMeshLab
         // Enqueue a pending insert for this dummy. Captures the renderer that
         // it should follow so the slot index can be recomputed accurately at
         // Apply time even after structural shifts. Default quality = half of
-        // the previous LOD's slider, falling back to 0.5.
-        void EnqueuePendingInsert(HierarchyDummy dummy, int afterLodIndex)
+        // the average previous LOD slider across all dummies that share this
+        // slot (so multi-dummy prefabs get a sensible starting ratio without
+        // privileging the dummy where the click happened).
+        void EnqueuePendingInsert(int afterLodIndex)
         {
-            if (dummy == null || dummy.dummy == null) return;
-            Renderer afterRenderer = null;
-            if (afterLodIndex >= 0)
-            {
-                foreach (var lr in dummy.lods)
-                {
-                    if (lr == null || lr.renderer == null) continue;
-                    if (lr.lodIndex != afterLodIndex) continue;
-                    afterRenderer = lr.renderer;
-                    break;
-                }
-            }
+            if (pendingInserts == null) pendingInserts = new List<PendingInsert>();
             float defaultQ = 0.5f;
-            if (afterRenderer != null
-                && lodQualitySliders.TryGetValue(afterRenderer.GetInstanceID(), out var prevQ))
-                defaultQ = Mathf.Max(0.01f, prevQ * 0.5f);
+            if (afterLodIndex >= 0 && hierarchyDummies != null && lodQualitySliders != null)
+            {
+                int samples = 0;
+                float sum = 0f;
+                foreach (var dummy in hierarchyDummies)
+                {
+                    if (dummy?.lods == null) continue;
+                    foreach (var lr in dummy.lods)
+                    {
+                        if (lr == null || lr.renderer == null) continue;
+                        if (lr.lodIndex != afterLodIndex) continue;
+                        if (lodQualitySliders.TryGetValue(lr.renderer.GetInstanceID(), out var q))
+                        { sum += q; samples++; }
+                    }
+                }
+                if (samples > 0) defaultQ = Mathf.Max(0.01f, (sum / samples) * 0.5f);
+            }
             pendingInserts.Add(new PendingInsert
             {
-                dummyTransform = dummy.dummy,
-                afterRenderer  = afterRenderer,
-                quality        = defaultQ
+                afterLodIndex = afterLodIndex,
+                quality       = defaultQ
             });
             requestRepaint?.Invoke();
         }
@@ -822,7 +854,14 @@ namespace SashaRX.UnityMeshLab
             string display = col.isComponentOnly
                 ? $"{col.colTransform.gameObject.name}  [{col.typeLabel}]"
                 : col.colTransform.gameObject.name;
-            EditorGUILayout.LabelField(display, EditorStyles.textField, GUILayout.MinWidth(120));
+            // Click pings the host GameObject so the user can jump to it.
+            if (GUILayout.Button(display, EditorStyles.textField, GUILayout.MinWidth(120)))
+            {
+                Object pingTarget = col.isComponentOnly && col.collider != null
+                    ? (Object)col.collider
+                    : col.colTransform.gameObject;
+                EditorGUIUtility.PingObject(pingTarget);
+            }
             GUI.backgroundColor = prevBg;
 
             EditorGUILayout.LabelField(BuildColStatLabel(col),
@@ -1148,40 +1187,20 @@ namespace SashaRX.UnityMeshLab
             if (ctx?.LodGroup == null) return;
             if (pendingInserts == null) return;
 
-            // Refresh the dummy view once before iterating so afterRenderer
-            // lookups go against the current LODGroup state (post-delete).
-            if (hierarchyDummies == null) RebuildHierarchyView();
-
-            foreach (var pending in pendingInserts)
+            // Apply in REVERSE click order so earlier pendings still land in
+            // their intended position even after later pendings shift slot
+            // numbers. With reverse order, later-clicked pendings at a higher
+            // afterLodIndex get inserted first; earlier-clicked pendings at a
+            // lower afterLodIndex are then inserted into a still-stable left
+            // half of the array.
+            for (int i = pendingInserts.Count - 1; i >= 0; i--)
             {
+                var pending = pendingInserts[i];
                 if (pending == null) continue;
-                var dummy = FindDummyByTransform(pending.dummyTransform);
-                if (dummy == null) continue;
-
-                int afterSlot = -1;
-                if (pending.afterRenderer != null)
-                {
-                    foreach (var lr in dummy.lods)
-                    {
-                        if (lr == null || lr.renderer != pending.afterRenderer) continue;
-                        afterSlot = lr.lodIndex;
-                        break;
-                    }
-                }
-                int targetIdx = afterSlot + 1;
-                InsertLodAtInternal(dummy, targetIdx, pending.quality);
-                if (hierarchyDummies == null) RebuildHierarchyView();
+                int targetIdx = Mathf.Max(0, pending.afterLodIndex + 1);
+                InsertSlotAtIndex(targetIdx, pending.quality);
             }
-
             pendingInserts.Clear();
-        }
-
-        HierarchyDummy FindDummyByTransform(Transform t)
-        {
-            if (t == null || hierarchyDummies == null) return null;
-            foreach (var d in hierarchyDummies)
-                if (d != null && d.dummy == t) return d;
-            return null;
         }
 
         bool HasAnyStaleLeafName()
@@ -1298,164 +1317,146 @@ namespace SashaRX.UnityMeshLab
             return fallback;
         }
 
-        // Internal: actually create the LOD slot + GameObject + simplified mesh.
-        // Called from CommitPendingInserts — UI clicks no longer invoke this
-        // directly; they enqueue a pending entry instead.
-        void InsertLodAtInternal(HierarchyDummy dummy, int insertIndex, float requestedQuality)
+        // Insert a new LOD slot at index targetIdx and create a simplified
+        // renderer in EVERY Dummy that has a LOD0 source mesh. Synced inserts
+        // keep multi-Dummy prefabs intact — Stove_Cap doesn't silently drop
+        // out at the new camera distance just because the user clicked
+        // "+ Add LOD" on the Stove_Base block.
+        void InsertSlotAtIndex(int insertIndex, float requestedQuality)
         {
-            if (ctx.LodGroup == null || dummy == null) return;
+            if (ctx?.LodGroup == null) return;
 
-            Undo.SetCurrentGroupName("Prefab Builder: Insert LOD");
+            Undo.SetCurrentGroupName("Prefab Builder: Insert LOD slot");
             int undoGroup = Undo.GetCurrentGroup();
 
-            // Drop any pre-existing empty LOD slots in the LODGroup before
-            // splicing — otherwise a phantom gap left over from earlier edits
-            // pushes the new slot past it (e.g. user sees LOD0, LOD1, LOD2,
-            // LOD4 with slot 3 unrendered).
+            // Compact pre-existing empty slots before splicing so the new slot
+            // index doesn't get pushed past a phantom gap.
             UvToolContext.CompactLodArray(ctx.LodGroup, removeEmptySlots: true);
+            if (hierarchyDummies == null) RebuildHierarchyView();
 
             var lods = ctx.LodGroup.GetLODs();
             int targetIdx = Mathf.Clamp(insertIndex, 0, lods.Length);
 
-            // Compute transition height: midpoint between neighbours.
             float prevTrans = targetIdx > 0
                 ? lods[targetIdx - 1].screenRelativeTransitionHeight : 1f;
             float nextTrans = targetIdx < lods.Length
                 ? lods[targetIdx].screenRelativeTransitionHeight : 0.01f;
             float newTrans = Mathf.Max(0.01f, (prevTrans + nextTrans) * 0.5f);
 
-            // Use the caller-supplied quality (typically came from the pending
-            // row's slider). Fall back to half-of-previous-LOD when zero.
             float quality = requestedQuality > 0f ? requestedQuality : 0.5f;
-            if (requestedQuality <= 0f && targetIdx > 0)
+
+            var newRenderers = new List<Renderer>();
+            int totalOrigTris = 0;
+            int totalSimplTris = 0;
+
+            foreach (var dummy in hierarchyDummies)
             {
-                foreach (var existing in dummy.lods)
+                if (dummy == null || dummy.dummy == null) continue;
+
+                var sourceMesh = ResolveLodSourceMesh(dummy,
+                    dummy.lods.Count > 0 ? dummy.lods[0] : new HierarchyLodRow { lodIndex = 0 });
+                if (sourceMesh == null) continue;
+
+                var settings = new MeshSimplifier.SimplifySettings
                 {
-                    if (existing.lodIndex != targetIdx - 1) continue;
-                    if (existing.renderer == null) break;
-                    int rid = existing.renderer.GetInstanceID();
-                    if (lodQualitySliders.TryGetValue(rid, out var prevQ))
-                        quality = Mathf.Max(0.01f, prevQ * 0.5f);
-                    break;
+                    targetRatio  = quality,
+                    targetError  = 0.1f,
+                    uv2Weight    = 0.5f,
+                    normalWeight = 0.5f,
+                    lockBorder   = true,
+                    uvChannel    = 1
+                };
+                var res = MeshSimplifier.Simplify(sourceMesh, settings);
+                if (!res.ok)
+                {
+                    UvtLog.Warn($"[LightmapUV] Insert slot simplify failed for '{sourceMesh.name}': {res.error}");
+                    continue;
                 }
+
+                string baseName = UvToolContext.ExtractGroupKey(sourceMesh.name);
+                if (string.IsNullOrEmpty(baseName)) baseName = sourceMesh.name;
+                res.simplifiedMesh.name = baseName + "_LOD" + targetIdx;
+
+                Transform parent = dummy.dummy;
+                var go = new GameObject(baseName + "_LOD" + targetIdx);
+                Undo.RegisterCreatedObjectUndo(go, "Insert LOD slot");
+                go.transform.SetParent(parent, false);
+
+                // Sibling-position the new GO right after this dummy's
+                // previous-LOD sibling (or before the next-LOD sibling) so the
+                // scene hierarchy mirrors the LODGroup slot order.
+                int desiredSibling = -1;
+                if (targetIdx > 0)
+                {
+                    foreach (var candidate in dummy.lods)
+                    {
+                        if (candidate?.renderer == null) continue;
+                        if (candidate.lodIndex != targetIdx - 1) continue;
+                        if (candidate.renderer.transform.parent != parent) continue;
+                        desiredSibling = candidate.renderer.transform.GetSiblingIndex() + 1;
+                        break;
+                    }
+                }
+                if (desiredSibling < 0)
+                {
+                    foreach (var candidate in dummy.lods)
+                    {
+                        if (candidate?.renderer == null) continue;
+                        if (candidate.lodIndex < targetIdx) continue;
+                        if (candidate.renderer.transform.parent != parent) continue;
+                        desiredSibling = candidate.renderer.transform.GetSiblingIndex();
+                        break;
+                    }
+                }
+                if (desiredSibling >= 0)
+                    go.transform.SetSiblingIndex(desiredSibling);
+
+                var mf = go.AddComponent<MeshFilter>();
+                mf.sharedMesh = res.simplifiedMesh;
+                var mr = go.AddComponent<MeshRenderer>();
+
+                Renderer sourceRenderer = null;
+                foreach (var candidate in dummy.lods)
+                    if (candidate.lodIndex == 0 && candidate.renderer != null)
+                    { sourceRenderer = candidate.renderer; break; }
+                if (sourceRenderer != null)
+                    LightmapTransferTool.CopyRendererSettings(sourceRenderer, mr);
+
+                int newRid = mr.GetInstanceID();
+                lodQualitySliders[newRid] = quality;
+                freshRendererIds?.Add(newRid);
+
+                newRenderers.Add(mr);
+                totalOrigTris += res.originalTriCount;
+                totalSimplTris += res.simplifiedTriCount;
             }
 
-            // Generate a new mesh and renderer GameObject from the dummy's LOD0.
-            var sourceMesh = ResolveLodSourceMesh(dummy,
-                dummy.lods.Count > 0 ? dummy.lods[0] : new HierarchyLodRow { lodIndex = 0 });
-            if (sourceMesh == null)
+            if (newRenderers.Count == 0)
             {
-                UvtLog.Warn("[LightmapUV] Insert LOD: no source mesh in this dummy group.");
+                UvtLog.Warn("[LightmapUV] Insert slot: no dummy had a LOD0 source mesh; nothing inserted.");
+                Undo.CollapseUndoOperations(undoGroup);
                 return;
             }
 
-            var settings = new MeshSimplifier.SimplifySettings
-            {
-                targetRatio  = quality,
-                targetError  = 0.1f,
-                uv2Weight    = 0.5f,
-                normalWeight = 0.5f,
-                lockBorder   = true,
-                uvChannel    = 1
-            };
-
-            var res = MeshSimplifier.Simplify(sourceMesh, settings);
-            if (!res.ok)
-            {
-                UvtLog.Warn($"[LightmapUV] Insert LOD simplify failed: {res.error}");
-                return;
-            }
-
-            string baseName = UvToolContext.ExtractGroupKey(sourceMesh.name);
-            if (string.IsNullOrEmpty(baseName)) baseName = sourceMesh.name;
-            res.simplifiedMesh.name = baseName + "_LOD" + targetIdx;
-
-            // Pick a parent: prefer the existing dummy container, else the LODGroup transform.
-            Transform parent = dummy.dummy != null ? dummy.dummy : ctx.LodGroup.transform;
-
-            var go = new GameObject(baseName + "_LOD" + targetIdx);
-            Undo.RegisterCreatedObjectUndo(go, "Insert LOD");
-            go.transform.SetParent(parent, false);
-
-            // Slot the new GameObject into the scene hierarchy right after the
-            // previous LOD's transform sibling so it doesn't get appended at
-            // the very end of the parent's children. Falls back to the natural
-            // append when the previous LOD lives under a different parent.
-            int desiredSibling = -1;
-            if (targetIdx > 0)
-            {
-                foreach (var candidate in dummy.lods)
-                {
-                    if (candidate == null || candidate.renderer == null) continue;
-                    if (candidate.lodIndex != targetIdx - 1) continue;
-                    if (candidate.renderer.transform.parent != parent) continue;
-                    desiredSibling = candidate.renderer.transform.GetSiblingIndex() + 1;
-                    break;
-                }
-            }
-            if (desiredSibling < 0 && dummy.lods.Count > 0)
-            {
-                // No previous LOD in this parent — slot before the next LOD if any.
-                foreach (var candidate in dummy.lods)
-                {
-                    if (candidate == null || candidate.renderer == null) continue;
-                    if (candidate.lodIndex < targetIdx) continue;
-                    if (candidate.renderer.transform.parent != parent) continue;
-                    desiredSibling = candidate.renderer.transform.GetSiblingIndex();
-                    break;
-                }
-            }
-            if (desiredSibling >= 0)
-                go.transform.SetSiblingIndex(desiredSibling);
-
-            var mf = go.AddComponent<MeshFilter>();
-            mf.sharedMesh = res.simplifiedMesh;
-            var mr = go.AddComponent<MeshRenderer>();
-
-            // Copy renderer settings from the LOD0 source where possible.
-            Renderer sourceRenderer = null;
-            foreach (var candidate in dummy.lods)
-                if (candidate.lodIndex == 0 && candidate.renderer != null)
-                { sourceRenderer = candidate.renderer; break; }
-            if (sourceRenderer != null)
-                LightmapTransferTool.CopyRendererSettings(sourceRenderer, mr);
-
-            // Splice into LODs[]: shift renderers from targetIdx onward down a slot.
+            // Splice into LODs[]: shift renderers from targetIdx onward down.
             var newLods = new LOD[lods.Length + 1];
             for (int i = 0; i < targetIdx; i++) newLods[i] = lods[i];
-            newLods[targetIdx] = new LOD(newTrans, new Renderer[] { mr });
+            newLods[targetIdx] = new LOD(newTrans, newRenderers.ToArray());
             for (int i = targetIdx; i < lods.Length; i++) newLods[i + 1] = lods[i];
-
             LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
-
-            // Save the chosen quality on the new renderer slot so the slider
-            // reflects the value that was just used. Mark the renderer as
-            // "fresh" so the row picks up the bright-orange highlight until
-            // Apply Names is clicked.
-            int newRid = mr.GetInstanceID();
-            lodQualitySliders[newRid] = quality;
-            freshRendererIds?.Add(newRid);
 
             buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup
                 | FbxExportIntent.AnyUv | FbxExportIntent.Normals
                 | FbxExportIntent.Tangents | FbxExportIntent.VertexColors;
 
-            // Refresh + rebuild leaf names so the new LOD lands at its slot's
-            // canonical name and any LODs that shifted down get renumbered
-            // automatically — no manual Rebuild Names step required.
             ctx.LodGroup.RecalculateBounds();
             ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
-            RebuildLeafNamesNoUndoGroup();
 
             Undo.CollapseUndoOperations(undoGroup);
 
-            UvtLog.Info($"[LightmapUV] Inserted LOD{targetIdx} '{go.name}' (quality {quality:P0}, "
-                + $"{res.originalTriCount} → {res.simplifiedTriCount} tris)");
-
-            ctx.Refresh(ctx.LodGroup);
-            hierarchyDummies = null;
-            requestRepaint?.Invoke();
+            UvtLog.Info($"[LightmapUV] Inserted LOD slot {targetIdx} across {newRenderers.Count} dummies "
+                + $"(quality {quality:P0}, {totalOrigTris} → {totalSimplTris} tris total)");
         }
 
         void DeleteCol(HierarchyDummy dummy, HierarchyColRow col)
@@ -1676,23 +1677,23 @@ namespace SashaRX.UnityMeshLab
         }
 
         // ── Channel badges: compact summary of which mesh streams have data. ──
+        // Uses Mesh.HasVertexAttribute (which works on non-readable FBX-imported
+        // meshes) instead of GetUVs/colors32/normals — the data accessors silently
+        // return empty arrays when isReadable is false, so the badges used to
+        // appear only after a regenerate (which produces a readable mesh) and
+        // never on the original import meshes.
 
         static string ChannelBadges(Mesh mesh)
         {
             if (mesh == null) return "";
             var parts = new List<string>();
-            if (mesh.isReadable)
-            {
-                var tmp = new List<Vector2>();
-                for (int ch = 0; ch <= 3; ch++)
-                {
-                    mesh.GetUVs(ch, tmp);
-                    if (tmp.Count > 0) parts.Add("UV" + ch);
-                }
-                if (mesh.colors32 != null && mesh.colors32.Length > 0) parts.Add("VC");
-                if (mesh.normals != null && mesh.normals.Length > 0) parts.Add("N");
-                if (mesh.tangents != null && mesh.tangents.Length > 0) parts.Add("T");
-            }
+            if (mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.TexCoord0)) parts.Add("UV0");
+            if (mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.TexCoord1)) parts.Add("UV1");
+            if (mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.TexCoord2)) parts.Add("UV2");
+            if (mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.TexCoord3)) parts.Add("UV3");
+            if (mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Color))     parts.Add("VC");
+            if (mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Normal))    parts.Add("N");
+            if (mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Tangent))   parts.Add("T");
             return parts.Count == 0 ? "—" : string.Join("·", parts);
         }
 
