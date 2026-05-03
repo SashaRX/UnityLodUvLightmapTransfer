@@ -74,6 +74,13 @@ namespace SashaRX.UnityMeshLab
         Dictionary<BuildValidator.IssueGroup, bool> buildIssueFoldouts =
             new Dictionary<BuildValidator.IssueGroup, bool>();
 
+        // Accumulates which channels Build pipeline mutated since the last
+        // refresh / save. Drives ExecBuildSave's FbxExportIntent so the
+        // narrow isolated re-save core can be used when only data channels
+        // changed, falling back to wide path (intent=All) only when
+        // hierarchy / LODGroup / materials / collision were touched.
+        FbxExportIntent buildIntent = FbxExportIntent.None;
+
         // ── Collision management state ──
         bool collisionFoldout;
 
@@ -121,6 +128,7 @@ namespace SashaRX.UnityMeshLab
             splitCandidates = null;
             mergeCandidates = null;
             buildIssues = null;
+            buildIntent = FbxExportIntent.None;
         }
 
         // ── UI: Sidebar ──
@@ -454,6 +462,8 @@ namespace SashaRX.UnityMeshLab
             Undo.CollapseUndoOperations(group);
             pendingNames.Clear();
 
+            buildIntent |= FbxExportIntent.Hierarchy;
+
             // Refresh context since names changed
             if (ctx.LodGroup != null) ctx.Refresh(ctx.LodGroup);
             requestRepaint?.Invoke();
@@ -600,6 +610,16 @@ namespace SashaRX.UnityMeshLab
 
             Undo.CollapseUndoOperations(group);
             pendingNames?.Clear();
+
+            // NormalizeChildScales bakes node transforms into vertex
+            // positions, which moves verts (and re-derived normals) — both
+            // require wide intent. GroupMeshChildrenByMaterial reshuffles
+            // the hierarchy; RebuildLodGroupFromNames rebuilds the
+            // LODGroup component.
+            buildIntent |= FbxExportIntent.Hierarchy
+                           | FbxExportIntent.LodGroup
+                           | FbxExportIntent.Normals
+                           | FbxExportIntent.Tangents;
 
             ctx.Refresh(ctx.LodGroup);
             requestRepaint?.Invoke();
@@ -978,6 +998,14 @@ namespace SashaRX.UnityMeshLab
                 UvtLog.Error($"[Build] Generate failed: {result.error}");
                 return;
             }
+            // Generated LODs add fresh meshes with their own UVs / colors /
+            // normals / tangents and grow the LODGroup component.
+            buildIntent |= FbxExportIntent.Hierarchy
+                           | FbxExportIntent.LodGroup
+                           | FbxExportIntent.AnyUv
+                           | FbxExportIntent.VertexColors
+                           | FbxExportIntent.Normals
+                           | FbxExportIntent.Tangents;
             buildIssues = null;
             requestRepaint?.Invoke();
         }
@@ -1068,7 +1096,16 @@ namespace SashaRX.UnityMeshLab
                 UvtLog.Error("[Build] UV2 Transfer tool not found — cannot export FBX.");
                 return;
             }
-            transferTool.ExportFbxPublic(overwriteSource);
+            // Build pipeline tracks which channels its operations touched
+            // since the last refresh. If nothing was tracked we conservatively
+            // fall back to the wide path (intent=All) — Save can be hit
+            // after edits made by other tools (UV2 transfer, vertex color
+            // baking, etc.) that we don't observe from here.
+            var intent = buildIntent != FbxExportIntent.None
+                ? buildIntent
+                : FbxExportIntent.All;
+            transferTool.ExportFbxPublic(overwriteSource, intent);
+            buildIntent = FbxExportIntent.None;
             buildIssues = null;
         }
 

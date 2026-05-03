@@ -31,8 +31,19 @@ namespace SashaRX.UnityMeshLab
         Normals      = 1 << 9,
         Tangents     = 1 << 10,
 
+        // Non-per-vertex categories. These describe whole-asset mutations
+        // that the wide LOD-rebuild path performs; the narrow isolated
+        // re-save path requires all four to be clear so it can guarantee
+        // node names, materials, transforms and the LODGroup component
+        // come through byte-identical from the source FBX.
+        Hierarchy    = 1 << 11,
+        Materials    = 1 << 12,
+        Collision    = 1 << 13,
+        LodGroup     = 1 << 14,
+
         AnyUv        = UV0 | UV1 | UV2 | UV3 | UV4 | UV5 | UV6 | UV7,
-        All          = AnyUv | VertexColors | Normals | Tangents,
+        All          = AnyUv | VertexColors | Normals | Tangents
+                       | Hierarchy | Materials | Collision | LodGroup,
     }
 
     internal static class FbxExportIntentExtensions
