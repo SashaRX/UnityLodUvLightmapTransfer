@@ -1,8 +1,17 @@
 // PrefabBuilderTool.cs — Prefab Builder tool (IUvTool tab).
 // Sidebar layout (PR-1):
 //   • Scene preview toolbar (Off / Vert Colors / Normals / Tangents / UV0-3 / Edges / Problems)
-//   • Hierarchy: Root + Apply Names + per-Dummy blocks (LOD rows + COL rows + channel badges)
+//   • Hierarchy: Root + Apply Changes + per-Dummy blocks (LOD rows + COL rows + channel badges)
 //   • Legacy Collision / Split / Merge / Mesh Info / Edge / Problem sections
+//
+// Pending-changes model: clicking "+ Add LOD" or ✕ on an existing LOD row queues
+// a pending operation; the prefab itself is untouched until the user clicks
+// Apply Changes. Apply Changes commits, in order, Root/Dummy renames, pending
+// deletes, pending inserts (creates GameObject + simplified mesh), then renumbers
+// trailing _LOD{N} / _COL[_Hull{N}] suffixes. Regenerate (↻) currently still
+// runs immediately — it will move into the right-side settings panel with a 3D
+// preview in PR-2; for now regenerated rows expose a Discard (↶) button that
+// restores the import-time fbxMesh.
 //
 // PR-2 will pull tool settings (LOD generation, transfer, collider, VC bake) into a
 // right-side stack and migrate the legacy sections out of the sidebar. PR-3 adds the
@@ -60,6 +69,23 @@ namespace SashaRX.UnityMeshLab
         LODGroup freshTrackedLodGroup;
         bool hierarchyFoldout = true;
         List<HierarchyDummy> hierarchyDummies;
+
+        // ── Pending changes (deferred until "Apply Changes") ──
+        // Pending Insert: the user clicked "+ Add LOD after LODN" but the
+        // GameObject + simplified mesh aren't created until Apply Changes.
+        // The pending row renders inline in DrawDummyBlock with a PENDING
+        // badge and a quality slider the user can tweak before commit.
+        // Pending Delete: the user clicked ✕ on an existing LOD row. The
+        // renderer is marked for destruction but not actually removed
+        // until Apply Changes; clicking ✕ again reverts the mark.
+        sealed class PendingInsert
+        {
+            public Transform dummyTransform;   // identifies the dummy this pending lives in
+            public Renderer afterRenderer;     // the existing renderer to insert after, or null = at the start
+            public float quality;              // simplification target ratio chosen by the user
+        }
+        List<PendingInsert> pendingInserts;
+        HashSet<int> pendingDeleteRendererIds;
 
         sealed class HierarchyDummy
         {
@@ -142,6 +168,8 @@ namespace SashaRX.UnityMeshLab
             pendingNames = new Dictionary<int, string>();
             lodQualitySliders = new Dictionary<int, float>();
             freshRendererIds = new HashSet<int>();
+            pendingInserts = new List<PendingInsert>();
+            pendingDeleteRendererIds = new HashSet<int>();
         }
 
         public void OnDeactivate()
@@ -159,14 +187,17 @@ namespace SashaRX.UnityMeshLab
             pendingNames?.Clear();
             lodQualitySliders?.Clear();
 
-            // Clear the ★ NEW highlight set ONLY when the selected prefab's
+            // Clear session-scoped state ONLY when the selected prefab's
             // LODGroup itself has changed. Hub.OnGUI also fires OnRefresh on
             // structural mutations within the same prefab (LodCount delta);
-            // those should keep the highlight so the user can spot the row
-            // they just added even after a Rebuild Names.
+            // those should keep the ★ NEW highlight and pending-changes
+            // queue so the user can spot the row they just added even after
+            // a Rebuild Names.
             if (ctx == null || ctx.LodGroup != freshTrackedLodGroup)
             {
                 freshRendererIds?.Clear();
+                pendingInserts?.Clear();
+                pendingDeleteRendererIds?.Clear();
                 freshTrackedLodGroup = ctx?.LodGroup;
             }
 
@@ -386,21 +417,32 @@ namespace SashaRX.UnityMeshLab
             DrawEditableNameField(rootGo, GUILayout.MinWidth(120));
             GUILayout.FlexibleSpace();
 
-            // Rebuild Names commits pending edits AND rebuilds child LOD/COL
-            // names from the canonical "<prefix>_LOD{N}" / "<prefix>_COL[_Hull{N}]"
-            // pattern. Resolves duplicate names left over from Insert / Delete.
-            // Stays enabled even when no pending edits so users can resync.
-            bool hasPending = pendingNames != null && pendingNames.Count > 0;
+            // Apply Changes is the single commit point: pending name edits,
+            // pending LOD inserts, pending LOD deletes, and leaf-name renumber
+            // are all applied together. Disabled when nothing is queued so it's
+            // visually obvious the prefab is already in sync.
+            int pendingTotal =
+                (pendingNames?.Count ?? 0)
+                + (pendingInserts?.Count ?? 0)
+                + (pendingDeleteRendererIds?.Count ?? 0);
+            bool hasAny = pendingTotal > 0 || HasAnyStaleLeafName();
             var bgc = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.40f, 0.80f, 0.40f);
-            string label = hasPending ? $"Rebuild Names ({pendingNames.Count})" : "Rebuild Names";
+            GUI.backgroundColor = hasAny
+                ? new Color(0.40f, 0.80f, 0.40f)
+                : new Color(0.55f, 0.55f, 0.55f);
+            string label = hasAny ? $"Apply Changes ({pendingTotal})" : "Apply Changes";
             var tooltip = new GUIContent(label,
-                "Commit pending Root/Dummy renames AND fix the trailing _LOD{N} / _COL "
-                + "suffix on every child so the index matches its slot. Each child keeps "
-                + "its existing base — \"Stove_Base_LOD0\" stays \"Stove_Base_LOD0\". "
-                + "Use this to clean up duplicate suffixes after Insert / Delete.");
-            if (GUILayout.Button(tooltip, GUILayout.Height(20), GUILayout.Width(140)))
-                ApplyPendingNames();
+                "Commit every pending change at once:\n"
+                + "  • Root / Dummy name edits\n"
+                + "  • Pending LOD inserts (creates GameObject + simplifies mesh)\n"
+                + "  • Pending LOD deletes\n"
+                + "  • Renumber trailing _LOD{N} / _COL suffixes to match slots\n\n"
+                + "Until you click this, the prefab itself is untouched.");
+            using (new EditorGUI.DisabledScope(!hasAny))
+            {
+                if (GUILayout.Button(tooltip, GUILayout.Height(20), GUILayout.Width(160)))
+                    ApplyChanges();
+            }
             GUI.backgroundColor = bgc;
             EditorGUILayout.EndHorizontal();
 
@@ -449,6 +491,14 @@ namespace SashaRX.UnityMeshLab
 
             EditorGUILayout.Space(2);
 
+            // Render any pending inserts that should appear BEFORE the first
+            // existing LOD (afterRenderer == null).
+            if (DrawPendingInsertsForAfter(dummy, null))
+            {
+                EditorGUILayout.EndVertical();
+                return;
+            }
+
             // LOD rows interleaved with insert buttons. A horizontal divider
             // between every row makes the table read as discrete entries
             // instead of one tall block of similar-looking labels.
@@ -457,6 +507,11 @@ namespace SashaRX.UnityMeshLab
                 if (i > 0)
                     DrawRowDivider();
                 if (DrawLodRow(dummy, dummy.lods[i]))
+                {
+                    EditorGUILayout.EndVertical();
+                    return;
+                }
+                if (DrawPendingInsertsForAfter(dummy, dummy.lods[i].renderer))
                 {
                     EditorGUILayout.EndVertical();
                     return;
@@ -500,7 +555,7 @@ namespace SashaRX.UnityMeshLab
             {
                 EditorGUILayout.Space(2);
                 EditorGUILayout.HelpBox(
-                    "Trailing _LOD/_COL suffix doesn't match the slot. Click Rebuild Names to renumber.",
+                    "Trailing _LOD/_COL suffix doesn't match the slot. Apply Changes will renumber.",
                     MessageType.None);
             }
 
@@ -516,23 +571,32 @@ namespace SashaRX.UnityMeshLab
             if (lod == null || lod.renderer == null) return false;
 
             int rid = lod.renderer.GetInstanceID();
-            bool fresh = freshRendererIds != null && freshRendererIds.Contains(rid);
-            bool stale = !fresh && IsLodRowStale(dummy, lod);
+            bool markedDelete = pendingDeleteRendererIds != null && pendingDeleteRendererIds.Contains(rid);
+            bool fresh = !markedDelete && freshRendererIds != null && freshRendererIds.Contains(rid);
+            bool stale = !markedDelete && !fresh && IsLodRowStale(dummy, lod);
+            bool regenerated = fresh && RowWasRegenerated(lod);
 
             // Row A: status marker + name + actions
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
-            DrawStatusMarker(fresh, stale);
+            DrawStatusMarker(fresh, stale, markedDelete);
 
             // Prefix the displayed name with a loud text marker as a fallback
             // when the bg-tint isn't visible enough in the user's Unity theme.
-            string nameLabel = fresh
-                ? "★ NEW  " + lod.renderer.gameObject.name
-                : (stale ? "⚠  " + lod.renderer.gameObject.name
-                         : lod.renderer.gameObject.name);
+            string nameLabel;
+            if (markedDelete)
+                nameLabel = "✗ DELETE  " + lod.renderer.gameObject.name;
+            else if (fresh)
+                nameLabel = "★ NEW  " + lod.renderer.gameObject.name;
+            else if (stale)
+                nameLabel = "⚠  " + lod.renderer.gameObject.name;
+            else
+                nameLabel = lod.renderer.gameObject.name;
 
             var prevBg = GUI.backgroundColor;
-            if (fresh)
+            if (markedDelete)
+                GUI.backgroundColor = new Color(1.0f, 0.35f, 0.35f);    // red — pending delete
+            else if (fresh)
                 GUI.backgroundColor = new Color(1.0f, 0.55f, 0.10f);    // bright orange — just inserted/regen
             else if (stale)
                 GUI.backgroundColor = new Color(0.95f, 0.78f, 0.30f);   // amber — name out of sync
@@ -541,20 +605,51 @@ namespace SashaRX.UnityMeshLab
             GUI.backgroundColor = prevBg;
             GUILayout.FlexibleSpace();
 
-            GUI.backgroundColor = new Color(0.60f, 0.75f, 0.90f);
-            if (GUILayout.Button(new GUIContent("↻", "Regenerate this LOD from LOD0 source with the current quality."),
-                    GUILayout.Width(22), GUILayout.Height(18)))
+            // Discard reverts a regenerate-in-place back to the import-time
+            // fbxMesh. Only shown for rows whose mesh actually differs from
+            // the FBX source (i.e. ones we know we modified this session).
+            if (regenerated)
             {
-                RegenerateLodWithQuality(dummy, lod);
-                GUI.backgroundColor = prevBg;
-                EditorGUILayout.EndHorizontal();
-                return true;
+                GUI.backgroundColor = new Color(0.85f, 0.65f, 0.30f);
+                if (GUILayout.Button(new GUIContent("↶",
+                        "Discard regenerate — restore the import-time FBX mesh on this LOD."),
+                        GUILayout.Width(22), GUILayout.Height(18)))
+                {
+                    DiscardRegenerate(lod);
+                    GUI.backgroundColor = prevBg;
+                    EditorGUILayout.EndHorizontal();
+                    return true;
+                }
             }
-            GUI.backgroundColor = new Color(0.90f, 0.30f, 0.30f);
-            if (GUILayout.Button(new GUIContent("✕", "Remove this LOD level."),
+
+            GUI.backgroundColor = new Color(0.60f, 0.75f, 0.90f);
+            using (new EditorGUI.DisabledScope(markedDelete))
+            {
+                if (GUILayout.Button(new GUIContent("↻",
+                        "Regenerate this LOD from LOD0 source with the current quality."),
+                        GUILayout.Width(22), GUILayout.Height(18)))
+                {
+                    RegenerateLodWithQuality(dummy, lod);
+                    GUI.backgroundColor = prevBg;
+                    EditorGUILayout.EndHorizontal();
+                    return true;
+                }
+            }
+
+            // ✕ toggles a pending-delete mark instead of destroying the row
+            // immediately. Apply Changes commits all marked rows together.
+            GUI.backgroundColor = markedDelete
+                ? new Color(0.55f, 0.85f, 0.55f)
+                : new Color(0.90f, 0.30f, 0.30f);
+            string xTooltip = markedDelete
+                ? "Cancel pending delete (revert mark)."
+                : "Mark this LOD for deletion. Applied on Apply Changes.";
+            if (GUILayout.Button(new GUIContent(markedDelete ? "↶" : "✕", xTooltip),
                     GUILayout.Width(22), GUILayout.Height(18)))
             {
-                DeleteLodRow(dummy, lod);
+                if (markedDelete) pendingDeleteRendererIds.Remove(rid);
+                else pendingDeleteRendererIds.Add(rid);
+                requestRepaint?.Invoke();
                 GUI.backgroundColor = prevBg;
                 EditorGUILayout.EndHorizontal();
                 return true;
@@ -605,11 +700,107 @@ namespace SashaRX.UnityMeshLab
 
             if (clicked)
             {
-                int insertAt = afterLodIndex + 1;
-                InsertLodAt(dummy, insertAt);
+                EnqueuePendingInsert(dummy, afterLodIndex);
                 return true;
             }
             return false;
+        }
+
+        // ── Pending insert row ──
+        // Render every pending insert whose afterRenderer matches the given
+        // sibling. Returns true when a row mutated state (UI invalidated).
+        bool DrawPendingInsertsForAfter(HierarchyDummy dummy, Renderer afterRenderer)
+        {
+            if (pendingInserts == null || pendingInserts.Count == 0) return false;
+            for (int i = 0; i < pendingInserts.Count; i++)
+            {
+                var p = pendingInserts[i];
+                if (p == null) continue;
+                if (p.dummyTransform != dummy.dummy) continue;
+                if (p.afterRenderer != afterRenderer) continue;
+                DrawRowDivider();
+                if (DrawPendingInsertRow(p))
+                {
+                    pendingInserts.RemoveAt(i);
+                    requestRepaint?.Invoke();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Returns true on cancel (UI invalidated).
+        bool DrawPendingInsertRow(PendingInsert pending)
+        {
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(HierarchyRowIndent);
+
+            // Marker — bright violet so pending rows are unmistakable.
+            const float markerW = 6f;
+            const float markerH = 18f;
+            var rect = GUILayoutUtility.GetRect(markerW, markerH,
+                GUILayout.Width(markerW), GUILayout.Height(markerH));
+            if (Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(new Rect(rect.x, rect.y + 2, markerW - 1, markerH - 4),
+                    new Color(0.65f, 0.30f, 0.95f));
+
+            var prevBg = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.80f, 0.55f, 1.0f);
+            EditorGUILayout.LabelField($"⋯ PENDING LOD  (insert on Apply Changes)",
+                EditorStyles.textField, GUILayout.MinWidth(120));
+            GUI.backgroundColor = prevBg;
+
+            GUILayout.FlexibleSpace();
+            GUI.backgroundColor = new Color(0.90f, 0.30f, 0.30f);
+            bool cancelled = GUILayout.Button(
+                new GUIContent("✕", "Discard this pending LOD insert."),
+                GUILayout.Width(22), GUILayout.Height(18));
+            GUI.backgroundColor = prevBg;
+            EditorGUILayout.EndHorizontal();
+
+            if (cancelled) return true;
+
+            // Quality slider — live editable so the user can preview the
+            // chosen ratio in the row before committing.
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(HierarchyRowIndent);
+            EditorGUILayout.LabelField("ratio", EditorStyles.miniLabel, GUILayout.Width(40));
+            pending.quality = EditorGUILayout.Slider(
+                Mathf.Clamp(pending.quality, 0.001f, 1f), 0.001f, 1f);
+            EditorGUILayout.EndHorizontal();
+
+            return false;
+        }
+
+        // Enqueue a pending insert for this dummy. Captures the renderer that
+        // it should follow so the slot index can be recomputed accurately at
+        // Apply time even after structural shifts. Default quality = half of
+        // the previous LOD's slider, falling back to 0.5.
+        void EnqueuePendingInsert(HierarchyDummy dummy, int afterLodIndex)
+        {
+            if (dummy == null || dummy.dummy == null) return;
+            Renderer afterRenderer = null;
+            if (afterLodIndex >= 0)
+            {
+                foreach (var lr in dummy.lods)
+                {
+                    if (lr == null || lr.renderer == null) continue;
+                    if (lr.lodIndex != afterLodIndex) continue;
+                    afterRenderer = lr.renderer;
+                    break;
+                }
+            }
+            float defaultQ = 0.5f;
+            if (afterRenderer != null
+                && lodQualitySliders.TryGetValue(afterRenderer.GetInstanceID(), out var prevQ))
+                defaultQ = Mathf.Max(0.01f, prevQ * 0.5f);
+            pendingInserts.Add(new PendingInsert
+            {
+                dummyTransform = dummy.dummy,
+                afterRenderer  = afterRenderer,
+                quality        = defaultQ
+            });
+            requestRepaint?.Invoke();
         }
 
         bool DrawColRow(HierarchyDummy dummy, HierarchyColRow col, int index, int totalCols)
@@ -826,28 +1017,36 @@ namespace SashaRX.UnityMeshLab
                 System.StringComparison.OrdinalIgnoreCase);
         }
 
-        // ── Apply Names: two-step commit. ──
-        // Step 1 commits pending edits on Root / Dummy nodes; Step 2 walks each
-        // dummy and rebuilds child LOD/COL names from the (possibly just-renamed)
-        // root or dummy prefix using the canonical `<prefix>_LOD{N}` and
-        // `<prefix>_COL[_Hull{N}]` patterns. Per spec the user only edits Root
-        // and Dummy names directly — leaf names are derived deterministically.
+        // ── Apply Changes: single commit point for every pending edit. ──
+        // Order matters:
+        //   1) Root/Dummy renames (so subsequent leaf-name rebuilds use the
+        //      new prefix).
+        //   2) Pending deletes (frees up slots before inserts re-index).
+        //   3) Pending inserts (creates GameObjects + simplifies meshes;
+        //      slot index recomputed from the captured afterRenderer's
+        //      current LOD position).
+        //   4) Leaf rename rebuild ("<base>_LOD{slot}").
+        // All four happen inside a single Undo group so Ctrl+Z reverts the
+        // whole batch.
+        //
+        // The freshRendererIds set is intentionally NOT cleared here — the
+        // ★ NEW highlight should persist until the user selects a different
+        // prefab so they can still spot rows they added this session.
 
-        void ApplyPendingNames()
+        void ApplyChanges()
         {
-            if (ctx.LodGroup == null) return;
+            if (ctx == null || ctx.LodGroup == null) return;
 
-            Undo.SetCurrentGroupName("Prefab Builder: Apply Names");
+            Undo.SetCurrentGroupName("Prefab Builder: Apply Changes");
             int undoGroup = Undo.GetCurrentGroup();
 
-            // Step 1: commit pending edits.
+            // 1) Root / Dummy renames.
             if (pendingNames != null)
             {
                 foreach (var kvp in pendingNames)
                 {
                     var go = EditorUtility.InstanceIDToObject(kvp.Key) as GameObject;
                     if (go == null || go.name == kvp.Value) continue;
-
                     Undo.RecordObject(go, "Rename");
                     UvtLog.Info($"[LightmapUV] Renamed: {go.name} → {kvp.Value}");
                     go.name = kvp.Value;
@@ -855,20 +1054,143 @@ namespace SashaRX.UnityMeshLab
                 pendingNames.Clear();
             }
 
-            // Step 2: rebuild leaf names from the current Root + Dummy names.
+            // 2) Pending deletes — process highest LOD index first to keep
+            //    earlier indices stable during the loop.
+            if (pendingDeleteRendererIds != null && pendingDeleteRendererIds.Count > 0)
+                CommitPendingDeletes();
+
+            // 3) Pending inserts — recompute target slot index from each
+            //    captured afterRenderer's CURRENT slot, so inserts after
+            //    deletions land at the right place.
+            if (pendingInserts != null && pendingInserts.Count > 0)
+                CommitPendingInserts();
+
+            // 4) Leaf rename rebuild.
+            hierarchyDummies = null;
             RebuildLeafNamesNoUndoGroup();
 
             Undo.CollapseUndoOperations(undoGroup);
             buildIntent |= FbxExportIntent.Hierarchy;
-            // Do NOT clear freshRendererIds here. The ★ NEW marker is meant
-            // to signal "added in this editing session"; clearing on every
-            // Rebuild Names made it disappear immediately after the user
-            // committed a rename. The set is now cleared only when the
-            // selected prefab's LODGroup itself changes (see OnRefresh).
 
             ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
             requestRepaint?.Invoke();
+        }
+
+        void CommitPendingDeletes()
+        {
+            if (ctx?.LodGroup == null) return;
+            if (pendingDeleteRendererIds == null) return;
+
+            // Collect the renderers and their slot indices. Process from the
+            // highest LOD slot down so removing entries doesn't invalidate
+            // the indices of the remaining ones.
+            var lodsBefore = ctx.LodGroup.GetLODs();
+            var queue = new List<(int slot, Renderer renderer)>();
+            for (int li = 0; li < lodsBefore.Length; li++)
+            {
+                if (lodsBefore[li].renderers == null) continue;
+                foreach (var r in lodsBefore[li].renderers)
+                {
+                    if (r == null) continue;
+                    if (pendingDeleteRendererIds.Contains(r.GetInstanceID()))
+                        queue.Add((li, r));
+                }
+            }
+            queue.Sort((a, b) => b.slot.CompareTo(a.slot));
+
+            foreach (var (slot, renderer) in queue)
+            {
+                var lods = ctx.LodGroup.GetLODs();
+                if (slot < 0 || slot >= lods.Length) continue;
+                var slotData = lods[slot];
+                var remaining = slotData.renderers != null
+                    ? new List<Renderer>(slotData.renderers) : new List<Renderer>();
+                remaining.Remove(renderer);
+
+                if (remaining.Count > 0)
+                {
+                    lods[slot] = new LOD(slotData.screenRelativeTransitionHeight, remaining.ToArray());
+                    LodGroupUtility.ApplyLods(ctx.LodGroup, lods);
+                }
+                else
+                {
+                    if (lods.Length <= 1)
+                    {
+                        UvtLog.Warn("[LightmapUV] Skipping delete that would empty the LODGroup.");
+                        continue;
+                    }
+                    var newLods = new LOD[lods.Length - 1];
+                    for (int i = 0, j = 0; i < lods.Length; i++)
+                    {
+                        if (i == slot) continue;
+                        newLods[j++] = lods[i];
+                    }
+                    LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
+                }
+
+                if (renderer != null && renderer.gameObject != null)
+                {
+                    UvtLog.Info($"[LightmapUV] Deleted '{renderer.name}' from slot {slot}.");
+                    Undo.DestroyObjectImmediate(renderer.gameObject);
+                }
+            }
+
+            pendingDeleteRendererIds.Clear();
+            buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup;
+            ctx.LodGroup.RecalculateBounds();
+            ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
+        }
+
+        void CommitPendingInserts()
+        {
+            if (ctx?.LodGroup == null) return;
+            if (pendingInserts == null) return;
+
+            // Refresh the dummy view once before iterating so afterRenderer
+            // lookups go against the current LODGroup state (post-delete).
+            if (hierarchyDummies == null) RebuildHierarchyView();
+
+            foreach (var pending in pendingInserts)
+            {
+                if (pending == null) continue;
+                var dummy = FindDummyByTransform(pending.dummyTransform);
+                if (dummy == null) continue;
+
+                int afterSlot = -1;
+                if (pending.afterRenderer != null)
+                {
+                    foreach (var lr in dummy.lods)
+                    {
+                        if (lr == null || lr.renderer != pending.afterRenderer) continue;
+                        afterSlot = lr.lodIndex;
+                        break;
+                    }
+                }
+                int targetIdx = afterSlot + 1;
+                InsertLodAtInternal(dummy, targetIdx, pending.quality);
+                if (hierarchyDummies == null) RebuildHierarchyView();
+            }
+
+            pendingInserts.Clear();
+        }
+
+        HierarchyDummy FindDummyByTransform(Transform t)
+        {
+            if (t == null || hierarchyDummies == null) return null;
+            foreach (var d in hierarchyDummies)
+                if (d != null && d.dummy == t) return d;
+            return null;
+        }
+
+        bool HasAnyStaleLeafName()
+        {
+            if (hierarchyDummies == null) RebuildHierarchyView();
+            if (hierarchyDummies == null) return false;
+            foreach (var d in hierarchyDummies)
+                if (DummyHasStale(d)) return true;
+            return false;
         }
 
         // ── LOD row operations ──
@@ -976,7 +1298,10 @@ namespace SashaRX.UnityMeshLab
             return fallback;
         }
 
-        void InsertLodAt(HierarchyDummy dummy, int insertIndex)
+        // Internal: actually create the LOD slot + GameObject + simplified mesh.
+        // Called from CommitPendingInserts — UI clicks no longer invoke this
+        // directly; they enqueue a pending entry instead.
+        void InsertLodAtInternal(HierarchyDummy dummy, int insertIndex, float requestedQuality)
         {
             if (ctx.LodGroup == null || dummy == null) return;
 
@@ -999,10 +1324,10 @@ namespace SashaRX.UnityMeshLab
                 ? lods[targetIdx].screenRelativeTransitionHeight : 0.01f;
             float newTrans = Mathf.Max(0.01f, (prevTrans + nextTrans) * 0.5f);
 
-            // Default quality: half the previous LOD slider (or 0.5 for the first
-            // inserted slot). The user can refine via the row slider after.
-            float quality = 0.5f;
-            if (targetIdx > 0)
+            // Use the caller-supplied quality (typically came from the pending
+            // row's slider). Fall back to half-of-previous-LOD when zero.
+            float quality = requestedQuality > 0f ? requestedQuality : 0.5f;
+            if (requestedQuality <= 0f && targetIdx > 0)
             {
                 foreach (var existing in dummy.lods)
                 {
@@ -1133,75 +1458,6 @@ namespace SashaRX.UnityMeshLab
             requestRepaint?.Invoke();
         }
 
-        void DeleteLodRow(HierarchyDummy dummy, HierarchyLodRow lod)
-        {
-            if (ctx.LodGroup == null || dummy == null || lod == null) return;
-            var lods = ctx.LodGroup.GetLODs();
-            if (lod.lodIndex < 0 || lod.lodIndex >= lods.Length) return;
-
-            // Guard: refuse to delete if it would leave the LODGroup with zero
-            // slots. Without this, RebuildHierarchyView produces no Dummy at all
-            // and the Hierarchy UI loses every "+ Add LOD" entry point — the
-            // user has to undo or switch tools to recover.
-            var slot = lods[lod.lodIndex];
-            int slotRendererCount = 0;
-            if (slot.renderers != null)
-                foreach (var r in slot.renderers) if (r != null) slotRendererCount++;
-            bool isLastSlot = lods.Length == 1;
-            bool wouldEmptySlot = slotRendererCount <= 1;
-            if (isLastSlot && wouldEmptySlot)
-            {
-                UvtLog.Warn("[LightmapUV] Can't delete the last LOD level. Add another LOD first.");
-                return;
-            }
-
-            Undo.SetCurrentGroupName("Prefab Builder: Delete LOD");
-            int undoGroup = Undo.GetCurrentGroup();
-
-            // Remove the renderer GameObject and its slot.
-            // If the slot still has other renderers (multi-mesh per LOD), only
-            // strip this renderer; otherwise drop the slot entirely.
-            var renderers = slot.renderers != null
-                ? new List<Renderer>(slot.renderers) : new List<Renderer>();
-            renderers.Remove(lod.renderer);
-
-            if (renderers.Count > 0)
-            {
-                lods[lod.lodIndex] = new LOD(slot.screenRelativeTransitionHeight, renderers.ToArray());
-                LodGroupUtility.ApplyLods(ctx.LodGroup, lods);
-            }
-            else
-            {
-                var newLods = new LOD[lods.Length - 1];
-                for (int i = 0, j = 0; i < lods.Length; i++)
-                {
-                    if (i == lod.lodIndex) continue;
-                    newLods[j++] = lods[i];
-                }
-                LodGroupUtility.ApplyLods(ctx.LodGroup, newLods);
-            }
-
-            if (lod.renderer != null && lod.renderer.gameObject != null)
-                Undo.DestroyObjectImmediate(lod.renderer.gameObject);
-
-            // Refresh + rebuild leaf names so the slot indices and GameObject
-            // names stay in sync without a manual Rebuild Names click.
-            ctx.LodGroup.RecalculateBounds();
-            ctx.Refresh(ctx.LodGroup);
-            hierarchyDummies = null;
-            RebuildLeafNamesNoUndoGroup();
-
-            Undo.CollapseUndoOperations(undoGroup);
-
-            buildIntent |= FbxExportIntent.Hierarchy | FbxExportIntent.LodGroup;
-
-            UvtLog.Info($"[LightmapUV] Removed LOD{lod.lodIndex} from '{dummy.dummy.name}'.");
-
-            ctx.Refresh(ctx.LodGroup);
-            hierarchyDummies = null;
-            requestRepaint?.Invoke();
-        }
-
         void DeleteCol(HierarchyDummy dummy, HierarchyColRow col)
         {
             if (col == null) return;
@@ -1297,17 +1553,69 @@ namespace SashaRX.UnityMeshLab
         // Drawn via GetRect+DrawRect (a guaranteed-rendered rect from the layout)
         // so the indicator survives nested helpBox layouts that swallow post-paint
         // strokes elsewhere.
-        static void DrawStatusMarker(bool fresh, bool stale)
+        static void DrawStatusMarker(bool fresh, bool stale, bool markedDelete = false)
         {
             const float w = 6f;
             const float h = 18f;
             var rect = GUILayoutUtility.GetRect(w, h, GUILayout.Width(w), GUILayout.Height(h));
             if (Event.current.type != EventType.Repaint) return;
             Color color;
-            if (fresh) color = new Color(1f, 0.50f, 0.05f);      // bright orange — just inserted / regenerated
-            else if (stale) color = new Color(0.95f, 0.75f, 0.20f); // amber — name out of sync
-            else color = new Color(0.30f, 0.30f, 0.30f, 0.35f);  // subtle gutter
+            if (markedDelete) color = new Color(1f, 0.20f, 0.20f);   // red — pending delete
+            else if (fresh) color = new Color(1f, 0.50f, 0.05f);     // bright orange — just inserted / regenerated
+            else if (stale) color = new Color(0.95f, 0.75f, 0.20f);  // amber — name out of sync
+            else color = new Color(0.30f, 0.30f, 0.30f, 0.35f);      // subtle gutter
             EditorGUI.DrawRect(new Rect(rect.x, rect.y + 2, w - 1, h - 4), color);
+        }
+
+        // True when the row's renderer was regenerated this session and its
+        // current mesh differs from the import-time fbxMesh — i.e. Discard
+        // would actually change something.
+        bool RowWasRegenerated(HierarchyLodRow lod)
+        {
+            if (lod == null || lod.renderer == null) return false;
+            if (freshRendererIds == null) return false;
+            if (!freshRendererIds.Contains(lod.renderer.GetInstanceID())) return false;
+            if (ctx?.MeshEntries == null) return false;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (e.renderer != lod.renderer) continue;
+                // Newly inserted GameObjects have e.fbxMesh == null (no FBX
+                // backing). Only "regenerated existing" entries have a real
+                // fbxMesh that differs from the current sharedMesh.
+                if (e.fbxMesh == null) return false;
+                var mf = lod.renderer.GetComponent<MeshFilter>();
+                if (mf == null) return false;
+                return mf.sharedMesh != e.fbxMesh;
+            }
+            return false;
+        }
+
+        // Restore the renderer's MeshFilter back to the import-time fbxMesh
+        // and drop the row from the freshRendererIds highlight.
+        void DiscardRegenerate(HierarchyLodRow lod)
+        {
+            if (lod == null || lod.renderer == null || ctx?.MeshEntries == null) return;
+            Mesh fbx = null;
+            foreach (var e in ctx.MeshEntries)
+            {
+                if (e.renderer != lod.renderer) continue;
+                fbx = e.fbxMesh;
+                break;
+            }
+            if (fbx == null) return;
+            var mf = lod.renderer.GetComponent<MeshFilter>();
+            if (mf == null) return;
+            Undo.RecordObject(mf, "Discard Regenerate");
+            mf.sharedMesh = fbx;
+            int rid = lod.renderer.GetInstanceID();
+            freshRendererIds?.Remove(rid);
+            buildIntent |= FbxExportIntent.AnyUv | FbxExportIntent.Normals
+                | FbxExportIntent.Tangents | FbxExportIntent.VertexColors;
+            UvtLog.Info($"[LightmapUV] Discarded regenerate on '{lod.renderer.name}' — restored {fbx.name}.");
+            ctx.LodGroup.RecalculateBounds();
+            ctx.Refresh(ctx.LodGroup);
+            hierarchyDummies = null;
+            requestRepaint?.Invoke();
         }
 
         // ── Pre-Apply staleness detection ──
