@@ -527,6 +527,57 @@ namespace SashaRX.UnityMeshLab
 
                 if (hierarchyDummies == null) break;
             }
+
+            DrawAddDummyButton();
+        }
+
+        // Spawn an empty Dummy GameObject under Root. The user can then
+        // rename it via the Apply Changes flow and populate it with LODs
+        // by either dragging meshes in via Unity's Inspector or clicking
+        // "+ Add LOD" inside the empty block (which seeds from any other
+        // dummy's LOD0 as a starting point).
+        void DrawAddDummyButton()
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(HierarchyDummyIndent);
+            var bgc = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.55f, 0.85f, 0.55f);
+            if (GUILayout.Button(
+                    new GUIContent("+ Add Dummy group",
+                        "Create a new empty container under Root. Drop meshes into it via Unity's Inspector, "
+                        + "or click + Add LOD inside the new block to seed it from another dummy's LOD0."),
+                    GUILayout.Height(20)))
+                AddNewEmptyDummy();
+            GUI.backgroundColor = bgc;
+            EditorGUILayout.EndHorizontal();
+        }
+
+        void AddNewEmptyDummy()
+        {
+            if (ctx?.LodGroup == null) return;
+            var root = ctx.LodGroup.transform;
+
+            Undo.SetCurrentGroupName("Prefab Builder: Add Dummy");
+            int undoGroup = Undo.GetCurrentGroup();
+
+            // Pick a fresh, non-colliding name.
+            int idx = 1;
+            string name;
+            do { name = $"Dummy_{idx++}"; }
+            while (root.Find(name) != null);
+
+            var go = new GameObject(name);
+            Undo.RegisterCreatedObjectUndo(go, "Add Dummy");
+            go.transform.SetParent(root, false);
+
+            Undo.CollapseUndoOperations(undoGroup);
+            buildIntent |= FbxExportIntent.Hierarchy;
+
+            UvtLog.Info($"[LightmapUV] Added empty Dummy '{name}' under '{root.name}'.");
+
+            hierarchyDummies = null;
+            requestRepaint?.Invoke();
         }
 
         void DrawRootRow()
@@ -849,7 +900,7 @@ namespace SashaRX.UnityMeshLab
             GUILayout.Space(HierarchyRowIndent);
             EditorGUILayout.LabelField($"LOD{lod.lodIndex}", EditorStyles.miniLabel, GUILayout.Width(40));
             if (!lodQualitySliders.TryGetValue(rid, out var quality))
-                quality = lod.lodIndex == 0 ? 1f : Mathf.Pow(0.5f, lod.lodIndex);
+                quality = ComputeLodRatioFromTriangles(dummy, lod);
             float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f);
             if (Mathf.Abs(newQuality - quality) > 0.0001f)
                 lodQualitySliders[rid] = newQuality;
@@ -1183,6 +1234,26 @@ namespace SashaRX.UnityMeshLab
                 });
             }
 
+            // Pick up empty container transforms under root that aren't
+            // already represented (no LOD renderers, no _COL leaf). These
+            // are Dummies the user just added via "+ Add Dummy" — keep
+            // them in the view so the user can rename them, populate
+            // them, or remove them.
+            var colSetForEmpty = new HashSet<GameObject>(MeshHygieneUtility.FindCollisionObjects(root));
+            for (int i = 0; i < root.childCount; i++)
+            {
+                var child = root.GetChild(i);
+                if (child == null) continue;
+                if (lookup.ContainsKey(child)) continue;
+                if (colSetForEmpty.Contains(child.gameObject)) continue;
+                if (child.GetComponent<MeshFilter>() != null) continue;
+                lookup[child] = new HierarchyDummy
+                {
+                    dummy = child,
+                    isRoot = false
+                };
+            }
+
             hierarchyDummies = lookup.Values.ToList();
             hierarchyDummies.Sort(CompareDummies);
             foreach (var d in hierarchyDummies)
@@ -1454,6 +1525,11 @@ namespace SashaRX.UnityMeshLab
             Undo.RecordObject(mf, "Regenerate LOD");
             mf.sharedMesh = res.simplifiedMesh;
 
+            // Drop the stored slider value so the row recomputes its ratio
+            // from the new polygon counts on the next paint; otherwise the
+            // slider keeps showing the requested quality even when the
+            // simplifier missed the target.
+            lodQualitySliders?.Remove(rid);
             freshRendererIds?.Add(rid);
 
             UvtLog.Info($"[LightmapUV] Regenerated LOD{lod.lodIndex} on '{lod.renderer.name}': "
@@ -1494,10 +1570,24 @@ namespace SashaRX.UnityMeshLab
             // the original-mesh lookup so we don't simplify a simplified mesh.
             if (lod != null && lod.lodIndex == 0)
                 return PreferOriginalMesh(lod.renderer, lod.mesh);
-            // Fallback: first LOD0 mesh in the dummy.
+            // Fallback 1: first LOD0 mesh in the dummy.
             foreach (var candidate in dummy.lods)
                 if (candidate.lodIndex == 0 && candidate.mesh != null)
                     return PreferOriginalMesh(candidate.renderer, candidate.mesh);
+            // Fallback 2: empty dummies (just added via "+ Add Dummy" with
+            // no children yet) borrow LOD0 from the first sibling dummy
+            // that has one — gives the user a working seed they can swap
+            // out later via the inspector.
+            if (hierarchyDummies != null)
+            {
+                foreach (var sibling in hierarchyDummies)
+                {
+                    if (sibling == null || sibling == dummy) continue;
+                    foreach (var candidate in sibling.lods)
+                        if (candidate.lodIndex == 0 && candidate.mesh != null)
+                            return PreferOriginalMesh(candidate.renderer, candidate.mesh);
+                }
+            }
             return null;
         }
 
@@ -1563,11 +1653,29 @@ namespace SashaRX.UnityMeshLab
                     continue;
                 }
 
-                string baseName = UvToolContext.ExtractGroupKey(sourceMesh.name);
+                // Pick a base name for the new mesh + GameObject:
+                //   1) prefer this dummy's existing LOD0 chain base — keeps
+                //      naming stable when inserting into a populated chain;
+                //   2) fall back to the dummy GameObject's name when the
+                //      dummy is empty (just added via "+ Add Dummy") and
+                //      it isn't the implicit Root group;
+                //   3) last resort, use the source mesh's stripped name.
+                string baseName = null;
+                foreach (var existing in dummy.lods)
+                {
+                    if (existing?.renderer == null) continue;
+                    if (existing.lodIndex != 0) continue;
+                    string b = UvToolContext.ExtractGroupKey(existing.renderer.name);
+                    if (!string.IsNullOrEmpty(b)) { baseName = b; break; }
+                }
+                if (string.IsNullOrEmpty(baseName) && dummy.dummy != null && !dummy.isRoot)
+                    baseName = dummy.dummy.name;
+                if (string.IsNullOrEmpty(baseName))
+                    baseName = UvToolContext.ExtractGroupKey(sourceMesh.name);
                 if (string.IsNullOrEmpty(baseName)) baseName = sourceMesh.name;
                 res.simplifiedMesh.name = baseName + "_LOD" + targetIdx;
 
-                Transform parent = dummy.dummy;
+                Transform parent = dummy.dummy != null ? dummy.dummy : ctx.LodGroup.transform;
                 var go = new GameObject(baseName + "_LOD" + targetIdx);
                 Undo.RegisterCreatedObjectUndo(go, "Insert LOD slot");
                 go.transform.SetParent(parent, false);
@@ -1613,7 +1721,11 @@ namespace SashaRX.UnityMeshLab
                     LightmapTransferTool.CopyRendererSettings(sourceRenderer, mr);
 
                 int newRid = mr.GetInstanceID();
-                lodQualitySliders[newRid] = quality;
+                // Don't seed lodQualitySliders with `quality` — leave the
+                // slot empty so the slider recomputes from the actual
+                // polygon ratio next paint (which may differ from the
+                // requested ratio when the simplifier hits Target Error
+                // before reaching the target tri count).
                 freshRendererIds?.Add(newRid);
 
                 newRenderers.Add(mr);
@@ -1920,6 +2032,37 @@ namespace SashaRX.UnityMeshLab
             for (int i = 0; i < dummy.cols.Count; i++)
                 if (IsColRowStale(dummy, dummy.cols[i], i, dummy.cols.Count)) return true;
             return false;
+        }
+
+        // ── Default slider ratio from polygon counts ──
+        // Compute the row's quality slider default as currentTris / LOD0Tris
+        // within the same chain. LOD0 itself reads as 1.0. Falls back to a
+        // safe 1.0 when the source LOD0 isn't readable (e.g. non-readable
+        // FBX import — Mesh.GetIndexCount works regardless of isReadable).
+        static float ComputeLodRatioFromTriangles(HierarchyDummy dummy, HierarchyLodRow lod)
+        {
+            if (lod == null || lod.mesh == null) return 1f;
+            if (lod.lodIndex == 0) return 1f;
+
+            string key = lod.renderer != null
+                ? UvToolContext.ExtractGroupKey(lod.renderer.name) : null;
+            int lod0Tris = 0;
+            foreach (var candidate in dummy.lods)
+            {
+                if (candidate?.mesh == null) continue;
+                if (candidate.lodIndex != 0) continue;
+                if (key != null && candidate.renderer != null)
+                {
+                    string ck = UvToolContext.ExtractGroupKey(candidate.renderer.name);
+                    if (!string.Equals(ck, key, System.StringComparison.OrdinalIgnoreCase))
+                        continue;
+                }
+                lod0Tris = MeshHygieneUtility.GetTriangleCount(candidate.mesh);
+                break;
+            }
+            if (lod0Tris <= 0) return 1f;
+            int currentTris = MeshHygieneUtility.GetTriangleCount(lod.mesh);
+            return Mathf.Clamp(currentTris / (float)lod0Tris, 0.001f, 1f);
         }
 
         // ── Short leaf name ──
