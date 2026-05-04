@@ -821,7 +821,16 @@ namespace SashaRX.UnityMeshLab
             for (int i = 0; i < groupKeys.Count; i++)
             {
                 bool active = ctx.IsolatedMeshGroup == i;
-                if (active) GUI.backgroundColor = new Color(.35f, .85f, .4f);
+                // Tint each group button with the same per-group palette
+                // entry the Prefab Builder hierarchy uses, so the user can
+                // visually correlate the chain they see in the hierarchy
+                // with the group they're selecting here. Active selection
+                // overrides with the green highlight; non-selected buttons
+                // get the group's hue at full strength.
+                Color groupColor = MeshGroupColors.GetColor(groupKeys[i]);
+                GUI.backgroundColor = active
+                    ? new Color(.35f, .85f, .4f)
+                    : groupColor;
                 if (GUILayout.Button(groupKeys[i], EditorStyles.miniButton))
                 {
                     if (active)
@@ -835,7 +844,7 @@ namespace SashaRX.UnityMeshLab
                         ctx.IsolatedMeshGroupKey = groupKeys[i];
                     }
                 }
-                if (active) GUI.backgroundColor = bg;
+                GUI.backgroundColor = bg;
             }
             EditorGUILayout.EndScrollView();
 
