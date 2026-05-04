@@ -357,6 +357,13 @@ namespace SashaRX.UnityMeshLab
             var rightSidebar = ActiveTool as IUvToolRightSidebar;
             if (rightSidebar != null)
             {
+                // Dynamic upper clamp so the sidebar can never push past the
+                // window's right edge — leave room for the left sidebar, the
+                // resize handles (4 px each side), and a 200 px viewport min.
+                float maxRightW = Mathf.Max(220f,
+                    position.width - sideW - 4f - 4f - 200f);
+                rightSideW = Mathf.Clamp(rightSideW, 220f, Mathf.Min(700f, maxRightW));
+
                 DrawRightResizeHandle();
                 EditorGUILayout.BeginVertical(GUILayout.Width(rightSideW));
                 rightSideScroll = EditorGUILayout.BeginScrollView(rightSideScroll);
@@ -378,8 +385,13 @@ namespace SashaRX.UnityMeshLab
             { GUIUtility.hotControl = id; rightSideDragging = true; Event.current.Use(); }
             if (rightSideDragging && Event.current.type == EventType.MouseDrag)
             {
-                // Width is measured from the right edge of the window.
-                rightSideW = Mathf.Clamp(position.width - Event.current.mousePosition.x, 220f, 700f);
+                // Width is measured from the right edge of the window. Same
+                // clamp the per-frame guard uses, so dragging can never push
+                // the sidebar off-screen.
+                float maxRightW = Mathf.Max(220f,
+                    position.width - sideW - 4f - 4f - 200f);
+                rightSideW = Mathf.Clamp(position.width - Event.current.mousePosition.x,
+                    220f, Mathf.Min(700f, maxRightW));
                 Event.current.Use();
                 Repaint();
             }

@@ -201,6 +201,49 @@ namespace SashaRX.UnityMeshLab
             }
         }
 
+        // ── Fine-tuning settings panel — only the simplifier weights, no
+        // count/ratios/Generate. Surfaced in Prefab Builder's right sidebar
+        // where LOD count is controlled by the Hierarchy "+ Add LOD" pending
+        // model, so the count + Generate flow there would just duplicate
+        // existing affordances. The standalone LOD Gen tab keeps the full
+        // panel via DrawSettingsPanel.
+        internal void DrawSimplifierSettingsPanel()
+        {
+            EditorGUILayout.LabelField("Simplifier weights", EditorStyles.miniBoldLabel);
+            generateTargetError  = EditorGUILayout.Slider("Target Error",  generateTargetError,  0.001f, 0.5f);
+            generateUv2Weight    = EditorGUILayout.Slider("UV2 Weight",    generateUv2Weight,    0f,     500f);
+            generateNormalWeight = EditorGUILayout.Slider("Normal Weight", generateNormalWeight, 0f,     10f);
+            generateLockBorder   = EditorGUILayout.Toggle("Lock Border",   generateLockBorder);
+
+            if (generateTargetError < 0.1f && generateUv2Weight > 50f)
+                EditorGUILayout.HelpBox(
+                    "Low Target Error + High UV2 Weight may prevent reaching target polygon count. " +
+                    "Try: Target Error 0.1–0.3, UV2 Weight 10–30, Lock Border OFF.",
+                    MessageType.Warning);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.HelpBox(
+                "Per-LOD ratio is taken from the Hierarchy row's quality slider " +
+                "(or the pending insert's slider) when Apply Changes commits.",
+                MessageType.None);
+        }
+
+        // Read-only accessor for the simplifier settings configured via the
+        // sliders above. Prefab Builder's pending-insert / regenerate path
+        // calls this and overrides targetRatio with the row's per-LOD value.
+        internal MeshSimplifier.SimplifySettings GetSimplifierSettings(float targetRatio)
+        {
+            return new MeshSimplifier.SimplifySettings
+            {
+                targetRatio  = targetRatio,
+                targetError  = generateTargetError,
+                uv2Weight    = generateUv2Weight,
+                normalWeight = generateNormalWeight,
+                lockBorder   = generateLockBorder,
+                uvChannel    = 1,
+            };
+        }
+
         // ── Settings panel ──
         // Renders the LOD-count slider, per-target ratio sliders, simplifier
         // weights, and the Generate button. Designed for embedding into the

@@ -298,7 +298,11 @@ namespace SashaRX.UnityMeshLab
                     MessageType.Info);
                 return;
             }
-            lodGen.DrawSettingsPanel(ctx);
+            // Only the fine-tuning weights live here. LOD count + per-target
+            // ratios are managed via the Hierarchy "+ Add LOD" pending model
+            // (left sidebar). Showing the full LOD Gen settings panel here
+            // would duplicate that workflow.
+            lodGen.DrawSimplifierSettingsPanel();
         }
 
         // Resolve the singleton LodGenerationTool instance the Hub created
@@ -314,6 +318,26 @@ namespace SashaRX.UnityMeshLab
                 if (t != null) return t;
             }
             return null;
+        }
+
+        // Pull simplifier weights from the right-sidebar Settings panel
+        // (LodGenerationTool's tunables). When the LOD Gen tool isn't
+        // discoverable yet (e.g. during very early initialization), fall
+        // back to a known-safe preset so regenerate / insert still proceeds.
+        MeshSimplifier.SimplifySettings ResolveSimplifierSettings(float targetRatio)
+        {
+            var lodGen = FindLodGenerationTool();
+            if (lodGen != null)
+                return lodGen.GetSimplifierSettings(targetRatio);
+            return new MeshSimplifier.SimplifySettings
+            {
+                targetRatio  = targetRatio,
+                targetError  = 0.1f,
+                uv2Weight    = 0.5f,
+                normalWeight = 0.5f,
+                lockBorder   = true,
+                uvChannel    = 1,
+            };
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -1305,15 +1329,10 @@ namespace SashaRX.UnityMeshLab
                 return;
             }
 
-            var settings = new MeshSimplifier.SimplifySettings
-            {
-                targetRatio  = quality,
-                targetError  = 0.1f,
-                uv2Weight    = 0.5f,
-                normalWeight = 0.5f,
-                lockBorder   = true,
-                uvChannel    = 1
-            };
+            // Pull simplifier weights from the right-sidebar Settings panel
+            // (LodGenerationTool's tunables). Falls back to a sensible default
+            // when the Hub / tool isn't available.
+            var settings = ResolveSimplifierSettings(quality);
 
             var res = MeshSimplifier.Simplify(sourceMesh, settings);
             if (!res.ok)
@@ -1429,15 +1448,7 @@ namespace SashaRX.UnityMeshLab
                     dummy.lods.Count > 0 ? dummy.lods[0] : new HierarchyLodRow { lodIndex = 0 });
                 if (sourceMesh == null) continue;
 
-                var settings = new MeshSimplifier.SimplifySettings
-                {
-                    targetRatio  = quality,
-                    targetError  = 0.1f,
-                    uv2Weight    = 0.5f,
-                    normalWeight = 0.5f,
-                    lockBorder   = true,
-                    uvChannel    = 1
-                };
+                var settings = ResolveSimplifierSettings(quality);
                 var res = MeshSimplifier.Simplify(sourceMesh, settings);
                 if (!res.ok)
                 {
