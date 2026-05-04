@@ -614,28 +614,43 @@ namespace SashaRX.UnityMeshLab
                 return;
             }
 
-            // LOD rows interleaved with insert buttons. A horizontal divider
-            // between every row makes the table read as discrete entries
-            // instead of one tall block of similar-looking labels.
-            for (int i = 0; i < dummy.lods.Count; i++)
+            // LOD rows grouped by chain base name (Metal_LOD0/1/2 stay
+            // together, Wood_LOD0/1/2 stay together) so multi-chain prefabs
+            // read as separate vertical lists instead of an interleaved
+            // sequence sorted purely by slot. Insert buttons stay slot-
+            // scoped: clicking "+ Add LOD after LOD0" in any chain queues
+            // one PendingInsert that materialises a new slot across all
+            // dummies on Apply Changes.
+            var chains = GroupLodsByChain(dummy);
+            bool firstChain = true;
+            foreach (var chain in chains)
             {
-                if (i > 0)
-                    DrawRowDivider();
-                if (DrawLodRow(dummy, dummy.lods[i]))
+                if (!firstChain) EditorGUILayout.Space(3);
+                firstChain = false;
+
+                if (chains.Count > 1)
+                    EditorGUILayout.LabelField($"⌐ {chain.baseName}",
+                        EditorStyles.miniBoldLabel);
+
+                for (int i = 0; i < chain.rows.Count; i++)
                 {
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                if (DrawPendingInsertsForAfter(dummy, dummy.lods[i].renderer))
-                {
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                int afterLodIndex = dummy.lods[i].lodIndex;
-                if (DrawAddLodButton(dummy, afterLodIndex))
-                {
-                    EditorGUILayout.EndVertical();
-                    return;
+                    if (i > 0) DrawRowDivider();
+                    if (DrawLodRow(dummy, chain.rows[i]))
+                    {
+                        EditorGUILayout.EndVertical();
+                        return;
+                    }
+                    if (DrawPendingInsertsForAfter(dummy, chain.rows[i].renderer))
+                    {
+                        EditorGUILayout.EndVertical();
+                        return;
+                    }
+                    int afterLodIndex = chain.rows[i].lodIndex;
+                    if (DrawAddLodButton(dummy, afterLodIndex))
+                    {
+                        EditorGUILayout.EndVertical();
+                        return;
+                    }
                 }
             }
 
@@ -1674,6 +1689,43 @@ namespace SashaRX.UnityMeshLab
                     col.colTransform.gameObject.name = desired;
                 }
             }
+        }
+
+        // ── Chain grouping ──
+        // Split a Dummy's LOD rows into chains keyed by stripped base name
+        // (Metal_LOD0 and Metal_LOD1 share base "Metal", so they form one
+        // chain). Chains are returned in first-seen order so the visual
+        // layout follows the LODGroup's slot-0 ordering. Within each chain,
+        // rows are sorted by lodIndex so LODs read top-to-bottom.
+        sealed class HierarchyChain
+        {
+            public string baseName;
+            public List<HierarchyLodRow> rows = new List<HierarchyLodRow>();
+        }
+        static List<HierarchyChain> GroupLodsByChain(HierarchyDummy dummy)
+        {
+            var byKey = new Dictionary<string, HierarchyChain>();
+            var ordered = new List<HierarchyChain>();
+            foreach (var lod in dummy.lods)
+            {
+                if (lod == null) continue;
+                string key = "(unnamed)";
+                if (lod.renderer != null && !string.IsNullOrEmpty(lod.renderer.name))
+                {
+                    string stripped = UvToolContext.ExtractGroupKey(lod.renderer.name);
+                    key = string.IsNullOrEmpty(stripped) ? lod.renderer.name : stripped;
+                }
+                if (!byKey.TryGetValue(key, out var chain))
+                {
+                    chain = new HierarchyChain { baseName = key };
+                    byKey[key] = chain;
+                    ordered.Add(chain);
+                }
+                chain.rows.Add(lod);
+            }
+            foreach (var chain in ordered)
+                chain.rows.Sort((a, b) => a.lodIndex.CompareTo(b.lodIndex));
+            return ordered;
         }
 
         // ── Visual divider between LOD rows so the table reads as discrete entries. ──
