@@ -747,15 +747,19 @@ namespace SashaRX.UnityMeshLab
 
             // Prefix the displayed name with a loud text marker as a fallback
             // when the bg-tint isn't visible enough in the user's Unity theme.
+            // The base name is shown in the chain / dummy header above, so we
+            // strip it here and only show the trailing _LOD{N} (or fallback
+            // to the full name when the leaf doesn't follow the convention).
+            string shortName = ShortLeafName(lod.renderer.gameObject.name);
             string nameLabel;
             if (markedDelete)
-                nameLabel = "✗ DELETE  " + lod.renderer.gameObject.name;
+                nameLabel = "✗ DELETE  " + shortName;
             else if (fresh)
-                nameLabel = "★ NEW  " + lod.renderer.gameObject.name;
+                nameLabel = "★ NEW  " + shortName;
             else if (stale)
-                nameLabel = "⚠  " + lod.renderer.gameObject.name;
+                nameLabel = "⚠  " + shortName;
             else
-                nameLabel = lod.renderer.gameObject.name;
+                nameLabel = shortName;
 
             var prevBg = GUI.backgroundColor;
             if (markedDelete)
@@ -1016,9 +1020,10 @@ namespace SashaRX.UnityMeshLab
             GUI.backgroundColor = stale
                 ? new Color(0.95f, 0.78f, 0.30f)
                 : new Color(0.55f, 0.95f, 0.70f);
+            string colShort = ShortLeafName(col.colTransform.gameObject.name);
             string display = col.isComponentOnly
                 ? $"{col.colTransform.gameObject.name}  [{col.typeLabel}]"
-                : col.colTransform.gameObject.name;
+                : colShort;
             // Click pings the host GameObject so the user can jump to it.
             if (GUILayout.Button(display, EditorStyles.textField, GUILayout.MinWidth(120)))
             {
@@ -1915,6 +1920,24 @@ namespace SashaRX.UnityMeshLab
             for (int i = 0; i < dummy.cols.Count; i++)
                 if (IsColRowStale(dummy, dummy.cols[i], i, dummy.cols.Count)) return true;
             return false;
+        }
+
+        // ── Short leaf name ──
+        // Strip the chain base from a leaf GameObject name so the row only
+        // shows the trailing suffix (e.g. "Foo_Bar_LOD0" → "_LOD0",
+        // "Foo_Bar_COL_Hull1" → "_COL_Hull1"). The base is already shown in
+        // the dummy / chain header above, so repeating it on every row was
+        // pure noise. Falls back to the full name when the leaf doesn't
+        // start with the canonical base or has no recognisable suffix.
+        static string ShortLeafName(string fullName)
+        {
+            if (string.IsNullOrEmpty(fullName)) return fullName;
+            string baseKey = UvToolContext.ExtractGroupKey(fullName);
+            if (string.IsNullOrEmpty(baseKey)) return fullName;
+            if (fullName.Length <= baseKey.Length) return fullName;
+            if (fullName.StartsWith(baseKey, System.StringComparison.OrdinalIgnoreCase))
+                return fullName.Substring(baseKey.Length);
+            return fullName;
         }
 
         // ── Channel badges: compact summary of which mesh streams have data. ──
