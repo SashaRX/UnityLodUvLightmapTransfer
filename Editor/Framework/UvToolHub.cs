@@ -357,12 +357,19 @@ namespace SashaRX.UnityMeshLab
             var rightSidebar = ActiveTool as IUvToolRightSidebar;
             if (rightSidebar != null)
             {
-                // Dynamic upper clamp so the sidebar can never push past the
-                // window's right edge — leave room for the left sidebar, the
-                // resize handles (4 px each side), and a 200 px viewport min.
-                float maxRightW = Mathf.Max(220f,
-                    position.width - sideW - 4f - 4f - 200f);
-                rightSideW = Mathf.Clamp(rightSideW, 220f, Mathf.Min(700f, maxRightW));
+                // Dynamic clamp so the sidebar can never push past the
+                // window's right edge. Min width 180 keeps foldout headers
+                // legible without forcing more horizontal real estate than
+                // the window can spare. When the window shrinks below
+                // sideW + 180 + viewport_min, the viewport gets squeezed
+                // first; the right sidebar holds its 180 px minimum so
+                // settings remain reachable.
+                const float MinRightW   = 180f;
+                const float MaxRightW   = 700f;
+                const float ViewportMin = 200f;
+                float roomLeft = position.width - sideW - 8f - ViewportMin;
+                float effectiveMax = Mathf.Clamp(roomLeft, MinRightW, MaxRightW);
+                rightSideW = Mathf.Clamp(rightSideW, MinRightW, effectiveMax);
 
                 DrawRightResizeHandle();
                 EditorGUILayout.BeginVertical(GUILayout.Width(rightSideW));
@@ -387,11 +394,14 @@ namespace SashaRX.UnityMeshLab
             {
                 // Width is measured from the right edge of the window. Same
                 // clamp the per-frame guard uses, so dragging can never push
-                // the sidebar off-screen.
-                float maxRightW = Mathf.Max(220f,
-                    position.width - sideW - 4f - 4f - 200f);
+                // the sidebar off-screen or below the legibility minimum.
+                const float MinRightW   = 180f;
+                const float MaxRightW   = 700f;
+                const float ViewportMin = 200f;
+                float roomLeft = position.width - sideW - 8f - ViewportMin;
+                float effectiveMax = Mathf.Clamp(roomLeft, MinRightW, MaxRightW);
                 rightSideW = Mathf.Clamp(position.width - Event.current.mousePosition.x,
-                    220f, Mathf.Min(700f, maxRightW));
+                    MinRightW, effectiveMax);
                 Event.current.Use();
                 Repaint();
             }
