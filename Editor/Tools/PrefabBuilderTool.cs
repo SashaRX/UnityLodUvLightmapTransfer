@@ -637,13 +637,27 @@ namespace SashaRX.UnityMeshLab
             {
                 var chain = chains[chainIdx];
                 bool chainOpen = true;
+                Color prevChainBg = GUI.backgroundColor;
                 if (useChainFoldouts)
                 {
                     if (chainIdx > 0) EditorGUILayout.Space(2);
+                    // Tint the chain container with the per-group palette
+                    // entry — this is the visual identification the user
+                    // asked for. helpBox texture multiplies with
+                    // GUI.backgroundColor so a saturated chain colour reads
+                    // as a soft pastel background covering the entire chain
+                    // block (header + rows + insert buttons).
+                    GUI.backgroundColor = MeshGroupColors.GetColor(chain.baseName);
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                    GUI.backgroundColor = prevChainBg;
                     chainOpen = DrawChainFoldoutHeader(dummy, chain);
                 }
 
-                if (!chainOpen) continue;
+                if (!chainOpen)
+                {
+                    if (useChainFoldouts) EditorGUILayout.EndVertical();
+                    continue;
+                }
 
                 bool earlyReturn = false;
                 if (useChainFoldouts)
@@ -665,6 +679,7 @@ namespace SashaRX.UnityMeshLab
                 {
                     EditorGUILayout.EndVertical();
                     EditorGUILayout.EndHorizontal();
+                    EditorGUILayout.EndVertical();
                 }
                 if (earlyReturn)
                 {
@@ -1718,22 +1733,12 @@ namespace SashaRX.UnityMeshLab
             string key = (dummy.dummy != null ? dummy.dummy.GetInstanceID() : 0)
                 + "|" + chain.baseName;
             bool open = collapsedChains == null || !collapsedChains.Contains(key);
-            Color groupColor = MeshGroupColors.GetColor(chain.baseName);
 
             EditorGUILayout.BeginHorizontal();
             // Chevron at the dummy content edge.
             var chevRect = GUILayoutUtility.GetRect(14, 16,
                 GUILayout.Width(14), GUILayout.Height(16));
             bool nextOpen = EditorGUI.Foldout(chevRect, open, GUIContent.none, true);
-            // Group-color swatch — small filled square aligned to the
-            // chevron so the eye can match a chain to its rows in the
-            // UV2 Transfer per-mesh repack panel (which uses the same
-            // palette via MeshGroupColors.GetColor).
-            var swatchRect = GUILayoutUtility.GetRect(12, 16,
-                GUILayout.Width(12), GUILayout.Height(16));
-            if (Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(new Rect(swatchRect.x, swatchRect.y + 3, 10, 10),
-                    groupColor);
             EditorGUILayout.LabelField(chain.baseName, EditorStyles.boldLabel,
                 GUILayout.MinWidth(80));
             GUILayout.FlexibleSpace();
