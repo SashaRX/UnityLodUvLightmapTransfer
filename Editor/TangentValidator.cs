@@ -80,6 +80,8 @@ namespace SashaRX.UnityMeshLab
         /// <summary>
         /// Mirror tangent presence from <paramref name="original"/> onto <paramref name="result"/>.
         /// If original had no tangents, drops them on result; if it had them, validates W on result.
+        /// Warns when the original carried tangents but the result has none — that indicates a
+        /// pipeline step dropped TBN data and normal-map shading would regress on the saved mesh.
         /// Safe to call with null arguments — no-op when either is null.
         /// </summary>
         internal static void EnforceTangentsMatchOriginal(Mesh result, Mesh original, string operation)
@@ -93,6 +95,12 @@ namespace SashaRX.UnityMeshLab
             {
                 UvtLog.Info($"[TBN] {operation} '{result.name}': source had no tangents — stripping {result.tangents.Length} tangents from result");
                 result.tangents = null;
+                return;
+            }
+
+            if (originalHasTbn && !resultHasTbn)
+            {
+                UvtLog.Warn($"[TBN] {operation} '{result.name}': source carried tangents but result has none — TBN dropped upstream, saved mesh will be missing tangent-space data");
                 return;
             }
 
