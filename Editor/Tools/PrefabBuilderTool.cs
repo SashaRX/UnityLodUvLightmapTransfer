@@ -83,6 +83,11 @@ namespace SashaRX.UnityMeshLab
         bool rightPanelTransferFoldout;
         bool rightPanelVcBakeFoldout;
 
+        // ── Per-chain foldout state ──
+        // Set of "<dummyTransformInstanceId>|<chainBaseName>" keys that the
+        // user has collapsed. Default open (key absent).
+        HashSet<string> collapsedChains;
+
         // ── Pending changes (deferred until "Apply Changes") ──
         // Pending Insert: the user clicked "+ Add LOD after LODN" but the
         // GameObject + simplified mesh aren't created until Apply Changes.
@@ -201,6 +206,7 @@ namespace SashaRX.UnityMeshLab
             pendingInserts = new List<PendingInsert>();
             pendingDeleteRendererIds = new HashSet<int>();
             regenBackupMeshes = new Dictionary<int, Mesh>();
+            collapsedChains = new HashSet<string>();
         }
 
         public void OnDeactivate()
@@ -614,43 +620,56 @@ namespace SashaRX.UnityMeshLab
                 return;
             }
 
-            // LOD rows grouped by chain base name (Metal_LOD0/1/2 stay
-            // together, Wood_LOD0/1/2 stay together) so multi-chain prefabs
-            // read as separate vertical lists instead of an interleaved
-            // sequence sorted purely by slot. Insert buttons stay slot-
-            // scoped: clicking "+ Add LOD after LOD0" in any chain queues
-            // one PendingInsert that materialises a new slot across all
-            // dummies on Apply Changes.
+            // LOD rows grouped by chain base name with a Unity Hierarchy-
+            // style foldout per chain when there's more than one chain.
+            // Foldout chevron sits at the dummy's content edge; chain rows
+            // are indented one level deeper (14 px) to mirror Unity's
+            // child-of-parent visual nesting. Single-chain dummies skip
+            // the chain foldout entirely so the rows sit at the dummy
+            // indent without an extra step.
+            //
+            // Insert buttons stay slot-scoped: clicking "+ Add LOD after
+            // LOD{N}" in any chain queues a single PendingInsert that
+            // materialises a new slot across all chains on Apply Changes.
             var chains = GroupLodsByChain(dummy);
-            bool firstChain = true;
-            foreach (var chain in chains)
+            bool useChainFoldouts = chains.Count > 1;
+            for (int chainIdx = 0; chainIdx < chains.Count; chainIdx++)
             {
-                if (!firstChain) EditorGUILayout.Space(3);
-                firstChain = false;
+                var chain = chains[chainIdx];
+                bool chainOpen = true;
+                if (useChainFoldouts)
+                {
+                    if (chainIdx > 0) EditorGUILayout.Space(2);
+                    chainOpen = DrawChainFoldoutHeader(dummy, chain);
+                }
 
-                if (chains.Count > 1)
-                    EditorGUILayout.LabelField($"⌐ {chain.baseName}",
-                        EditorStyles.miniBoldLabel);
+                if (!chainOpen) continue;
 
+                bool earlyReturn = false;
+                if (useChainFoldouts)
+                {
+                    EditorGUILayout.BeginHorizontal();
+                    GUILayout.Space(14f);
+                    EditorGUILayout.BeginVertical();
+                }
                 for (int i = 0; i < chain.rows.Count; i++)
                 {
                     if (i > 0) DrawRowDivider();
-                    if (DrawLodRow(dummy, chain.rows[i]))
-                    {
-                        EditorGUILayout.EndVertical();
-                        return;
-                    }
+                    if (DrawLodRow(dummy, chain.rows[i])) { earlyReturn = true; break; }
                     if (DrawPendingInsertsForAfter(dummy, chain.rows[i].renderer))
-                    {
-                        EditorGUILayout.EndVertical();
-                        return;
-                    }
+                    { earlyReturn = true; break; }
                     int afterLodIndex = chain.rows[i].lodIndex;
-                    if (DrawAddLodButton(dummy, afterLodIndex))
-                    {
-                        EditorGUILayout.EndVertical();
-                        return;
-                    }
+                    if (DrawAddLodButton(dummy, afterLodIndex)) { earlyReturn = true; break; }
+                }
+                if (useChainFoldouts)
+                {
+                    EditorGUILayout.EndVertical();
+                    EditorGUILayout.EndHorizontal();
+                }
+                if (earlyReturn)
+                {
+                    EditorGUILayout.EndVertical();
+                    return;
                 }
             }
 
@@ -1689,6 +1708,36 @@ namespace SashaRX.UnityMeshLab
                     col.colTransform.gameObject.name = desired;
                 }
             }
+        }
+
+        // ── Chain foldout header (Unity Hierarchy-style chevron). ──
+        // Returns true when the chain is expanded. Persists per-chain
+        // state in collapsedChains keyed by dummy + base name.
+        bool DrawChainFoldoutHeader(HierarchyDummy dummy, HierarchyChain chain)
+        {
+            string key = (dummy.dummy != null ? dummy.dummy.GetInstanceID() : 0)
+                + "|" + chain.baseName;
+            bool open = collapsedChains == null || !collapsedChains.Contains(key);
+
+            EditorGUILayout.BeginHorizontal();
+            // Chevron at the dummy content edge.
+            var chevRect = GUILayoutUtility.GetRect(14, 16,
+                GUILayout.Width(14), GUILayout.Height(16));
+            bool nextOpen = EditorGUI.Foldout(chevRect, open, GUIContent.none, true);
+            EditorGUILayout.LabelField(chain.baseName, EditorStyles.boldLabel,
+                GUILayout.MinWidth(80));
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.LabelField($"{chain.rows.Count} LOD",
+                EditorStyles.miniLabel, GUILayout.Width(60));
+            EditorGUILayout.EndHorizontal();
+
+            if (nextOpen != open)
+            {
+                if (collapsedChains == null) collapsedChains = new HashSet<string>();
+                if (nextOpen) collapsedChains.Remove(key);
+                else collapsedChains.Add(key);
+            }
+            return nextOpen;
         }
 
         // ── Chain grouping ──
