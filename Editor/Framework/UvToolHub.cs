@@ -318,6 +318,33 @@ namespace SashaRX.UnityMeshLab
 
             DrawHubToolbar();
 
+            // Pre-compute layout widths so the canvas (middle column) gets an
+            // explicit Width and shrinks first when the window is too narrow,
+            // while the sidebars hold their user-set widths down to their
+            // legibility minimums. Without an explicit canvas width IMGUI
+            // sized the middle column to its content, which pushed the
+            // right sidebar past the window's right edge.
+            const float LeftSidebarMinW  = 220f;
+            const float RightSidebarMinW = 220f;
+            const float RightSidebarMaxW = 700f;
+            const float CanvasMinW       = 120f;
+            const float HandleW          = 4f;
+
+            sideW = Mathf.Max(LeftSidebarMinW, sideW);
+
+            var rightSidebar = ActiveTool as IUvToolRightSidebar;
+            float rightHandleW = rightSidebar != null ? HandleW : 0f;
+            if (rightSidebar != null)
+            {
+                float roomForRight = position.width - sideW - HandleW - rightHandleW - CanvasMinW;
+                float upper = Mathf.Clamp(roomForRight, RightSidebarMinW, RightSidebarMaxW);
+                rightSideW = Mathf.Clamp(rightSideW, RightSidebarMinW, upper);
+            }
+
+            float canvasW = Mathf.Max(0f,
+                position.width - sideW - HandleW
+                - (rightSidebar != null ? (rightSideW + rightHandleW) : 0f));
+
             EditorGUILayout.BeginHorizontal();
 
             // ── Left sidebar ���─
@@ -330,8 +357,9 @@ namespace SashaRX.UnityMeshLab
 
             DrawResizeHandle();
 
-            // ── Right: canvas toolbar + canvas + status ──
-            EditorGUILayout.BeginVertical();
+            // Middle column with explicit Width so it's the first thing to
+            // shrink when the window is too narrow.
+            EditorGUILayout.BeginVertical(GUILayout.Width(canvasW));
             DrawCanvasToolbar();
 
             bool showGroupPanel = ctx.RepackPerMesh && ctx.MeshGroupCount(ctx.PreviewLod) > 1;
@@ -352,25 +380,11 @@ namespace SashaRX.UnityMeshLab
 
             EditorGUILayout.EndVertical();
 
-            // ── Right sidebar (opt-in via IUvToolRightSidebar) ──
-            // Currently used by Prefab Builder for its Tool Settings stack.
-            var rightSidebar = ActiveTool as IUvToolRightSidebar;
+            // Right sidebar (opt-in via IUvToolRightSidebar). The clamp + width
+            // computation already happened at the top of OnGUI so we just
+            // render at the resolved rightSideW here.
             if (rightSidebar != null)
             {
-                // Dynamic clamp so the sidebar can never push past the
-                // window's right edge. Min width 180 keeps foldout headers
-                // legible without forcing more horizontal real estate than
-                // the window can spare. When the window shrinks below
-                // sideW + 180 + viewport_min, the viewport gets squeezed
-                // first; the right sidebar holds its 180 px minimum so
-                // settings remain reachable.
-                const float MinRightW   = 180f;
-                const float MaxRightW   = 700f;
-                const float ViewportMin = 200f;
-                float roomLeft = position.width - sideW - 8f - ViewportMin;
-                float effectiveMax = Mathf.Clamp(roomLeft, MinRightW, MaxRightW);
-                rightSideW = Mathf.Clamp(rightSideW, MinRightW, effectiveMax);
-
                 DrawRightResizeHandle();
                 EditorGUILayout.BeginVertical(GUILayout.Width(rightSideW));
                 rightSideScroll = EditorGUILayout.BeginScrollView(rightSideScroll);
@@ -392,16 +406,18 @@ namespace SashaRX.UnityMeshLab
             { GUIUtility.hotControl = id; rightSideDragging = true; Event.current.Use(); }
             if (rightSideDragging && Event.current.type == EventType.MouseDrag)
             {
-                // Width is measured from the right edge of the window. Same
-                // clamp the per-frame guard uses, so dragging can never push
-                // the sidebar off-screen or below the legibility minimum.
-                const float MinRightW   = 180f;
-                const float MaxRightW   = 700f;
-                const float ViewportMin = 200f;
-                float roomLeft = position.width - sideW - 8f - ViewportMin;
-                float effectiveMax = Mathf.Clamp(roomLeft, MinRightW, MaxRightW);
+                // Mirror the per-frame clamp so dragging can never push the
+                // sidebar off-screen or shrink the canvas past its minimum.
+                // The constants here intentionally match the pre-compute
+                // block at the top of OnGUI.
+                const float RightSidebarMinW = 220f;
+                const float RightSidebarMaxW = 700f;
+                const float CanvasMinW       = 120f;
+                const float HandleW          = 4f;
+                float roomForRight = position.width - sideW - HandleW - HandleW - CanvasMinW;
+                float upper = Mathf.Clamp(roomForRight, RightSidebarMinW, RightSidebarMaxW);
                 rightSideW = Mathf.Clamp(position.width - Event.current.mousePosition.x,
-                    MinRightW, effectiveMax);
+                    RightSidebarMinW, upper);
                 Event.current.Use();
                 Repaint();
             }
