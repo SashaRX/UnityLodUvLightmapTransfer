@@ -38,6 +38,11 @@ namespace SashaRX.UnityMeshLab
         float sideW = 300f;
         bool sideDragging;
         Vector2 sideScroll;
+        // Right sidebar — only rendered when ActiveTool implements
+        // IUvToolRightSidebar. Reapportioned by the right-edge resize handle.
+        float rightSideW = 360f;
+        bool rightSideDragging;
+        Vector2 rightSideScroll;
         int _cachedLodCount;
         int _cachedRendererCount;
         int _checkerUvChannel = 1;
@@ -347,7 +352,39 @@ namespace SashaRX.UnityMeshLab
 
             EditorGUILayout.EndVertical();
 
+            // ── Right sidebar (opt-in via IUvToolRightSidebar) ──
+            // Currently used by Prefab Builder for its Tool Settings stack.
+            var rightSidebar = ActiveTool as IUvToolRightSidebar;
+            if (rightSidebar != null)
+            {
+                DrawRightResizeHandle();
+                EditorGUILayout.BeginVertical(GUILayout.Width(rightSideW));
+                rightSideScroll = EditorGUILayout.BeginScrollView(rightSideScroll);
+                rightSidebar.OnDrawRightSidebar();
+                EditorGUILayout.EndScrollView();
+                EditorGUILayout.EndVertical();
+            }
+
             EditorGUILayout.EndHorizontal();
+        }
+
+        void DrawRightResizeHandle()
+        {
+            var r = GUILayoutUtility.GetRect(4, 4, GUILayout.ExpandHeight(true));
+            EditorGUI.DrawRect(r, new Color(.13f, .13f, .13f));
+            EditorGUIUtility.AddCursorRect(r, MouseCursor.ResizeHorizontal);
+            int id = GUIUtility.GetControlID(FocusType.Passive);
+            if (Event.current.type == EventType.MouseDown && r.Contains(Event.current.mousePosition))
+            { GUIUtility.hotControl = id; rightSideDragging = true; Event.current.Use(); }
+            if (rightSideDragging && Event.current.type == EventType.MouseDrag)
+            {
+                // Width is measured from the right edge of the window.
+                rightSideW = Mathf.Clamp(position.width - Event.current.mousePosition.x, 220f, 700f);
+                Event.current.Use();
+                Repaint();
+            }
+            if (Event.current.rawType == EventType.MouseUp && rightSideDragging)
+            { rightSideDragging = false; Event.current.Use(); }
         }
 
         void OnSceneGUI(SceneView sv)

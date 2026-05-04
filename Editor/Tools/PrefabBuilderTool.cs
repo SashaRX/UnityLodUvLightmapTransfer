@@ -25,7 +25,7 @@ using UnityEditor;
 
 namespace SashaRX.UnityMeshLab
 {
-    public class PrefabBuilderTool : IUvTool
+    public class PrefabBuilderTool : IUvTool, IUvToolRightSidebar
     {
         UvToolContext ctx;
         UvCanvasView canvas;
@@ -70,15 +70,14 @@ namespace SashaRX.UnityMeshLab
         bool hierarchyFoldout = true;
         List<HierarchyDummy> hierarchyDummies;
 
-        // ── Right panel state ──
-        // The Prefab Builder sidebar is split into two columns: hierarchy on
-        // the left, a collapsible Settings stack on the right. The right
-        // panel hosts deferred regenerate parameters (LOD), collider config,
-        // UV2 transfer, vertex-color bake — each section is sourced from the
-        // existing tool's instance via UvToolHub.FindTool<T>(). Tools are
-        // not duplicated — we just call into their existing settings UI.
-        float leftColumnWidth = 320f;
-        bool draggingColumnDivider;
+        // ── Right sidebar state ──
+        // PrefabBuilderTool implements IUvToolRightSidebar so the hub renders
+        // a separate sidebar on the right edge of the window for our
+        // Settings stack. The sidebar hosts deferred regenerate parameters
+        // (LOD), collider config, UV2 transfer, vertex-color bake — each
+        // section is sourced from the existing tool's instance via
+        // UvToolHub.FindTool<T>(). Tools are not duplicated — we just call
+        // into their existing settings UI.
         bool rightPanelLodFoldout = true;
         bool rightPanelColliderFoldout;
         bool rightPanelTransferFoldout;
@@ -244,13 +243,6 @@ namespace SashaRX.UnityMeshLab
             }
 
             DrawPreviewModeToolbar();
-
-            // Two-column layout: hierarchy on the left, Settings stack on the
-            // right. Drag the divider to reapportion. Drag the Hub's outer
-            // sidebar resize handle if you need more total width.
-            EditorGUILayout.BeginHorizontal();
-
-            EditorGUILayout.BeginVertical(GUILayout.Width(leftColumnWidth));
             DrawHierarchySection();
             DrawCollisionSection();
             DrawSplitMergeSection();
@@ -258,54 +250,17 @@ namespace SashaRX.UnityMeshLab
             if (edgeReports != null) DrawEdgeReportSection();
             if (problemSummaries != null) DrawProblemSummarySection();
             DrawEdgeLegend();
-            EditorGUILayout.EndVertical();
-
-            DrawColumnDivider();
-
-            EditorGUILayout.BeginVertical();
-            DrawRightPanel();
-            EditorGUILayout.EndVertical();
-
-            EditorGUILayout.EndHorizontal();
-        }
-
-        // ── Resize divider between Hierarchy and Settings columns. ──
-        // Drag horizontally to reapportion. Clamps to a sensible range so
-        // neither column collapses below ~200 px or grows past ~700.
-        void DrawColumnDivider()
-        {
-            var rect = GUILayoutUtility.GetRect(4, 4, GUILayout.Width(4), GUILayout.ExpandHeight(true));
-            if (Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(rect, new Color(0.13f, 0.13f, 0.13f));
-            EditorGUIUtility.AddCursorRect(rect, MouseCursor.ResizeHorizontal);
-            int id = GUIUtility.GetControlID(FocusType.Passive);
-            if (Event.current.type == EventType.MouseDown && rect.Contains(Event.current.mousePosition))
-            {
-                GUIUtility.hotControl = id;
-                draggingColumnDivider = true;
-                Event.current.Use();
-            }
-            if (draggingColumnDivider && Event.current.type == EventType.MouseDrag)
-            {
-                leftColumnWidth = Mathf.Clamp(Event.current.mousePosition.x, 200f, 700f);
-                Event.current.Use();
-                requestRepaint?.Invoke();
-            }
-            if (Event.current.rawType == EventType.MouseUp && draggingColumnDivider)
-            {
-                draggingColumnDivider = false;
-                Event.current.Use();
-            }
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Right panel — Settings stack. Each foldout pulls its UI from the
-        // matching tool instance via UvToolHub.FindTool<T>() so we don't
-        // duplicate the per-tool state. PR-2 lights up LOD Settings; the
-        // remaining sections are placeholders pending migration.
+        // Right sidebar — Settings stack hosted by the hub on the right
+        // edge of the window. Each foldout pulls its UI from the matching
+        // tool instance via UvToolHub.FindTool<T>() so we don't duplicate
+        // the per-tool state. PR-2 lights up LOD Settings; the remaining
+        // sections are placeholders pending migration.
         // ═══════════════════════════════════════════════════════════
 
-        void DrawRightPanel()
+        public void OnDrawRightSidebar()
         {
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Tool Settings", EditorStyles.boldLabel);
