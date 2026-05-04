@@ -101,10 +101,21 @@ namespace SashaRX.UnityMeshLab
         sealed class PendingInsert
         {
             public int afterLodIndex;          // slot to insert after (-1 = at the very start)
+            // Captured at click time so the slot index can be re-resolved
+            // against the live LODGroup at Apply Changes time. Without this,
+            // applying a pending delete BEFORE the insert (in the same Apply
+            // batch) would shift slot indices and the insert would land in
+            // the wrong place.
+            public Renderer afterRenderer;
             public float quality;              // simplification target ratio chosen by the user
         }
         List<PendingInsert> pendingInserts;
         HashSet<int> pendingDeleteRendererIds;
+        // Per-renderer backup of the mesh before the FIRST regenerate this
+        // session. Used by RowWasRegenerated / DiscardRegenerate so the
+        // affordance survives ctx.Refresh (which would otherwise rewrite
+        // MeshEntry.fbxMesh to point at the simplified mesh).
+        Dictionary<int, Mesh> regenBackupMeshes;
 
         sealed class HierarchyDummy
         {
@@ -189,6 +200,7 @@ namespace SashaRX.UnityMeshLab
             freshRendererIds = new HashSet<int>();
             pendingInserts = new List<PendingInsert>();
             pendingDeleteRendererIds = new HashSet<int>();
+            regenBackupMeshes = new Dictionary<int, Mesh>();
         }
 
         public void OnDeactivate()
@@ -217,6 +229,7 @@ namespace SashaRX.UnityMeshLab
                 freshRendererIds?.Clear();
                 pendingInserts?.Clear();
                 pendingDeleteRendererIds?.Clear();
+                regenBackupMeshes?.Clear();
                 freshTrackedLodGroup = ctx?.LodGroup;
             }
 
@@ -906,6 +919,11 @@ namespace SashaRX.UnityMeshLab
         {
             if (pendingInserts == null) pendingInserts = new List<PendingInsert>();
             float defaultQ = 0.5f;
+            // Pick any renderer at the anchor slot as the live anchor. The
+            // commit step resolves the actual slot index from this renderer's
+            // CURRENT position in the LODGroup, so deletes earlier in the
+            // same Apply batch shift the insert into the right slot.
+            Renderer afterRenderer = null;
             if (afterLodIndex >= 0 && hierarchyDummies != null && lodQualitySliders != null)
             {
                 int samples = 0;
@@ -917,6 +935,7 @@ namespace SashaRX.UnityMeshLab
                     {
                         if (lr == null || lr.renderer == null) continue;
                         if (lr.lodIndex != afterLodIndex) continue;
+                        if (afterRenderer == null) afterRenderer = lr.renderer;
                         if (lodQualitySliders.TryGetValue(lr.renderer.GetInstanceID(), out var q))
                         { sum += q; samples++; }
                     }
@@ -926,6 +945,7 @@ namespace SashaRX.UnityMeshLab
             pendingInserts.Add(new PendingInsert
             {
                 afterLodIndex = afterLodIndex,
+                afterRenderer = afterRenderer,
                 quality       = defaultQ
             });
             requestRepaint?.Invoke();
@@ -1285,18 +1305,42 @@ namespace SashaRX.UnityMeshLab
 
             // Apply in REVERSE click order so earlier pendings still land in
             // their intended position even after later pendings shift slot
-            // numbers. With reverse order, later-clicked pendings at a higher
-            // afterLodIndex get inserted first; earlier-clicked pendings at a
-            // lower afterLodIndex are then inserted into a still-stable left
-            // half of the array.
+            // numbers. Slot index is re-resolved from each pending's live
+            // afterRenderer anchor; if the anchor was deleted earlier in the
+            // same Apply batch, fall back to the captured afterLodIndex
+            // clamped to the current LOD count.
             for (int i = pendingInserts.Count - 1; i >= 0; i--)
             {
                 var pending = pendingInserts[i];
                 if (pending == null) continue;
-                int targetIdx = Mathf.Max(0, pending.afterLodIndex + 1);
+                int targetIdx = ResolvePendingInsertSlot(pending);
                 InsertSlotAtIndex(targetIdx, pending.quality);
             }
             pendingInserts.Clear();
+        }
+
+        // Re-resolve the slot a pending insert should land in, against the
+        // live LODGroup. Prefers the captured afterRenderer's current slot
+        // (handles deletes-before-inserts in the same Apply batch); falls
+        // back to the originally captured afterLodIndex when the anchor was
+        // destroyed mid-batch.
+        int ResolvePendingInsertSlot(PendingInsert pending)
+        {
+            if (pending == null || ctx?.LodGroup == null) return 0;
+            if (pending.afterRenderer != null)
+            {
+                var lods = ctx.LodGroup.GetLODs();
+                for (int slot = 0; slot < lods.Length; slot++)
+                {
+                    var rs = lods[slot].renderers;
+                    if (rs == null) continue;
+                    foreach (var r in rs)
+                        if (r == pending.afterRenderer)
+                            return slot + 1;
+                }
+            }
+            int currentLodCount = ctx.LodGroup.GetLODs().Length;
+            return Mathf.Clamp(pending.afterLodIndex + 1, 0, currentLodCount);
         }
 
         bool HasAnyStaleLeafName()
@@ -1344,6 +1388,15 @@ namespace SashaRX.UnityMeshLab
 
             var mf = lod.renderer.GetComponent<MeshFilter>();
             if (mf == null) return;
+            // Snapshot the original mesh BEFORE swapping. ctx.Refresh below
+            // would otherwise rewrite MeshEntry.fbxMesh to point at the
+            // simplified mesh, defeating the Discard affordance the next
+            // time the user wants to revert.
+            if (regenBackupMeshes != null
+                && !regenBackupMeshes.ContainsKey(rid)
+                && mf.sharedMesh != null)
+                regenBackupMeshes[rid] = mf.sharedMesh;
+
             Undo.RecordObject(mf, "Regenerate LOD");
             mf.sharedMesh = res.simplifiedMesh;
 
@@ -1652,50 +1705,39 @@ namespace SashaRX.UnityMeshLab
         }
 
         // True when the row's renderer was regenerated this session and its
-        // current mesh differs from the import-time fbxMesh — i.e. Discard
-        // would actually change something.
+        // current mesh differs from the captured original — i.e. Discard
+        // would actually change something. The backup is captured BEFORE
+        // the first regenerate (see RegenerateLodWithQuality), so this stays
+        // valid across the ctx.Refresh that runs immediately after.
         bool RowWasRegenerated(HierarchyLodRow lod)
         {
             if (lod == null || lod.renderer == null) return false;
-            if (freshRendererIds == null) return false;
-            if (!freshRendererIds.Contains(lod.renderer.GetInstanceID())) return false;
-            if (ctx?.MeshEntries == null) return false;
-            foreach (var e in ctx.MeshEntries)
-            {
-                if (e.renderer != lod.renderer) continue;
-                // Newly inserted GameObjects have e.fbxMesh == null (no FBX
-                // backing). Only "regenerated existing" entries have a real
-                // fbxMesh that differs from the current sharedMesh.
-                if (e.fbxMesh == null) return false;
-                var mf = lod.renderer.GetComponent<MeshFilter>();
-                if (mf == null) return false;
-                return mf.sharedMesh != e.fbxMesh;
-            }
-            return false;
+            if (regenBackupMeshes == null) return false;
+            int rid = lod.renderer.GetInstanceID();
+            if (!regenBackupMeshes.TryGetValue(rid, out var backup) || backup == null)
+                return false;
+            var mf = lod.renderer.GetComponent<MeshFilter>();
+            if (mf == null) return false;
+            return mf.sharedMesh != backup;
         }
 
-        // Restore the renderer's MeshFilter back to the import-time fbxMesh
-        // and drop the row from the freshRendererIds highlight.
+        // Restore the renderer's MeshFilter back to the captured original
+        // mesh and drop the row from both the freshRendererIds highlight and
+        // the backup map.
         void DiscardRegenerate(HierarchyLodRow lod)
         {
-            if (lod == null || lod.renderer == null || ctx?.MeshEntries == null) return;
-            Mesh fbx = null;
-            foreach (var e in ctx.MeshEntries)
-            {
-                if (e.renderer != lod.renderer) continue;
-                fbx = e.fbxMesh;
-                break;
-            }
-            if (fbx == null) return;
+            if (lod == null || lod.renderer == null || regenBackupMeshes == null) return;
+            int rid = lod.renderer.GetInstanceID();
+            if (!regenBackupMeshes.TryGetValue(rid, out var backup) || backup == null) return;
             var mf = lod.renderer.GetComponent<MeshFilter>();
             if (mf == null) return;
             Undo.RecordObject(mf, "Discard Regenerate");
-            mf.sharedMesh = fbx;
-            int rid = lod.renderer.GetInstanceID();
+            mf.sharedMesh = backup;
+            regenBackupMeshes.Remove(rid);
             freshRendererIds?.Remove(rid);
             buildIntent |= FbxExportIntent.AnyUv | FbxExportIntent.Normals
                 | FbxExportIntent.Tangents | FbxExportIntent.VertexColors;
-            UvtLog.Info($"[LightmapUV] Discarded regenerate on '{lod.renderer.name}' — restored {fbx.name}.");
+            UvtLog.Info($"[LightmapUV] Discarded regenerate on '{lod.renderer.name}' — restored {backup.name}.");
             ctx.LodGroup.RecalculateBounds();
             ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
