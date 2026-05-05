@@ -896,12 +896,18 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // COL rows (different color tint)
+            // COL rows (different color tint). Visually offset from the
+            // chain block above with a real gap + a strong divider — the
+            // previous 2 px space + 50 %-alpha green line was invisible
+            // against the dummy helpBox tint, so the COL row appeared to
+            // sit flush against the "+" button below the last LOD.
             if (dummy.cols.Count > 0)
             {
-                EditorGUILayout.Space(2);
+                EditorGUILayout.Space(6);
                 var colSep = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
-                EditorGUI.DrawRect(colSep, new Color(0.35f, 0.55f, 0.45f, 0.5f));
+                if (Event.current.type == EventType.Repaint)
+                    EditorGUI.DrawRect(colSep, new Color(0.18f, 0.18f, 0.18f, 0.85f));
+                EditorGUILayout.Space(4);
                 for (int i = 0; i < dummy.cols.Count; i++)
                 {
                     if (DrawColRow(dummy, dummy.cols[i], i, dummy.cols.Count))
