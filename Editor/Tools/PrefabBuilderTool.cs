@@ -1045,34 +1045,25 @@ namespace SashaRX.UnityMeshLab
             return false;
         }
 
-        // Compact insert affordance between LOD rows. A thin horizontal rule
-        // crosses the row, broken in the middle by a tiny "+" button —
-        // clicking enqueues a pending insert at this slot. Much less
-        // visually loud than the previous full-width "+ Add LOD after LOD0"
-        // bar that competed with the actual LOD entries.
+        // Compact insert affordance between LOD rows. A single small "+"
+        // mini-button centred via FlexibleSpace so it can never overflow
+        // past the chain / dummy helpBox border (the previous design used
+        // ExpandWidth rules on either side, which IMGUI happily extended
+        // past the available rect — clipping the button on narrow
+        // sidebars). Click enqueues a slot-scoped pending insert.
         // Returns true on click (UI invalidated by insertion).
         bool DrawAddLodButton(HierarchyDummy dummy, int afterLodIndex)
         {
-            const float btnW = 22f;
+            const float btnW = 36f;
             const float btnH = 14f;
 
             string tip = afterLodIndex < 0
-                ? "Insert LOD at the start of this group."
-                : $"Insert LOD after LOD{afterLodIndex} (queued; commits on Apply Changes).";
+                ? "Click to queue an insert at the start of this group. Commits on Apply Changes."
+                : $"Click to queue an insert after LOD{afterLodIndex}. Commits on Apply Changes.";
 
             EditorGUILayout.BeginHorizontal();
-            // Inset from the chain helpBox edge so the rule + "+" button
-            // never collide with the box border (which would clip the
-            // button's right side, especially when the left sidebar's
-            // vertical scrollbar appears and eats ~14 px on the right).
             GUILayout.Space(HierarchyRowIndent);
-            // Left rule.
-            var leftRule = GUILayoutUtility.GetRect(0, 1, GUILayout.Height(btnH),
-                GUILayout.ExpandWidth(true));
-            if (Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(new Rect(leftRule.x + 4, leftRule.y + btnH * 0.5f,
-                    Mathf.Max(0, leftRule.width - 8), 1),
-                    new Color(0.4f, 0.4f, 0.4f, 0.7f));
+            GUILayout.FlexibleSpace();
 
             var bgc = GUI.backgroundColor;
             GUI.backgroundColor = new Color(0.55f, 0.75f, 0.95f);
@@ -1081,13 +1072,7 @@ namespace SashaRX.UnityMeshLab
                 GUILayout.Width(btnW), GUILayout.Height(btnH));
             GUI.backgroundColor = bgc;
 
-            // Right rule (mirrors the left).
-            var rightRule = GUILayoutUtility.GetRect(0, 1, GUILayout.Height(btnH),
-                GUILayout.ExpandWidth(true));
-            if (Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(new Rect(rightRule.x + 4, rightRule.y + btnH * 0.5f,
-                    Mathf.Max(0, rightRule.width - 8), 1),
-                    new Color(0.4f, 0.4f, 0.4f, 0.7f));
+            GUILayout.FlexibleSpace();
             GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
