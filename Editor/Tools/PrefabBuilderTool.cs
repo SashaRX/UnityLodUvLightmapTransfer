@@ -553,6 +553,51 @@ namespace SashaRX.UnityMeshLab
             EditorGUILayout.EndHorizontal();
         }
 
+        // Wrap a flat-under-Root chain into a new Dummy GameObject. The chain
+        // renderers get reparented under the new container; LODGroup
+        // references stay intact since they track the Renderer component,
+        // not its parent. Useful when a flat prefab has multiple chains
+        // (Metal / Wood) that the user wants to organise into separate
+        // sub-folders.
+        void WrapChainInDummy(HierarchyChain chain)
+        {
+            if (ctx?.LodGroup == null || chain == null || chain.rows.Count == 0) return;
+            var root = ctx.LodGroup.transform;
+
+            Undo.SetCurrentGroupName("Prefab Builder: Wrap chain in Dummy");
+            int undoGroup = Undo.GetCurrentGroup();
+
+            // Pick a name. Prefer the chain base; if it would collide with
+            // an existing child of root, suffix with _N.
+            string dummyName = chain.baseName;
+            if (root.Find(dummyName) != null)
+            {
+                int n = 1;
+                while (root.Find($"{dummyName}_{n}") != null) n++;
+                dummyName = $"{dummyName}_{n}";
+            }
+            var newDummy = new GameObject(dummyName);
+            Undo.RegisterCreatedObjectUndo(newDummy, "Wrap chain in Dummy");
+            newDummy.transform.SetParent(root, false);
+
+            // Reparent all chain renderer GameObjects under the new dummy.
+            foreach (var lod in chain.rows)
+            {
+                if (lod?.renderer == null) continue;
+                Undo.SetTransformParent(lod.renderer.transform,
+                    newDummy.transform, "Wrap LOD into Dummy");
+            }
+
+            Undo.CollapseUndoOperations(undoGroup);
+            buildIntent |= FbxExportIntent.Hierarchy;
+
+            UvtLog.Info($"[LightmapUV] Wrapped chain '{chain.baseName}' in Dummy '{dummyName}' "
+                + $"({chain.rows.Count} LOD).");
+
+            hierarchyDummies = null;
+            requestRepaint?.Invoke();
+        }
+
         void AddNewEmptyDummy()
         {
             if (ctx?.LodGroup == null) return;
@@ -881,45 +926,67 @@ namespace SashaRX.UnityMeshLab
             GUI.backgroundColor = prevBg;
             EditorGUILayout.EndHorizontal();
 
-            // Row B: stat + channel badges
+            // Row B: compact stat + slider + badges (one line). Replaces the
+            // earlier two-line "stat / badges" + "LOD slider" layout — same
+            // controls in half the vertical space so chains read tighter.
             int verts = lod.mesh != null ? lod.mesh.vertexCount : 0;
             int tris = lod.mesh != null ? MeshHygieneUtility.GetTriangleCount(lod.mesh) : 0;
-            string stat = $"LOD{lod.lodIndex}  {verts:N0}v / {tris:N0}t";
+            string stat = $"{verts:N0}v / {tris:N0}t";
             string badges = ChannelBadges(lod.mesh);
 
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
-            EditorGUILayout.LabelField(stat, EditorStyles.miniLabel, GUILayout.Width(160));
-            GUILayout.FlexibleSpace();
-            if (!string.IsNullOrEmpty(badges))
-                EditorGUILayout.LabelField(badges, EditorStyles.miniLabel, GUILayout.Width(180));
-            EditorGUILayout.EndHorizontal();
-
-            // Row C: LOD label + quality slider
-            EditorGUILayout.BeginHorizontal();
-            GUILayout.Space(HierarchyRowIndent);
-            EditorGUILayout.LabelField($"LOD{lod.lodIndex}", EditorStyles.miniLabel, GUILayout.Width(40));
+            EditorGUILayout.LabelField(stat, EditorStyles.miniLabel, GUILayout.Width(110));
             if (!lodQualitySliders.TryGetValue(rid, out var quality))
                 quality = ComputeLodRatioFromTriangles(dummy, lod);
-            float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f);
+            float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f, GUILayout.MinWidth(80));
             if (Mathf.Abs(newQuality - quality) > 0.0001f)
                 lodQualitySliders[rid] = newQuality;
+            if (!string.IsNullOrEmpty(badges))
+                EditorGUILayout.LabelField(badges, EditorStyles.miniLabel, GUILayout.Width(140));
             EditorGUILayout.EndHorizontal();
 
             return false;
         }
 
+        // Compact insert affordance between LOD rows. A thin horizontal rule
+        // crosses the row, broken in the middle by a tiny "+" button —
+        // clicking enqueues a pending insert at this slot. Much less
+        // visually loud than the previous full-width "+ Add LOD after LOD0"
+        // bar that competed with the actual LOD entries.
         // Returns true on click (UI invalidated by insertion).
         bool DrawAddLodButton(HierarchyDummy dummy, int afterLodIndex)
         {
+            const float btnW = 22f;
+            const float btnH = 14f;
+
+            string tip = afterLodIndex < 0
+                ? "Insert LOD at the start of this group."
+                : $"Insert LOD after LOD{afterLodIndex} (queued; commits on Apply Changes).";
+
             EditorGUILayout.BeginHorizontal();
-            GUILayout.Space(40);
+            // Left rule.
+            var leftRule = GUILayoutUtility.GetRect(0, 1, GUILayout.Height(btnH),
+                GUILayout.ExpandWidth(true));
+            if (Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(new Rect(leftRule.x + 4, leftRule.y + btnH * 0.5f,
+                    Mathf.Max(0, leftRule.width - 8), 1),
+                    new Color(0.4f, 0.4f, 0.4f, 0.7f));
+
             var bgc = GUI.backgroundColor;
             GUI.backgroundColor = new Color(0.55f, 0.75f, 0.95f);
-            string label = afterLodIndex < 0 ? "+ Add LOD" : $"+ Add LOD after LOD{afterLodIndex}";
-            bool clicked = GUILayout.Button(label, GUILayout.Height(16));
+            bool clicked = GUILayout.Button(new GUIContent("+", tip),
+                EditorStyles.miniButton,
+                GUILayout.Width(btnW), GUILayout.Height(btnH));
             GUI.backgroundColor = bgc;
-            GUILayout.Space(40);
+
+            // Right rule (mirrors the left).
+            var rightRule = GUILayoutUtility.GetRect(0, 1, GUILayout.Height(btnH),
+                GUILayout.ExpandWidth(true));
+            if (Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(new Rect(rightRule.x + 4, rightRule.y + btnH * 0.5f,
+                    Mathf.Max(0, rightRule.width - 8), 1),
+                    new Color(0.4f, 0.4f, 0.4f, 0.7f));
             EditorGUILayout.EndHorizontal();
 
             if (clicked)
@@ -1860,7 +1927,25 @@ namespace SashaRX.UnityMeshLab
                 GUILayout.MinWidth(80));
             GUILayout.FlexibleSpace();
             EditorGUILayout.LabelField($"{chain.rows.Count} LOD",
-                EditorStyles.miniLabel, GUILayout.Width(60));
+                EditorStyles.miniLabel, GUILayout.Width(48));
+            // "→ Dummy" wraps a flat-under-Root chain in a fresh GameObject
+            // container named after the chain base. The chain renderers get
+            // re-parented under it; LODGroup references stay intact since
+            // they track Renderer components, not parents. Only offered
+            // when the chain currently lives directly under Root (already-
+            // nested chains skip the affordance).
+            if (dummy.isRoot)
+            {
+                var prevBg2 = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(0.55f, 0.85f, 0.55f);
+                if (GUILayout.Button(new GUIContent("→ Dummy",
+                        $"Wrap '{chain.baseName}' chain in a new Dummy GameObject under Root."),
+                        EditorStyles.miniButton, GUILayout.Width(64)))
+                {
+                    WrapChainInDummy(chain);
+                }
+                GUI.backgroundColor = prevBg2;
+            }
             EditorGUILayout.EndHorizontal();
 
             if (nextOpen != open)
@@ -1910,12 +1995,14 @@ namespace SashaRX.UnityMeshLab
         }
 
         // ── Visual divider between LOD rows so the table reads as discrete entries. ──
+        // The tinted chain helpBox washes out faint dividers, so the rule
+        // here is darker (full alpha) and 1 px tall.
         static void DrawRowDivider()
         {
             EditorGUILayout.Space(2);
             var rect = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
             if (Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(rect, new Color(0.30f, 0.30f, 0.30f, 0.55f));
+                EditorGUI.DrawRect(rect, new Color(0.18f, 0.18f, 0.18f, 0.85f));
             EditorGUILayout.Space(2);
         }
 
