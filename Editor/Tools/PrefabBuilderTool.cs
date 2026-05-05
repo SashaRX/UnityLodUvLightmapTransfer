@@ -1042,19 +1042,22 @@ namespace SashaRX.UnityMeshLab
             GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
-            // Row B: slider + value. Manual two-widget layout so the value
-            // field has a fixed width — the auto-sized field that
-            // EditorGUILayout.Slider draws was wider than the action-button
-            // cluster on row A and broke the right-column alignment.
+            // Row B: slider + inline value field. EditorGUILayout.Slider
+            // draws both in a single coherent widget — switching to a
+            // manual HorizontalSlider + DelayedFloatField pair caused the
+            // value field to wrap to a new line in narrow sidebars (the
+            // slider's ExpandWidth was greedy and didn't leave room for
+            // the field). fieldWidth pins the value field to a
+            // predictable 56 px so the right edge still aligns with the
+            // [↻][✕] button cluster on row A.
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
             if (!lodQualitySliders.TryGetValue(rid, out var quality))
                 quality = ComputeLodRatioFromTriangles(dummy, lod);
-            float sliderQ = GUILayout.HorizontalSlider(quality, 0.001f, 1f,
-                GUILayout.ExpandWidth(true));
-            float fieldQ = EditorGUILayout.DelayedFloatField(sliderQ,
-                GUILayout.Width(56));
-            float newQuality = Mathf.Clamp(fieldQ, 0.001f, 1f);
+            float prevFieldW = EditorGUIUtility.fieldWidth;
+            EditorGUIUtility.fieldWidth = 56f;
+            float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f);
+            EditorGUIUtility.fieldWidth = prevFieldW;
             if (Mathf.Abs(newQuality - quality) > 0.0001f)
                 lodQualitySliders[rid] = newQuality;
             GUILayout.Space(ChainContentRightPad);
@@ -1175,17 +1178,18 @@ namespace SashaRX.UnityMeshLab
             if (cancelled) return true;
 
             // Quality slider — live editable so the user can preview the
-            // chosen ratio in the row before committing. Manual layout to
-            // match the existing-LOD slider row (fixed value field width,
-            // matching trailing pad).
+            // chosen ratio in the row before committing. Single-widget
+            // layout (matches the existing-LOD slider row) so the value
+            // field stays inline with the slider track instead of wrapping
+            // to a second line on narrow sidebars.
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
-            float pq = Mathf.Clamp(pending.quality, 0.001f, 1f);
-            float pSlider = GUILayout.HorizontalSlider(pq, 0.001f, 1f,
-                GUILayout.ExpandWidth(true));
-            float pField = EditorGUILayout.DelayedFloatField(pSlider,
-                GUILayout.Width(56));
-            pending.quality = Mathf.Clamp(pField, 0.001f, 1f);
+            float prevFieldW = EditorGUIUtility.fieldWidth;
+            EditorGUIUtility.fieldWidth = 56f;
+            pending.quality = Mathf.Clamp(EditorGUILayout.Slider(
+                Mathf.Clamp(pending.quality, 0.001f, 1f), 0.001f, 1f),
+                0.001f, 1f);
+            EditorGUIUtility.fieldWidth = prevFieldW;
             GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
