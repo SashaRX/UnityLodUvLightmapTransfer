@@ -845,8 +845,18 @@ namespace SashaRX.UnityMeshLab
                     if (DrawLodRow(dummy, chain.rows[i])) { earlyReturn = true; break; }
                     if (DrawPendingInsertsForAfter(dummy, chain.rows[i].renderer))
                     { earlyReturn = true; break; }
-                    int afterLodIndex = chain.rows[i].lodIndex;
-                    if (DrawAddLodButton(dummy, afterLodIndex)) { earlyReturn = true; break; }
+                }
+                // Single insert button at the bottom of the chain. Replaces
+                // the inter-row "+" affordance which broke the visual
+                // rhythm — three rows per LOD plus a "+" gap-row between
+                // every pair turned the hierarchy into a noisy zig-zag.
+                // Inserts after the last existing LOD; mid-chain insert is
+                // out-of-scope for this view (rare operation).
+                if (!earlyReturn && chain.rows.Count > 0)
+                {
+                    int lastLodIndex = chain.rows[chain.rows.Count - 1].lodIndex;
+                    if (DrawAddLodButton(dummy, lastLodIndex))
+                        earlyReturn = true;
                 }
                 if (useChainFoldouts)
                 {
@@ -1028,15 +1038,19 @@ namespace SashaRX.UnityMeshLab
             GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
-            // Row C: full-width quality slider. The previous layout squeezed
-            // it next to the stat on a single line which made the drag
-            // area cramped. A dedicated row gives the slider the whole
-            // chain-block width minus the leading indent.
+            // Row C: full-width quality slider. Manual two-widget layout so
+            // the value field has a fixed width — the auto-sized field that
+            // EditorGUILayout.Slider draws was wider than the action-button
+            // cluster on row A and broke the right-column alignment.
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
             if (!lodQualitySliders.TryGetValue(rid, out var quality))
                 quality = ComputeLodRatioFromTriangles(dummy, lod);
-            float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f);
+            float sliderQ = GUILayout.HorizontalSlider(quality, 0.001f, 1f,
+                GUILayout.ExpandWidth(true));
+            float fieldQ = EditorGUILayout.DelayedFloatField(sliderQ,
+                GUILayout.Width(56));
+            float newQuality = Mathf.Clamp(fieldQ, 0.001f, 1f);
             if (Mathf.Abs(newQuality - quality) > 0.0001f)
                 lodQualitySliders[rid] = newQuality;
             GUILayout.Space(ChainContentRightPad);
@@ -1151,17 +1165,24 @@ namespace SashaRX.UnityMeshLab
                 new GUIContent("✕", "Discard this pending LOD insert."),
                 GUILayout.Width(22), GUILayout.Height(18));
             GUI.backgroundColor = prevBg;
+            GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
             if (cancelled) return true;
 
             // Quality slider — live editable so the user can preview the
-            // chosen ratio in the row before committing.
+            // chosen ratio in the row before committing. Manual layout to
+            // match the existing-LOD slider row (fixed value field width,
+            // matching trailing pad).
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
-            EditorGUILayout.LabelField("ratio", EditorStyles.miniLabel, GUILayout.Width(40));
-            pending.quality = EditorGUILayout.Slider(
-                Mathf.Clamp(pending.quality, 0.001f, 1f), 0.001f, 1f);
+            float pq = Mathf.Clamp(pending.quality, 0.001f, 1f);
+            float pSlider = GUILayout.HorizontalSlider(pq, 0.001f, 1f,
+                GUILayout.ExpandWidth(true));
+            float pField = EditorGUILayout.DelayedFloatField(pSlider,
+                GUILayout.Width(56));
+            pending.quality = Mathf.Clamp(pField, 0.001f, 1f);
+            GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
             return false;
@@ -2125,6 +2146,7 @@ namespace SashaRX.UnityMeshLab
                 }
                 GUI.backgroundColor = prevBg2;
             }
+            GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
             if (nextOpen != open)
