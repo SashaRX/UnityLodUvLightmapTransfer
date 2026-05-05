@@ -754,6 +754,12 @@ namespace SashaRX.UnityMeshLab
 
             EditorGUILayout.Space(4);
 
+            // Compute chains up front so the dummy header summary can include
+            // chain-wide badges in the single-chain case (where no chain
+            // foldout header is rendered to host them).
+            var chains = GroupLodsByChain(dummy);
+            bool useChainFoldouts = chains.Count > 1;
+
             // Tint the helpBox per Dummy via GUI.backgroundColor — green for the
             // implicit root group, blue for explicit Dummy containers. Visually
             // separates multiple Dummy groups in a busy hierarchy.
@@ -773,8 +779,19 @@ namespace SashaRX.UnityMeshLab
             else
                 DrawEditableNameField(dummy.dummy.gameObject, GUILayout.MinWidth(100));
             GUILayout.FlexibleSpace();
-            EditorGUILayout.LabelField($"{dummy.lods.Count} LOD · {dummy.cols.Count} COL",
-                EditorStyles.miniLabel, GUILayout.Width(110));
+            string dummySummary = $"{dummy.lods.Count} LOD · {dummy.cols.Count} COL";
+            // Single-chain dummies don't render a chain foldout header, so
+            // the channel badges have to live on the dummy header instead.
+            // Multi-chain dummies put their badges on each chain header
+            // (different chains can have different channel sets).
+            if (!useChainFoldouts && chains.Count == 1 && chains[0].rows.Count > 0)
+            {
+                string b = ChannelBadges(chains[0].rows[0].mesh);
+                if (!string.IsNullOrEmpty(b))
+                    dummySummary += "  ·  " + b;
+            }
+            EditorGUILayout.LabelField(dummySummary,
+                EditorStyles.miniLabel, GUILayout.Width(170));
             EditorGUILayout.EndHorizontal();
 
             if (!dummy.foldout)
@@ -804,8 +821,6 @@ namespace SashaRX.UnityMeshLab
             // Insert buttons stay slot-scoped: clicking "+ Add LOD after
             // LOD{N}" in any chain queues a single PendingInsert that
             // materialises a new slot across all chains on Apply Changes.
-            var chains = GroupLodsByChain(dummy);
-            bool useChainFoldouts = chains.Count > 1;
             for (int chainIdx = 0; chainIdx < chains.Count; chainIdx++)
             {
                 var chain = chains[chainIdx];
@@ -928,16 +943,20 @@ namespace SashaRX.UnityMeshLab
             bool stale = !markedDelete && !fresh && IsLodRowStale(dummy, lod);
             bool regenerated = fresh && RowWasRegenerated(lod);
 
-            // Row A: status marker + name + actions
+            int verts = lod.mesh != null ? lod.mesh.vertexCount : 0;
+            int tris = lod.mesh != null ? MeshHygieneUtility.GetTriangleCount(lod.mesh) : 0;
+            string stat = $"{verts:N0}v / {tris:N0}t";
+
+            // Row A: marker + name + stats + actions. Stats moved inline so
+            // we drop the dedicated mini-stats row that previously sat
+            // between name and slider — the per-LOD entry collapses from 3
+            // rows to 2. Channel badges (UV0·UV1·N·T …) are now shown once
+            // on the chain header instead of repeated on every LOD row,
+            // since channel layout is consistent across a chain.
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
             DrawStatusMarker(fresh, stale, markedDelete);
 
-            // Prefix the displayed name with a loud text marker as a fallback
-            // when the bg-tint isn't visible enough in the user's Unity theme.
-            // The base name is shown in the chain / dummy header above, so we
-            // strip it here and only show the trailing _LOD{N} (or fallback
-            // to the full name when the leaf doesn't follow the convention).
             string shortName = ShortLeafName(lod.renderer.gameObject.name);
             string nameLabel;
             if (markedDelete)
@@ -957,14 +976,18 @@ namespace SashaRX.UnityMeshLab
             else if (stale)
                 GUI.backgroundColor = new Color(0.95f, 0.78f, 0.30f);   // amber — name out of sync
             // Click on the name pings the renderer's GameObject in the
-            // Hierarchy window so the user can locate it quickly.
+            // Hierarchy window so the user can locate it quickly. Name field
+            // expands to absorb whatever width is left after stats + buttons.
             if (GUILayout.Button(nameLabel,
-                    EditorStyles.textField, GUILayout.MinWidth(120)))
+                    EditorStyles.textField,
+                    GUILayout.MinWidth(70), GUILayout.ExpandWidth(true)))
             {
                 EditorGUIUtility.PingObject(lod.renderer.gameObject);
             }
             GUI.backgroundColor = prevBg;
-            GUILayout.FlexibleSpace();
+
+            EditorGUILayout.LabelField(stat, EditorStyles.miniLabel,
+                GUILayout.Width(78));
 
             // Discard reverts a regenerate-in-place back to the import-time
             // fbxMesh. Only shown for rows whose mesh actually differs from
@@ -1019,27 +1042,8 @@ namespace SashaRX.UnityMeshLab
             GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
-            // Row B: compact mini-stats line — vertex/triangle count on the
-            // left, channel badges on the right. No slider here so the
-            // visual rhythm stays consistent across LODs even when the
-            // slider row gets a wider drag area on row C.
-            int verts = lod.mesh != null ? lod.mesh.vertexCount : 0;
-            int tris = lod.mesh != null ? MeshHygieneUtility.GetTriangleCount(lod.mesh) : 0;
-            string stat = $"{verts:N0}v / {tris:N0}t";
-            string badges = ChannelBadges(lod.mesh);
-
-            EditorGUILayout.BeginHorizontal();
-            GUILayout.Space(HierarchyRowIndent);
-            EditorGUILayout.LabelField(stat, EditorStyles.miniLabel, GUILayout.Width(110));
-            GUILayout.FlexibleSpace();
-            if (!string.IsNullOrEmpty(badges))
-                EditorGUILayout.LabelField(badges, EditorStyles.miniLabel,
-                    GUILayout.Width(140));
-            GUILayout.Space(ChainContentRightPad);
-            EditorGUILayout.EndHorizontal();
-
-            // Row C: full-width quality slider. Manual two-widget layout so
-            // the value field has a fixed width — the auto-sized field that
+            // Row B: slider + value. Manual two-widget layout so the value
+            // field has a fixed width — the auto-sized field that
             // EditorGUILayout.Slider draws was wider than the action-button
             // cluster on row A and broke the right-column alignment.
             EditorGUILayout.BeginHorizontal();
@@ -2119,8 +2123,18 @@ namespace SashaRX.UnityMeshLab
             EditorGUILayout.LabelField(chain.baseName, EditorStyles.boldLabel,
                 GUILayout.MinWidth(80));
             GUILayout.FlexibleSpace();
-            EditorGUILayout.LabelField($"{chain.rows.Count} LOD",
-                EditorStyles.miniLabel, GUILayout.Width(48));
+            // Channel badges sourced from LOD0's mesh — chain-wide channels
+            // are uniform in practice (regenerate preserves them; transfer
+            // copies them), so showing UV0·UV1·N·T once per chain replaces
+            // the per-row repetition we used to render below the name.
+            string chainBadges = chain.rows.Count > 0
+                ? ChannelBadges(chain.rows[0].mesh)
+                : "";
+            string summary = string.IsNullOrEmpty(chainBadges)
+                ? $"{chain.rows.Count} LOD"
+                : $"{chain.rows.Count} LOD  ·  {chainBadges}";
+            EditorGUILayout.LabelField(summary,
+                EditorStyles.miniLabel, GUILayout.Width(140));
             // "→ Dummy" wraps a flat-under-Root chain in a fresh GameObject
             // container named after the chain base. The chain renderers get
             // re-parented under it; LODGroup references stay intact since
