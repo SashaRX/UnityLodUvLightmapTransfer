@@ -901,6 +901,11 @@ namespace SashaRX.UnityMeshLab
 
         const float HierarchyRowIndent = 10f;
         const float HierarchyDummyIndent = 18f;
+        // Trailing right-margin for rows nested inside a chain helpBox.
+        // The helpBox border + the left sidebar's vertical scrollbar both
+        // eat width on the right; without an explicit pad sliders / "+"
+        // buttons / etc. spill past the visible rect.
+        const float ChainContentRightPad = 18f;
 
         // Returns true when the operation invalidates the UI for this frame.
         bool DrawLodRow(HierarchyDummy dummy, HierarchyLodRow lod)
@@ -1001,6 +1006,7 @@ namespace SashaRX.UnityMeshLab
                 return true;
             }
             GUI.backgroundColor = prevBg;
+            GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
             // Row B: compact mini-stats line — vertex/triangle count on the
@@ -1019,6 +1025,7 @@ namespace SashaRX.UnityMeshLab
             if (!string.IsNullOrEmpty(badges))
                 EditorGUILayout.LabelField(badges, EditorStyles.miniLabel,
                     GUILayout.Width(140));
+            GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
             // Row C: full-width quality slider. The previous layout squeezed
@@ -1032,6 +1039,7 @@ namespace SashaRX.UnityMeshLab
             float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f);
             if (Mathf.Abs(newQuality - quality) > 0.0001f)
                 lodQualitySliders[rid] = newQuality;
+            GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
             return false;
@@ -1055,8 +1063,9 @@ namespace SashaRX.UnityMeshLab
             EditorGUILayout.BeginHorizontal();
             // Inset from the chain helpBox edge so the rule + "+" button
             // never collide with the box border (which would clip the
-            // button's right side).
-            GUILayout.Space(6);
+            // button's right side, especially when the left sidebar's
+            // vertical scrollbar appears and eats ~14 px on the right).
+            GUILayout.Space(HierarchyRowIndent);
             // Left rule.
             var leftRule = GUILayoutUtility.GetRect(0, 1, GUILayout.Height(btnH),
                 GUILayout.ExpandWidth(true));
@@ -1079,7 +1088,7 @@ namespace SashaRX.UnityMeshLab
                 EditorGUI.DrawRect(new Rect(rightRule.x + 4, rightRule.y + btnH * 0.5f,
                     Mathf.Max(0, rightRule.width - 8), 1),
                     new Color(0.4f, 0.4f, 0.4f, 0.7f));
-            GUILayout.Space(6);
+            GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
             if (clicked)
