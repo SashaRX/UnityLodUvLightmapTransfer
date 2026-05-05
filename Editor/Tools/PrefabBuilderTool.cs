@@ -896,25 +896,37 @@ namespace SashaRX.UnityMeshLab
                 }
             }
 
-            // COL rows (different color tint). Visually offset from the
-            // chain block above with a real gap + a strong divider — the
-            // previous 2 px space + 50 %-alpha green line was invisible
-            // against the dummy helpBox tint, so the COL row appeared to
-            // sit flush against the "+" button below the last LOD.
+            // COL rows live in their own tinted helpBox so they sit at the
+            // same indent / right-pad as the chain blocks above. Wrapping
+            // the section gives a visible border (separator from the last
+            // LOD's "+" insert button) plus consistent left/right padding
+            // — without the box, COL rows spread to the dummy helpBox
+            // edges and the ✕ button ends up ~20 px right of the LOD ✕
+            // cluster.
             if (dummy.cols.Count > 0)
             {
-                EditorGUILayout.Space(6);
-                var colSep = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
-                if (Event.current.type == EventType.Repaint)
-                    EditorGUI.DrawRect(colSep, new Color(0.18f, 0.18f, 0.18f, 0.85f));
                 EditorGUILayout.Space(4);
+                var prevColBg = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(0.65f, 0.95f, 0.75f);  // soft mint
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                GUI.backgroundColor = prevColBg;
+
+                bool colEarly = false;
                 for (int i = 0; i < dummy.cols.Count; i++)
                 {
+                    if (i > 0) DrawRowDivider();
                     if (DrawColRow(dummy, dummy.cols[i], i, dummy.cols.Count))
                     {
-                        EditorGUILayout.EndVertical();
-                        return;
+                        colEarly = true;
+                        break;
                     }
+                }
+
+                EditorGUILayout.EndVertical();
+                if (colEarly)
+                {
+                    EditorGUILayout.EndVertical();  // dummy helpBox
+                    return;
                 }
             }
 
@@ -1287,10 +1299,12 @@ namespace SashaRX.UnityMeshLab
             {
                 DeleteCol(dummy, col);
                 GUI.backgroundColor = prevBg;
+                GUILayout.Space(ChainContentRightPad);
                 EditorGUILayout.EndHorizontal();
                 return true;
             }
             GUI.backgroundColor = prevBg;
+            GUILayout.Space(ChainContentRightPad);
             EditorGUILayout.EndHorizontal();
 
             return false;
