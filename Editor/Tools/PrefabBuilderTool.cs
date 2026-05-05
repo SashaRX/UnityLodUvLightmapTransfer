@@ -550,7 +550,58 @@ namespace SashaRX.UnityMeshLab
                 if (hierarchyDummies == null) break;
             }
 
+            DrawPendingAddDummyPlaceholders();
             DrawAddDummyButton();
+        }
+
+        // Render a placeholder block for each queued Add-Dummy entry so the
+        // user can SEE what they've stacked before clicking Apply Changes.
+        // Click ✕ on a placeholder to remove it from the queue.
+        void DrawPendingAddDummyPlaceholders()
+        {
+            if (pendingAddDummies == null || pendingAddDummies.Count == 0) return;
+            for (int i = 0; i < pendingAddDummies.Count; i++)
+            {
+                var pending = pendingAddDummies[i];
+                if (pending == null) continue;
+
+                EditorGUILayout.Space(4);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(HierarchyDummyIndent);
+
+                var prevBg = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(0.80f, 0.55f, 1.0f);
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                GUI.backgroundColor = prevBg;
+
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField($"⋯ PENDING DUMMY  {pending.name}",
+                    EditorStyles.boldLabel);
+                GUILayout.FlexibleSpace();
+                GUI.backgroundColor = new Color(0.90f, 0.30f, 0.30f);
+                if (GUILayout.Button(new GUIContent("✕",
+                        "Discard this pending Dummy creation."),
+                        EditorStyles.miniButton,
+                        GUILayout.Width(22), GUILayout.Height(16)))
+                {
+                    pendingAddDummies.RemoveAt(i);
+                    GUI.backgroundColor = prevBg;
+                    EditorGUILayout.EndHorizontal();
+                    EditorGUILayout.EndVertical();
+                    EditorGUILayout.EndHorizontal();
+                    requestRepaint?.Invoke();
+                    return;
+                }
+                GUI.backgroundColor = prevBg;
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUILayout.LabelField(
+                    "Empty container will be created on Apply Changes.",
+                    EditorStyles.miniLabel);
+
+                EditorGUILayout.EndVertical();
+                EditorGUILayout.EndHorizontal();
+            }
         }
 
         // Queue an empty Dummy GameObject creation. The actual GameObject
@@ -952,9 +1003,10 @@ namespace SashaRX.UnityMeshLab
             GUI.backgroundColor = prevBg;
             EditorGUILayout.EndHorizontal();
 
-            // Row B: compact stat + slider + badges (one line). Replaces the
-            // earlier two-line "stat / badges" + "LOD slider" layout — same
-            // controls in half the vertical space so chains read tighter.
+            // Row B: compact mini-stats line — vertex/triangle count on the
+            // left, channel badges on the right. No slider here so the
+            // visual rhythm stays consistent across LODs even when the
+            // slider row gets a wider drag area on row C.
             int verts = lod.mesh != null ? lod.mesh.vertexCount : 0;
             int tris = lod.mesh != null ? MeshHygieneUtility.GetTriangleCount(lod.mesh) : 0;
             string stat = $"{verts:N0}v / {tris:N0}t";
@@ -963,13 +1015,23 @@ namespace SashaRX.UnityMeshLab
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyRowIndent);
             EditorGUILayout.LabelField(stat, EditorStyles.miniLabel, GUILayout.Width(110));
+            GUILayout.FlexibleSpace();
+            if (!string.IsNullOrEmpty(badges))
+                EditorGUILayout.LabelField(badges, EditorStyles.miniLabel,
+                    GUILayout.Width(140));
+            EditorGUILayout.EndHorizontal();
+
+            // Row C: full-width quality slider. The previous layout squeezed
+            // it next to the stat on a single line which made the drag
+            // area cramped. A dedicated row gives the slider the whole
+            // chain-block width minus the leading indent.
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(HierarchyRowIndent);
             if (!lodQualitySliders.TryGetValue(rid, out var quality))
                 quality = ComputeLodRatioFromTriangles(dummy, lod);
-            float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f, GUILayout.MinWidth(80));
+            float newQuality = EditorGUILayout.Slider(quality, 0.001f, 1f);
             if (Mathf.Abs(newQuality - quality) > 0.0001f)
                 lodQualitySliders[rid] = newQuality;
-            if (!string.IsNullOrEmpty(badges))
-                EditorGUILayout.LabelField(badges, EditorStyles.miniLabel, GUILayout.Width(140));
             EditorGUILayout.EndHorizontal();
 
             return false;
@@ -991,6 +1053,10 @@ namespace SashaRX.UnityMeshLab
                 : $"Insert LOD after LOD{afterLodIndex} (queued; commits on Apply Changes).";
 
             EditorGUILayout.BeginHorizontal();
+            // Inset from the chain helpBox edge so the rule + "+" button
+            // never collide with the box border (which would clip the
+            // button's right side).
+            GUILayout.Space(6);
             // Left rule.
             var leftRule = GUILayoutUtility.GetRect(0, 1, GUILayout.Height(btnH),
                 GUILayout.ExpandWidth(true));
@@ -1013,6 +1079,7 @@ namespace SashaRX.UnityMeshLab
                 EditorGUI.DrawRect(new Rect(rightRule.x + 4, rightRule.y + btnH * 0.5f,
                     Mathf.Max(0, rightRule.width - 8), 1),
                     new Color(0.4f, 0.4f, 0.4f, 0.7f));
+            GUILayout.Space(6);
             EditorGUILayout.EndHorizontal();
 
             if (clicked)
