@@ -114,8 +114,26 @@ namespace SashaRX.UnityMeshLab
             public Renderer afterRenderer;
             public float quality;              // simplification target ratio chosen by the user
         }
+        // Pending Wrap-chain-in-Dummy: captures the chain base name + the
+        // renderers that should be reparented into the new Dummy when the
+        // user clicks Apply Changes. Kept as a queue so the user can stack
+        // multiple wraps before committing, and cancel any queued wrap by
+        // clicking the chain action a second time.
+        sealed class PendingWrapChain
+        {
+            public string baseName;
+            public List<Renderer> renderers;
+        }
+        // Pending Add-empty-Dummy: just a name. Apply Changes creates the
+        // GameObject under Root.
+        sealed class PendingAddDummy
+        {
+            public string name;
+        }
         List<PendingInsert> pendingInserts;
         HashSet<int> pendingDeleteRendererIds;
+        List<PendingWrapChain> pendingWrapChains;
+        List<PendingAddDummy> pendingAddDummies;
         // Per-renderer backup of the mesh before the FIRST regenerate this
         // session. Used by RowWasRegenerated / DiscardRegenerate so the
         // affordance survives ctx.Refresh (which would otherwise rewrite
@@ -205,6 +223,8 @@ namespace SashaRX.UnityMeshLab
             freshRendererIds = new HashSet<int>();
             pendingInserts = new List<PendingInsert>();
             pendingDeleteRendererIds = new HashSet<int>();
+            pendingWrapChains = new List<PendingWrapChain>();
+            pendingAddDummies = new List<PendingAddDummy>();
             regenBackupMeshes = new Dictionary<int, Mesh>();
             collapsedChains = new HashSet<string>();
         }
@@ -235,6 +255,8 @@ namespace SashaRX.UnityMeshLab
                 freshRendererIds?.Clear();
                 pendingInserts?.Clear();
                 pendingDeleteRendererIds?.Clear();
+                pendingWrapChains?.Clear();
+                pendingAddDummies?.Clear();
                 regenBackupMeshes?.Clear();
                 freshTrackedLodGroup = ctx?.LodGroup;
             }
@@ -531,97 +553,99 @@ namespace SashaRX.UnityMeshLab
             DrawAddDummyButton();
         }
 
-        // Spawn an empty Dummy GameObject under Root. The user can then
-        // rename it via the Apply Changes flow and populate it with LODs
-        // by either dragging meshes in via Unity's Inspector or clicking
-        // "+ Add LOD" inside the empty block (which seeds from any other
-        // dummy's LOD0 as a starting point).
+        // Queue an empty Dummy GameObject creation. The actual GameObject
+        // lands on Apply Changes — until then nothing in the scene
+        // changes; the queued count reads on the button label so the user
+        // can see how many they've stacked.
         void DrawAddDummyButton()
         {
             EditorGUILayout.Space(4);
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(HierarchyDummyIndent);
             var bgc = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.55f, 0.85f, 0.55f);
+            int pendingCount = pendingAddDummies?.Count ?? 0;
+            GUI.backgroundColor = pendingCount > 0
+                ? new Color(0.95f, 0.65f, 0.20f)  // amber — has queued
+                : new Color(0.55f, 0.85f, 0.55f); // green — idle
+            string label = pendingCount > 0
+                ? $"+ Add Dummy group ({pendingCount} queued)"
+                : "+ Add Dummy group";
             if (GUILayout.Button(
-                    new GUIContent("+ Add Dummy group",
-                        "Create a new empty container under Root. Drop meshes into it via Unity's Inspector, "
-                        + "or click + Add LOD inside the new block to seed it from another dummy's LOD0."),
+                    new GUIContent(label,
+                        "Queue a new empty container under Root. Click multiple times to queue more. "
+                        + "Created on Apply Changes; nothing in the scene changes until you click that. "
+                        + "After commit, drop meshes into the dummy via Unity's Inspector or click "
+                        + "+ Add LOD inside the new block."),
                     GUILayout.Height(20)))
-                AddNewEmptyDummy();
+                EnqueueAddEmptyDummy();
             GUI.backgroundColor = bgc;
             EditorGUILayout.EndHorizontal();
         }
 
-        // Wrap a flat-under-Root chain into a new Dummy GameObject. The chain
-        // renderers get reparented under the new container; LODGroup
-        // references stay intact since they track the Renderer component,
-        // not its parent. Useful when a flat prefab has multiple chains
-        // (Metal / Wood) that the user wants to organise into separate
-        // sub-folders.
-        void WrapChainInDummy(HierarchyChain chain)
+        // ── Pending wrap / add Dummy queue helpers ──
+        // Both operations are deferred until Apply Changes — clicking the
+        // chain "→ Dummy" or the "+ Add Dummy group" button only enqueues
+        // the action; the scene stays untouched until commit.
+
+        bool IsChainWrapPending(HierarchyChain chain)
         {
-            if (ctx?.LodGroup == null || chain == null || chain.rows.Count == 0) return;
-            var root = ctx.LodGroup.transform;
+            if (pendingWrapChains == null || chain == null) return false;
+            foreach (var p in pendingWrapChains)
+                if (p != null && string.Equals(p.baseName, chain.baseName, System.StringComparison.Ordinal))
+                    return true;
+            return false;
+        }
 
-            Undo.SetCurrentGroupName("Prefab Builder: Wrap chain in Dummy");
-            int undoGroup = Undo.GetCurrentGroup();
-
-            // Pick a name. Prefer the chain base; if it would collide with
-            // an existing child of root, suffix with _N.
-            string dummyName = chain.baseName;
-            if (root.Find(dummyName) != null)
+        void ToggleChainWrapPending(HierarchyChain chain)
+        {
+            if (pendingWrapChains == null) pendingWrapChains = new List<PendingWrapChain>();
+            for (int i = 0; i < pendingWrapChains.Count; i++)
             {
-                int n = 1;
-                while (root.Find($"{dummyName}_{n}") != null) n++;
-                dummyName = $"{dummyName}_{n}";
+                var p = pendingWrapChains[i];
+                if (p != null && string.Equals(p.baseName, chain.baseName, System.StringComparison.Ordinal))
+                {
+                    pendingWrapChains.RemoveAt(i);
+                    requestRepaint?.Invoke();
+                    return;
+                }
             }
-            var newDummy = new GameObject(dummyName);
-            Undo.RegisterCreatedObjectUndo(newDummy, "Wrap chain in Dummy");
-            newDummy.transform.SetParent(root, false);
-
-            // Reparent all chain renderer GameObjects under the new dummy.
+            // Capture renderer references at queue time so the commit step
+            // can reparent them even after the dummy view is rebuilt.
+            var renderers = new List<Renderer>();
             foreach (var lod in chain.rows)
+                if (lod?.renderer != null) renderers.Add(lod.renderer);
+            pendingWrapChains.Add(new PendingWrapChain
             {
-                if (lod?.renderer == null) continue;
-                Undo.SetTransformParent(lod.renderer.transform,
-                    newDummy.transform, "Wrap LOD into Dummy");
-            }
-
-            Undo.CollapseUndoOperations(undoGroup);
-            buildIntent |= FbxExportIntent.Hierarchy;
-
-            UvtLog.Info($"[LightmapUV] Wrapped chain '{chain.baseName}' in Dummy '{dummyName}' "
-                + $"({chain.rows.Count} LOD).");
-
-            hierarchyDummies = null;
+                baseName  = chain.baseName,
+                renderers = renderers,
+            });
             requestRepaint?.Invoke();
         }
 
-        void AddNewEmptyDummy()
+        void EnqueueAddEmptyDummy()
         {
-            if (ctx?.LodGroup == null) return;
-            var root = ctx.LodGroup.transform;
-
-            Undo.SetCurrentGroupName("Prefab Builder: Add Dummy");
-            int undoGroup = Undo.GetCurrentGroup();
-
-            // Pick a fresh, non-colliding name.
+            if (pendingAddDummies == null) pendingAddDummies = new List<PendingAddDummy>();
+            // Pick a fresh placeholder name that won't collide with existing
+            // children OR with already-queued pending adds. The user can
+            // rename it via Apply Changes after the GameObject lands.
+            var root = ctx?.LodGroup != null ? ctx.LodGroup.transform : null;
             int idx = 1;
             string name;
-            do { name = $"Dummy_{idx++}"; }
-            while (root.Find(name) != null);
-
-            var go = new GameObject(name);
-            Undo.RegisterCreatedObjectUndo(go, "Add Dummy");
-            go.transform.SetParent(root, false);
-
-            Undo.CollapseUndoOperations(undoGroup);
-            buildIntent |= FbxExportIntent.Hierarchy;
-
-            UvtLog.Info($"[LightmapUV] Added empty Dummy '{name}' under '{root.name}'.");
-
-            hierarchyDummies = null;
+            while (true)
+            {
+                name = $"Dummy_{idx}";
+                bool collides = false;
+                if (root != null && root.Find(name) != null) collides = true;
+                else
+                {
+                    foreach (var p in pendingAddDummies)
+                        if (p != null && string.Equals(p.name, name, System.StringComparison.Ordinal))
+                        { collides = true; break; }
+                }
+                if (!collides) break;
+                idx++;
+            }
+            pendingAddDummies.Add(new PendingAddDummy { name = name });
             requestRepaint?.Invoke();
         }
 
@@ -641,7 +665,9 @@ namespace SashaRX.UnityMeshLab
             int pendingTotal =
                 (pendingNames?.Count ?? 0)
                 + (pendingInserts?.Count ?? 0)
-                + (pendingDeleteRendererIds?.Count ?? 0);
+                + (pendingDeleteRendererIds?.Count ?? 0)
+                + (pendingWrapChains?.Count ?? 0)
+                + (pendingAddDummies?.Count ?? 0);
             bool hasAny = pendingTotal > 0 || HasAnyStaleLeafName();
             var bgc = GUI.backgroundColor;
             GUI.backgroundColor = hasAny
@@ -1401,18 +1427,26 @@ namespace SashaRX.UnityMeshLab
                 pendingNames.Clear();
             }
 
-            // 2) Pending deletes — process highest LOD index first to keep
+            // 2) Wrap chains and add empty Dummies BEFORE inserts/deletes
+            //    so insert anchors that reference the wrapped renderers
+            //    still resolve to the right slot afterwards.
+            if (pendingWrapChains != null && pendingWrapChains.Count > 0)
+                CommitPendingWrapChains();
+            if (pendingAddDummies != null && pendingAddDummies.Count > 0)
+                CommitPendingAddDummies();
+
+            // 3) Pending deletes — process highest LOD index first to keep
             //    earlier indices stable during the loop.
             if (pendingDeleteRendererIds != null && pendingDeleteRendererIds.Count > 0)
                 CommitPendingDeletes();
 
-            // 3) Pending inserts — recompute target slot index from each
+            // 4) Pending inserts — recompute target slot index from each
             //    captured afterRenderer's CURRENT slot, so inserts after
             //    deletions land at the right place.
             if (pendingInserts != null && pendingInserts.Count > 0)
                 CommitPendingInserts();
 
-            // 4) Leaf rename rebuild.
+            // 5) Leaf rename rebuild.
             hierarchyDummies = null;
             RebuildLeafNamesNoUndoGroup();
 
@@ -1422,6 +1456,83 @@ namespace SashaRX.UnityMeshLab
             ctx.Refresh(ctx.LodGroup);
             hierarchyDummies = null;
             requestRepaint?.Invoke();
+        }
+
+        // If the LODGroup root is part of a prefab instance, fully unpack it
+        // — otherwise SetTransformParent on prefab-instance children is a
+        // no-op and structural changes silently fail (which is exactly the
+        // bug that surfaced when "→ Dummy" wrapped without reparenting).
+        void EnsurePrefabUnpackedForStructuralEdit()
+        {
+            if (ctx?.LodGroup == null) return;
+            var lgGo = ctx.LodGroup.gameObject;
+            if (PrefabUtility.IsPartOfPrefabInstance(lgGo))
+            {
+                var outer = PrefabUtility.GetOutermostPrefabInstanceRoot(lgGo);
+                if (outer != null)
+                {
+                    UvtLog.Info($"[LightmapUV] Unpacking prefab instance '{outer.name}' before structural edit.");
+                    PrefabUtility.UnpackPrefabInstance(outer,
+                        PrefabUnpackMode.Completely, InteractionMode.AutomatedAction);
+                }
+            }
+        }
+
+        void CommitPendingWrapChains()
+        {
+            if (ctx?.LodGroup == null || pendingWrapChains == null) return;
+            EnsurePrefabUnpackedForStructuralEdit();
+            var root = ctx.LodGroup.transform;
+            foreach (var pending in pendingWrapChains)
+            {
+                if (pending == null || pending.renderers == null || pending.renderers.Count == 0) continue;
+                string dummyName = pending.baseName;
+                if (root.Find(dummyName) != null)
+                {
+                    int n = 1;
+                    while (root.Find($"{dummyName}_{n}") != null) n++;
+                    dummyName = $"{dummyName}_{n}";
+                }
+                var newDummy = new GameObject(dummyName);
+                Undo.RegisterCreatedObjectUndo(newDummy, "Wrap chain in Dummy");
+                newDummy.transform.SetParent(root, false);
+                int reparented = 0;
+                foreach (var r in pending.renderers)
+                {
+                    if (r == null) continue;
+                    Undo.SetTransformParent(r.transform, newDummy.transform, "Wrap LOD into Dummy");
+                    reparented++;
+                }
+                UvtLog.Info($"[LightmapUV] Wrapped chain '{pending.baseName}' in Dummy '{dummyName}' "
+                    + $"({reparented} renderer(s) reparented).");
+            }
+            pendingWrapChains.Clear();
+            buildIntent |= FbxExportIntent.Hierarchy;
+        }
+
+        void CommitPendingAddDummies()
+        {
+            if (ctx?.LodGroup == null || pendingAddDummies == null) return;
+            EnsurePrefabUnpackedForStructuralEdit();
+            var root = ctx.LodGroup.transform;
+            foreach (var pending in pendingAddDummies)
+            {
+                if (pending == null) continue;
+                string name = pending.name;
+                if (string.IsNullOrEmpty(name)) name = "Dummy";
+                if (root.Find(name) != null)
+                {
+                    int n = 1;
+                    while (root.Find($"{name}_{n}") != null) n++;
+                    name = $"{name}_{n}";
+                }
+                var go = new GameObject(name);
+                Undo.RegisterCreatedObjectUndo(go, "Add Dummy");
+                go.transform.SetParent(root, false);
+                UvtLog.Info($"[LightmapUV] Added empty Dummy '{name}' under '{root.name}'.");
+            }
+            pendingAddDummies.Clear();
+            buildIntent |= FbxExportIntent.Hierarchy;
         }
 
         void CommitPendingDeletes()
@@ -1936,13 +2047,20 @@ namespace SashaRX.UnityMeshLab
             // nested chains skip the affordance).
             if (dummy.isRoot)
             {
+                bool wrapPending = IsChainWrapPending(chain);
                 var prevBg2 = GUI.backgroundColor;
-                GUI.backgroundColor = new Color(0.55f, 0.85f, 0.55f);
-                if (GUILayout.Button(new GUIContent("→ Dummy",
-                        $"Wrap '{chain.baseName}' chain in a new Dummy GameObject under Root."),
-                        EditorStyles.miniButton, GUILayout.Width(64)))
+                GUI.backgroundColor = wrapPending
+                    ? new Color(0.95f, 0.65f, 0.20f)   // amber — queued
+                    : new Color(0.55f, 0.85f, 0.55f);  // green — idle
+                string label = wrapPending ? "✓ Queued" : "→ Dummy";
+                string tooltip = wrapPending
+                    ? $"Wrap '{chain.baseName}' chain queued. Click to cancel before Apply Changes."
+                    : $"Queue: wrap '{chain.baseName}' chain in a new Dummy GameObject under Root. "
+                        + "Applied on Apply Changes.";
+                if (GUILayout.Button(new GUIContent(label, tooltip),
+                        EditorStyles.miniButton, GUILayout.Width(74)))
                 {
-                    WrapChainInDummy(chain);
+                    ToggleChainWrapPending(chain);
                 }
                 GUI.backgroundColor = prevBg2;
             }
